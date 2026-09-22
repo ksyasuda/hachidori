@@ -26,10 +26,6 @@
       host?.setAttribute("data-subminer-yomitan-popup-host", "true");
       host?.setAttribute("data-subminer-yomitan-popup-visible", String(visible));
     },
-    attention(host, visible) {
-      this.markHost(host, visible);
-      emit(visible ? "yomitan-popup-shown" : "yomitan-popup-hidden");
-    },
     lookup() { emit("subminer-yomitan-lookup"); },
     popup(popup) {
       popup.addEventListener("mouseenter", () => emit("yomitan-popup-mouse-enter"));

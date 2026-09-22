@@ -8,20 +8,22 @@ introduction. HoshiDicts remains an unmodified upstream submodule.
 `bun run build:hachidori` verifies the committed engine artifacts and
 copies the extension to `build/hachidori`. The full app build includes this step,
 and Electron packaging puts the result in `resources/hachidori`.
+SubMiner's build enables overlay mode, disables custom JavaScript and removes
+the unsupported `userScripts` permission in that copy. The fork retains the
+upstream browser defaults in its source.
 
 ## Local changes
 
-- `extension/overlay-mode.js` enables embedded host behavior. Custom
-  JavaScript is disabled because Electron does not provide `userScripts`.
-- `extension/subminer-host.js` implements the existing SubMiner popup event and
-  command contract and prioritizes character-name results. `content.js` supplies
-  popup lifecycle and reader actions.
+- `extension/subminer-host.js` supplies popup host attributes, hover and lookup
+  events, reader commands and character-name ranking. SubMiner consumes the
+  native `hachidori-popup-shown` and `hachidori-popup-hidden` attention events
+  directly, including selection drags and pending lookups.
 - `extension/anki-mining.js` marks initial add/overwrite requests for SubMiner's
   AnkiConnect proxy. Later Hachidori pronunciation updates remain unmarked so
   they do not repeat SubMiner media enrichment.
 - `extension/anki.js` sends those private markers only to the exact configured
   SubMiner proxy URL. Direct AnkiConnect requests use standard parameters.
-- `extension/manifest.json` loads the host bridge and drops `userScripts`.
+- `extension/manifest.json` loads the host bridge.
 
 - External dictionary links retain local Anki templates, audio sources, and custom buttons. Dictionary requests use the host; mining and media rendering use SubMiner. Setup uses Hachidori's native link/unlink messages and verifies the live host inventory.
 

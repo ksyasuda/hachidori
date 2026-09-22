@@ -17,8 +17,7 @@
     "extension/vendor/hoshidicts.wasm": "075303bb107a583217db8678ff2b8147b8859b4a58b940f4f4070fd9f6702b41"
   },
   "localChanges": [
-    "Enable overlay mode and disable unsupported userScripts customization.",
-    "Bridge popup state, successful lookups, mouse events and host commands to SubMiner.",
+    "Expose popup host attributes, successful lookups, mouse events and host commands to SubMiner; visibility uses native Hachidori events.",
     "Mark initial Anki adds and overwrites for SubMiner media enrichment; background pronunciation enrichment stays unmarked.",
     "Prioritize SubMiner character glossaries and character-name lookup results in the host popup.",
     "Send private mining metadata only to the exact SubMiner-managed Anki proxy URL; direct AnkiConnect uses standard parameters."

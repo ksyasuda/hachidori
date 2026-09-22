@@ -227,7 +227,7 @@
       || hostAttentionHold > 0 || pendingCandidateLookup?.candidate?.exactSelection === true;
     if (wanted === hostAttentionPublished) return;
     hostAttentionPublished = wanted;
-    globalThis.SubMinerHachidori?.attention(host, wanted);
+    globalThis.SubMinerHachidori?.markHost(host, wanted);
     window.dispatchEvent(new CustomEvent(wanted ? POPUP_SHOWN_EVENT : POPUP_HIDDEN_EVENT));
   }
 
