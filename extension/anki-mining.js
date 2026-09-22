@@ -164,15 +164,16 @@ function describeRequestTerm(request) {
   return typeof expression === "string" && expression.trim() ? `“${expression}”` : "this result";
 }
 
-async function writeAnkiNote(invoke, note, target, fields, duplicateNoteIds) {
+async function writeAnkiNote(invoke, note, target, fields, duplicateNoteIds, subminerEnrich) {
   let noteId;
   if (target) {
-    const reply = await invoke("updateNoteFields", { note: { id: target.noteId, fields }, subminerEnrich: true }, 10_000);
+    const reply = await invoke("updateNoteFields", { note: { id: target.noteId, fields }, subminerEnrich: subminerEnrich !== false }, 10_000);
     if (reply !== null) throw new Error("Anki returned an invalid field-update acknowledgement.");
     noteId = target.noteId;
   } else {
     try {
-      noteId = await invoke("addNote", { note, subminerDuplicateNoteIds: duplicateNoteIds }, 10_000);
+      noteId = await invoke("addNote", { note, subminerDuplicateNoteIds: duplicateNoteIds,
+        ...(subminerEnrich === false ? { subminerEnrich: false } : {}) }, 10_000);
     } catch (error) {
       throw addNoteContext(error, note);
     }
@@ -290,7 +291,9 @@ export function createAnkiMiningService({
         + `${template ? `: its template ${template} produced nothing for ${describeRequestTerm(request)}` : ""}. Anki requires it.`);
     }
     const note = { deckName: current.config.deck, modelName: current.config.model, fields,
-      options: ankiNoteOptions(current.config), tags: [...new Set(current.config.tags)] };
+      options: ankiNoteOptions(current.config), tags: [...new Set([
+        ...current.config.tags, ...(request.subminerEnrich === false ? ["SubMiner::Stats"] : []),
+      ])] };
     return { ...current, note, resources, firstField, invoke: invokeFor(current.config) };
   }
 
@@ -372,7 +375,7 @@ export function createAnkiMiningService({
     }
     let noteId;
     try {
-      noteId = await writeAnkiNote(invoke, note, target, fields, checked.noteIds ?? []);
+      noteId = await writeAnkiNote(invoke, note, target, fields, checked.noteIds ?? [], request.subminerEnrich);
     } catch (error) {
       if (isAnkiDuplicateError(error.message)) {
         await releaseRejected();

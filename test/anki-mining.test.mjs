@@ -60,6 +60,22 @@ function fixture() {
     config: () => config, change(patch) { config = { ...config, ...patch }; } };
 }
 
+test("stats mining opts out of SubMiner enrichment without changing popup requests", async () => {
+  for (const metadata of [{ subminerEnrich: false }, {}]) {
+    const f = fixture();
+    const invoke = f.gateway.invoke;
+    let submitted;
+    f.gateway.invoke = async (action, params) => {
+      if (action === "addNote") submitted = params;
+      return invoke(action, params);
+    };
+    const { configKey } = await f.service.status();
+    assert.equal((await f.service.submit({ expression: "猫", configKey, ...metadata })).state, "added");
+    assert.equal(submitted.subminerEnrich, metadata.subminerEnrich);
+    assert.equal(submitted.note.tags.includes("SubMiner::Stats"), metadata.subminerEnrich === false);
+  }
+});
+
 test("mining readiness shares its short source-backed cache and skips Anki when no model is configured", async () => {
   const f = fixture();
   const [a, b] = await Promise.all([f.service.status(), f.service.status()]);
