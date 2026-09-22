@@ -2346,7 +2346,8 @@ Unlinking restores the kept values with `max(kept, mirrored) + 1` revisions and
 removes the host's `lookupStats:` rows. The local-only `sharing` key holds
 `{ host: { enabled, port, network } | null, client: { address } | null }` and
 neither it nor `sharingLocalState` is part of backups. For an overlay client,
-activation/scanning, source highlighting and popup geometry are composed from
+Anki configuration, pronunciation sources, custom buttons and their legacy links, activation/scanning,
+source highlighting and popup geometry are composed from
 the kept local options. Its private `sharingOptionsVersion` stores the host
 revision and an offset for one increasing live revision; it is also excluded
 from backups. Local-only writes commit the live and kept options together,
@@ -2363,7 +2364,9 @@ welcome view probes this computer once and, when a shared Hachidori answers,
 offers to use it; that link then advances setup to `complete`. See
 [sharing](sharing.md) for use.
 
-Linked Anki mining is split at the browser boundary. The reading browser keeps
+Overlay clients keep Anki discovery, mining and the duplicate index local while
+linked; the host supplies dictionary data. For ordinary linked browsers,
+Anki mining is split at the browser boundary. The reading browser keeps
 `hd_anki_screenshot`/discard and its capture session local, while
 Settings discovery and existing-setup detection, `hd_anki_status`, preflight,
 submit, browse and maturity go to the host. Status, View, preflight, submit and

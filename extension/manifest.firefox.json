@@ -92,6 +92,7 @@
         "anki-content.js",
         "render/glossary.js",
         "render/popup.js",
+        "subminer-host.js",
         "content.js"
       ],
       "css": [

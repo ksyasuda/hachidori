@@ -790,6 +790,7 @@ async function popupReader(page, depth = 0) {
           height: this.getBoundingClientRect().height,
           text: flat(this),
           plain: flat(stripped),
+          headword: expression ? flat(expression) : null,
           images: Array.from(this.querySelectorAll("img"), img => img.getAttribute("src") || ""),
           imageStates: Array.from(this.querySelectorAll(".gloss-image-link"), link => {
             const text = link.querySelector(".gloss-image-link-text");
@@ -6393,10 +6394,13 @@ async function checkAnkiMatureDefinitionBlur({ browser, settings, tab, popup, wa
     const cold = await waitForDefinitionBlur(popup, value => releaseIndex !== null
       && value?.state === "revealed" && value.audioAttempted, 5_000);
     const coldIndex = await readIndex();
+    // Earlier scenarios may leave a snapshot for another Anki configuration.
+    // It must remain ineligible while this configuration's first pull is held.
     check("a cold Anki duplicate index leaves the popup responsive while its first refresh is held",
       coldDefinition?.plain.includes("食べる") && popup.visible(coldDefinition)
         && releaseIndex !== null && cold?.state === "revealed" && cold.audioAttempted
-        && !coldIndex?.snapshot && refreshCalls() === 1,
+        && coldIndex?.attempt && coldIndex.snapshot?.sourceKey !== coldIndex.attempt.sourceKey
+        && refreshCalls() === 1,
       JSON.stringify({ cold, coldIndex, calls }));
     releaseRefresh();
     const initialIndex = await waitForSnapshot(true);
@@ -11487,7 +11491,8 @@ async function main() {
     "clicked-kanji navigation moves and restores keyboard focus",
     genericKanjiState?.focusedClass.includes("gsm-hoshidicts-kanji-back")
       && focusedPointerState?.focusedClass.includes("gsm-hoshidicts-kanji-back")
-      && focusedPointerState?.text === genericKanjiState?.text
+      && focusedPointerState?.headword === genericKanjiState?.headword
+      && focusedPointerState?.text.includes(GENERIC_KANJI_GLOSSARY)
       && restoredTermState?.focusedClass.includes("gsm-hoshidicts-kanji-link"),
     JSON.stringify({ genericKanjiState, focusedPointerState, restoredTermState }),
   );

@@ -143,8 +143,8 @@ test("bare-tag and manual release runs verify and publish the checksummed packag
   assert.match(workflow, /--publish-type DEFAULT_PUBLISH/u);
 });
 
-test("public compatibility copy agrees with the tested manifest minimum", () => {
-  assert.match(read("README.md"), /Chrome-128%2B/u);
+test("upstream compatibility copy agrees with the tested manifest minimum", () => {
+  assert.match(read("UPSTREAM-README.md"), /Chrome-128%2B/u);
   assert.match(read("extension/README.md"), /Chrome 128 or newer/u);
   assert.doesNotMatch(read("docs/chrome-web-store.md"), /Chrome 118 minimum/u);
 });

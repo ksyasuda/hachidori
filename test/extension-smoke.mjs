@@ -136,8 +136,8 @@ function genericPackage(overrides = {}) {
     ...overrides,
   };
 }
-// Where chrome-e2e.mjs already keeps puppeteer-core, so one out-of-repo tree
-// holds every test dependency. HACHIDORI_JSDOM or NODE_PATH override it.
+// Legacy external tooling cache, used after the repository's locked test tooling.
+// HACHIDORI_JSDOM or NODE_PATH override both locations.
 const DEFAULT_JSDOM_TREE = resolve(
   process.env.XDG_CACHE_HOME || resolve(homedir(), ".cache"),
   "hachidori-e2e",
@@ -2957,27 +2957,32 @@ async function sharingTransitionStage() {
     const write = (patch, baseRevision = current().revision) => overlay.send("hd_options_write",
       { baseRevision, options: patch }, "hoshidicts-worker");
     const initial = structuredClone(current());
-    const blockedTemplates = await write({
-      anki: globalThis.HDReaderOptions.normaliseOptions({}).anki,
-    });
-    const local = await write({ hoverEnabled: false, popupWidthPx: 480 });
+    const localAnki = globalThis.HDReaderOptions.normaliseAnki({ templates: [{
+      ...globalThis.HDReaderOptions.DEFAULT_ANKI_TEMPLATE, deck: "Overlay deck", model: "Basic",
+    }] });
+    const savedTemplates = await write({ anki: localAnki });
+    const local = await write({ hoverEnabled: false, popupWidthPx: 480, customButtons: [{
+      id: "overlay-link", type: "link", label: "Overlay link", url: "https://overlay.example/%w",
+    }] });
     const rawHost = { ...overlay.hello.snapshot.options, revision: 11, popupTheme: "dracula", popupWidthPx: 1200 };
     socket.receive({ kind: "storage", changes: { options: rawHost } });
     await until(() => current().popupTheme === "dracula");
     const mirrored = structuredClone(current());
     socket.receive({ kind: "storage", changes: { options: overlay.hello.snapshot.options } });
     await tick();
-    check("a linked overlay keeps activation, highlighting and geometry local through host option batches",
+    check("a linked overlay keeps mining, activation, highlighting and geometry local through host option batches",
       initial.hoverEnabled && initial.lookupMode === "hover" && !initial.sourceHighlightEnabled
         && initial.popupWidthPx === 420 && initial.popupTheme === "light"
-        && blockedTemplates.ok === false
-        && blockedTemplates.error === "The linked Hachidori does not support host-owned Anki mining. Update it and try again."
-        && local.ok && local.options.revision === initial.revision + 1 && socket.requests().length === 0
+        && savedTemplates.ok && savedTemplates.options.anki.deck === "Overlay deck"
+        && savedTemplates.options.revision === initial.revision + 1
+        && local.ok && local.options.revision === savedTemplates.options.revision + 1 && socket.requests().length === 0
+        && mirrored.anki.deck === "Overlay deck"
+        && mirrored.customButtons[0]?.id === "overlay-link" && mirrored.customLinks[0]?.label === "Overlay link"
         && mirrored.popupWidthPx === 480 && !mirrored.hoverEnabled && mirrored.lookupMode === "hover"
         && !mirrored.sourceHighlightEnabled && mirrored.revision === local.options.revision + 1
         && current().revision === mirrored.revision && current().popupTheme === "dracula"
         && overlay.storage.raw.get("sharingLocalState").options.popupWidthPx === 480,
-      JSON.stringify({ initial, blockedTemplates, local, mirrored, current: current() }));
+      JSON.stringify({ initial, savedTemplates, local, mirrored, current: current() }));
 
     async function answerWrite(promise, hostOptions, expectedCount, ok = true) {
       await until(() => socket.requests().length === expectedCount);
@@ -2995,9 +3000,10 @@ async function sharingTransitionStage() {
     const stale = await write({ popupWidthPx: 900 }, initial.revision);
     check("overlay saves translate host revisions, split mixed patches and reject stale local edits",
       shared.request.baseRevision === 11 && shared.reply.ok && shared.reply.options.popupWidthPx === 480
-        && shared.reply.options.revision === 13
+        && shared.reply.options.revision === mirrored.revision + 1
         && mixed.request.baseRevision === 12 && JSON.stringify(mixed.request.options) === JSON.stringify({ popupTheme: "light" })
-        && mixed.reply.ok && mixed.reply.options.popupWidthPx === 520 && mixed.reply.options.revision === 15
+        && mixed.reply.ok && mixed.reply.options.popupWidthPx === 520
+        && mixed.reply.options.revision === shared.reply.options.revision + 2
         && JSON.stringify(current()) === JSON.stringify(afterMixed)
         && stale.ok === false && stale.conflict === true && socket.requests().length === 2,
       JSON.stringify({ shared, mixed, afterMixed, current: current(), stale }));
@@ -9431,13 +9437,13 @@ async function main() {
 
 /* ------------------------------------------------------- renderer integration stage */
 
-// jsdom is not a repo dependency: it lives in the same out-of-repo tree as
-// puppeteer-core, so a checkout carries neither. ESM ignores NODE_PATH, hence
-// resolving through require() before importing.
+// Prefer locked test tooling, while preserving external dependency overrides.
+// ESM ignores NODE_PATH, hence resolving through require() before importing.
 function jsdomSearchPaths() {
   return [
     ...(process.env.HACHIDORI_JSDOM ? [process.env.HACHIDORI_JSDOM] : []),
     ...(process.env.NODE_PATH ? process.env.NODE_PATH.split(":").filter(Boolean) : []),
+    resolve(HERE, "tooling"),
     ROOT,
     HERE,
     DEFAULT_JSDOM_TREE,
