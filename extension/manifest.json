@@ -16,8 +16,7 @@
     "downloads",
     "offscreen",
     "storage",
-    "unlimitedStorage",
-    "userScripts"
+    "unlimitedStorage"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -98,6 +97,7 @@
         "capture-content.js",
         "render/glossary.js",
         "render/popup.js",
+        "subminer-host.js",
         "content.js"
       ],
       "css": [

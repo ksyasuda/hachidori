@@ -164,15 +164,15 @@ function describeRequestTerm(request) {
   return typeof expression === "string" && expression.trim() ? `“${expression}”` : "this result";
 }
 
-async function writeAnkiNote(invoke, note, target, fields) {
+async function writeAnkiNote(invoke, note, target, fields, duplicateNoteIds) {
   let noteId;
   if (target) {
-    const reply = await invoke("updateNoteFields", { note: { id: target.noteId, fields } }, 10_000);
+    const reply = await invoke("updateNoteFields", { note: { id: target.noteId, fields }, subminerEnrich: true }, 10_000);
     if (reply !== null) throw new Error("Anki returned an invalid field-update acknowledgement.");
     noteId = target.noteId;
   } else {
     try {
-      noteId = await invoke("addNote", { note }, 10_000);
+      noteId = await invoke("addNote", { note, subminerDuplicateNoteIds: duplicateNoteIds }, 10_000);
     } catch (error) {
       throw addNoteContext(error, note);
     }
@@ -372,7 +372,7 @@ export function createAnkiMiningService({
     }
     let noteId;
     try {
-      noteId = await writeAnkiNote(invoke, note, target, fields);
+      noteId = await writeAnkiNote(invoke, note, target, fields, checked.noteIds ?? []);
     } catch (error) {
       if (isAnkiDuplicateError(error.message)) {
         await releaseRejected();

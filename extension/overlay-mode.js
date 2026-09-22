@@ -3,7 +3,7 @@
 
 import { BROWSER_KIND, IS_FIREFOX } from "./browser-api.js";
 
-export const OVERLAY_MODE = false;
+export const OVERLAY_MODE = true;
 export const HOST_BROWSER = OVERLAY_MODE ? "electron" : BROWSER_KIND;
 
 // Electron's extension host deliberately exposes less of Chrome than a normal
@@ -18,7 +18,7 @@ export const HOST_CAPABILITIES = Object.freeze({
   // projection.
   customLinks: true,
   // Chrome MV3 `userScripts` registration; Firefox MV2 has no equivalent yet.
-  customJavaScript: !IS_FIREFOX,
+  customJavaScript: false,
   linkButtons: true,
   externalLinkHost: OVERLAY_MODE,
   localFileAccessPrompt: !OVERLAY_MODE,

@@ -227,6 +227,7 @@
       || hostAttentionHold > 0 || pendingCandidateLookup?.candidate?.exactSelection === true;
     if (wanted === hostAttentionPublished) return;
     hostAttentionPublished = wanted;
+    globalThis.SubMinerHachidori?.attention(host, wanted);
     window.dispatchEvent(new CustomEvent(wanted ? POPUP_SHOWN_EVENT : POPUP_HIDDEN_EVENT));
   }
 
@@ -1104,6 +1105,7 @@
     audio?.dispose();
     mining?.retire();
     disposed = true;
+    disconnectSubminer?.();
     selectionDragActive = false;
     dragSelection = null;
     cancelPopupLayout();
@@ -1848,6 +1850,7 @@
 
   function buildUi(styles) {
     host = document.createElement(HOST_TAG);
+    globalThis.SubMinerHachidori?.markHost(host, hostAttentionPublished);
     // Inline !important is the only declaration a page cannot override, and the
     // host must stay a zero-sized, non-interactive fixed anchor whatever the
     // page's CSS says. `all: initial` also stops inherited page typography from
@@ -1905,6 +1908,7 @@
     popup.className = "gsm-hoshidicts-popup";
     popup.dataset.hoshidictsDepth = String(level.depth);
     popup.hidden = true;
+    globalThis.SubMinerHachidori?.popup(popup);
     popup.addEventListener("focusin", () => {
       cancelCandidateScan();
       clearHideTimer();
@@ -2672,6 +2676,7 @@
       focusPopupControl(renderOptions.onClose ? ".gsm-hoshidicts-popup-close" : ".gsm-hoshidicts-kanji-back", level);
     }
     acceptLookupStatistics(results, request, level);
+    if (!replayOptions) globalThis.SubMinerHachidori?.lookup();
     return true;
   }
 
@@ -2738,9 +2743,11 @@
     }
     if (level === rootLevel) rootLevel.capturePin = capturePin;
     noteGeneration(reply.generation, level);
-    const results = (Array.isArray(reply.results) ? reply.results : [])
+    let results = (Array.isArray(reply.results) ? reply.results : [])
       .filter((result) => result && result.term
         && (!request.exactSelection || result.matched === request.payload.text));
+    results = globalThis.SubMinerHachidori?.prioritizeCharacterResults(
+      results, request.payload.options, dictionaryPresentation()) ?? results;
     if (results.length === 0) {
       return handleTermMiss(request, reply.dictionaryCount, token, level, replayOptions);
     }
@@ -4033,5 +4040,24 @@
     refreshPageZoom();
   }
 
+  let subminerAudioSource = "";
+  const disconnectSubminer = globalThis.SubMinerHachidori?.connect({
+    hide,
+    clear() { hide(); highlighter?.clearAll(); },
+    action(action) { runKeybindAction({ action }, new KeyboardEvent("keydown")); },
+    keydown: onKeyDown,
+    scroll(deltaX, deltaY) {
+      levels.findLast(level => level.popup && !level.popup.hidden)?.view?.scrollElement.scrollBy({ left: deltaX, top: deltaY });
+    },
+    cycleAudio(direction) {
+      const sources = options.audioSources.filter(source => source.enabled);
+      if (!sources.length) return;
+      const previous = sources.findIndex(source => source.id === subminerAudioSource);
+      const index = previous < 0 ? (direction === 1 ? 0 : sources.length - 1)
+        : (previous + direction + sources.length) % sources.length;
+      subminerAudioSource = sources[index].id;
+      runKeybindAction({ action: "playAudioFromSource", argument: subminerAudioSource }, new KeyboardEvent("keydown"));
+    },
+  });
   start();
 }());

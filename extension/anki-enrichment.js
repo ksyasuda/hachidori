@@ -16,6 +16,7 @@ function pronunciationFields(incoming, current, appliedFields, existingFields, w
 
 export async function enrichAnkiNote(context, { audio, render, store }) {
   const { request, invoke, noteId, appliedFields, existingFields, resolved, resources } = context;
+  if (resources.pronunciationWarning) return [resources.pronunciationWarning];
   const warnings = [];
   const confirmed = new Set(Array.isArray(resources.confirmedMedia) ? resources.confirmedMedia : []);
   async function ensure(file, kind) {

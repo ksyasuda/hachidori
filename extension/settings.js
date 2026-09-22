@@ -413,7 +413,7 @@ function updateAnkiSettings() {
   });
   ankiController.render();
   localAudioSetup ??= createLocalAudioSetup({ document, readSources: () => options.audioSources,
-    isLinked: () => sharingLinkedAddress !== null,
+    isLinked: () => sharingLinkedAddress !== null && !OVERLAY_MODE,
     editSources: sources => { options.audioSources = sources; writeOptions(); },
   });
   localAudioSetup.render();

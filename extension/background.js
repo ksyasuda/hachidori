@@ -2002,7 +2002,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
 
 async function applyAnkiIndexRole() {
   const index = getAnkiDuplicateIndex();
-  if (sharingLinked) await index.suspend();
+  if (sharingLinked && !OVERLAY_MODE) await index.suspend();
   else await index.resume();
 }
 
@@ -2519,7 +2519,7 @@ async function handleAnkiRequest(message, sender) {
   // configuration and finish after routing has moved to another.
   await sharingTransitionTail;
   return trackAnkiOperation(async () => {
-    if (sharingLinked) {
+    if (sharingLinked && !OVERLAY_MODE) {
       // The reading browser alone can capture or discard its viewport bytes.
       if (["hd_anki_screenshot", "hd_anki_screenshot_discard"].includes(message.type)) {
         return answerAnkiRequest(message, sender);
@@ -2551,7 +2551,8 @@ async function handleAnkiRequest(message, sender) {
 }
 
 async function sendAnkiRequest(target, fields) {
-  const reply = await relay({ ...fields, target, requestId: `anki-${crypto.randomUUID()}` });
+  const message = { ...fields, target, requestId: `anki-${crypto.randomUUID()}` };
+  const reply = target === TARGET ? await relayEngineRequest(message) : await relay(message);
   if (!reply?.ok) throw new Error(reply?.error || "Anki preparation did not complete.");
   return reply;
 }
@@ -2871,7 +2872,7 @@ async function handleWorkerRequest(message, sender) {
   }
   await sharingReady;
   if (["hd_anki_discover", "hd_anki_setup", "hd_setup_anki"].includes(type)) await sharingTransitionTail;
-  if (sharingLinked && ["hd_anki_discover", "hd_anki_setup"].includes(type)) {
+  if (sharingLinked && !OVERLAY_MODE && ["hd_anki_discover", "hd_anki_setup"].includes(type)) {
     try {
       if (!ankiSettingsSender(sender)) {
         throw new Error(`${type === "hd_anki_setup" ? "Anki setup discovery" : "Anki discovery"} is available only from Hachidori Settings`);
