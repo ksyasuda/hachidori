@@ -431,17 +431,42 @@
     } catch {
       return range;
     }
-    for (const rect of probe.getClientRects()) {
+    if (pointInRects(probe.getClientRects(), clientX, clientY)) {
+      range.setStart(node, offset - 1);
+      range.collapse(true);
+    }
+    return range;
+  }
+
+  function pointInRects(rects, clientX, clientY) {
+    for (const rect of rects) {
       if (
         clientX >= rect.left && clientX <= rect.right &&
         clientY >= rect.top && clientY <= rect.bottom
       ) {
-        range.setStart(node, offset - 1);
-        range.collapse(true);
-        return range;
+        return true;
       }
     }
-    return range;
+    return false;
+  }
+
+  /**
+   * Whether the pointer is over the glyph an aligned caret range starts at. The
+   * caret APIs snap to the nearest boundary anywhere in the line box, so a
+   * pointer beside a short line in a wide block (a centred subtitle, the empty
+   * end of a paragraph) would otherwise look up the line's first or last word.
+   */
+  function pointOnGlyph(range, clientX, clientY) {
+    const node = range.startContainer;
+    const text = node.nodeValue || "";
+    const offset = range.startOffset;
+    if (node.nodeType !== Node.TEXT_NODE || offset >= text.length) {
+      return false;
+    }
+    const probe = document.createRange();
+    probe.setStart(node, offset);
+    probe.setEnd(node, offset + (text.codePointAt(offset) > 0xffff ? 2 : 1));
+    return pointInRects(probe.getClientRects(), clientX, clientY);
   }
 
   function rangeFromCaretPosition(position, clientX, clientY) {
@@ -757,12 +782,12 @@
   }
 
   /**
-   * Builds a candidate for the caret at (clientX, clientY), or null when there
-   * is nothing Japanese to look up there.
+   * Builds a candidate for the glyph under (clientX, clientY), or null when the
+   * pointer is not on text or there is nothing Japanese to look up there.
    */
   function resolveCandidate(clientX, clientY) {
     const caretRange = caretRangeAt(clientX, clientY);
-    if (!caretRange) {
+    if (!caretRange || !pointOnGlyph(caretRange, clientX, clientY)) {
       return null;
     }
     return resolveCandidateAt(caretRange.startContainer, caretRange.startOffset);

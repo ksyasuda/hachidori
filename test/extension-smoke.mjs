@@ -17250,7 +17250,7 @@ async function contentNoteStage() {
     const experimental = { ...globalThis.HDReaderOptions.DEFAULT_OPTIONS.experimental, longKeyScan: true };
     const harness = await createHarness(undefined, { options: { experimental } });
     const window = harness.popup.ownerDocument.defaultView;
-    window.Range.prototype.getClientRects = () => [];
+    window.Range.prototype.getClientRects = () => [{ left: -1, top: -1, right: 20, bottom: 20 }];
     const document = window.document;
     const block = document.createElement("p");
     block.style.display = "block";
@@ -17302,19 +17302,26 @@ async function contentNoteStage() {
   async function scanExtractionCase() {
     const harness = await createHarness();
     const window = harness.popup.ownerDocument.defaultView;
-    window.Range.prototype.getClientRects = () => [];
     const document = window.document;
     const block = document.createElement("p");
     block.style.display = "block";
     document.body.append(block);
-    const scan = (node, offset = 0) => {
+    // The caret APIs snap into the nearest line whether or not the pointer is
+    // on it; only the glyph after the caret sits under the pointer, if any.
+    const scan = (node, offset = 0, { onGlyph = true } = {}) => {
       const range = document.createRange();
       range.setStart(node, offset);
       range.collapse(true);
       document.caretRangeFromPoint = () => range;
+      window.Range.prototype.getClientRects = function () {
+        return onGlyph && this.startContainer === node && this.startOffset === offset
+          ? [{ left: -1, top: -1, right: 1, bottom: 1 }]
+          : [];
+      };
       return harness.driver.resolveCandidate(0, 0);
     };
     block.innerHTML = '<b style="display:inline">食</b><i style="display:inline">べたかった</i>。';
+    const besideLine = scan(block.firstChild.firstChild, 0, { onGlyph: false }) === null;
     const inline = scan(block.firstChild.firstChild);
     const crossedInline = inline?.query === "食べたかった。"
       && inline.sourceElements.map((element) => element.textContent).join("") === inline.sentence;
@@ -17409,6 +17416,8 @@ async function contentNoteStage() {
     for (const separator of separators) separator.remove();
     harness.close();
     return {
+      "a pointer beside a line, off its glyphs, looks nothing up although the caret snaps into it":
+        besideLine,
       "pointer scans cross ordinary inline text and apply the live Japanese-only preference":
         crossedInline && japaneseOnly && unrestricted && gatedAgain && restoredProse && restoredBlock,
       "Japanese-only scanning accepts mixed numeral compounds from Japanese or numeral characters":
@@ -17439,6 +17448,7 @@ async function contentNoteStage() {
       range.setStart(link.firstChild, 0);
       range.collapse(true);
       document.caretRangeFromPoint = () => range;
+      window.Range.prototype.getClientRects = () => [{ left: 190, top: 190, right: 210, bottom: 210 }];
       harness.emitOptions({ lookupMode, activationKey: "Shift", hoverDelayMs: 0, scanLength: 32 });
       search.focus();
       harness.driver.onMouseMove({ target: link, clientX: 200, clientY: 200 });
