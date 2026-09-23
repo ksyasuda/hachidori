@@ -46,7 +46,7 @@ validated URL in the system browser.
 | `background.js` | the service worker | Routes every runtime message and owns everything in `chrome.storage.local`: dictionary metadata, options, the personal dictionary, update schedules, lookup counts, automatic-backup metadata, first-run and sharing state. It also owns the alarms, the Anki gateway and the sharing host and client. It holds no engine state, so Chrome may stop it whenever it is idle. |
 | `firefox-background.html`, `firefox-background.js` | Firefox’s persistent MV2 background page | Loads the shared background module and hosts `offscreen.html` in one authenticated hidden iframe so the engine remains warm. |
 | `content.js`, with the classic scripts listed under `content_scripts` | every web page | Scans the Japanese text near the pointer, renders the popup in a closed shadow root through `render/popup.js` and `render/glossary.js`, and adds the popup's Anki and pronunciation controls (`anki-content.js`, `audio-content.js`). Chrome also injects `capture-content.js`; Firefox does not. `content.css` is the only style the page itself receives: the source highlight. |
-| `offscreen.html`, `offscreen.js` | Chrome’s offscreen document or Firefox’s hidden background iframe | Owns the dictionary engine. `engine-worker.js` runs the pthread build with direct OPFS once `opfs-capability-worker.js` has proved the browser can, `engine-worker-idbfs.js` runs the pthread build on IDBFS when the browser has shared memory but no OPFS access handles (Electron), both through `engine-worker-runtime.js`; `engine-service.js` is also the single-thread IDBFS fallback. Pronunciation, Anki and the first-run installer load here on demand. Chrome also hosts media capture here. |
+| `offscreen.html`, `offscreen.js` | Chrome’s offscreen document or Firefox’s hidden background iframe | Owns the dictionary engine. `engine-worker.js` runs the pthread build with direct OPFS once `opfs-capability-worker.js` has proved the browser can, and imports each archive in a short-lived second instance, `import-worker.js`, so lookups keep working; `engine-worker-idbfs.js` runs the pthread build on IDBFS when the browser has shared memory but no OPFS access handles (Electron), both through `engine-worker-runtime.js`; `engine-service.js` is also the single-thread IDBFS fallback. `engine-recycler.js` decides when Low memory mode replaces the worker ([docs/memory.md](../docs/memory.md)). Pronunciation, Anki and the first-run installer load here on demand. Chrome also hosts media capture here. |
 | `settings.html`, `settings.js` | the options page | Dictionaries, groups, updates, the personal dictionary, Reading, Design, pronunciation, Anki, keybinds, backup and sharing, with media capture where supported and global search. The larger sections have their own `*-settings.js` controller; `design-preview.html` is the live preview inside Design. |
 | `startup.html`, `startup.js` | a tab opened once after install | First-run setup: recommended dictionaries, Anki detection, a practice lookup, and the offer to use a Hachidori that another browser on this computer already shares. Overlay mode skips it. |
 | `toolbar.html`, `toolbar.js` | the toolbar button's popup | Turns lookups on and off, shows the sharing state and opens Settings. Chrome also exposes the recording action here. |
@@ -76,6 +76,10 @@ the service worker and both engine runtimes run the same code.
   are the comparison and size rules the transaction boundaries share.
 - **Lookup statistics.** `lookup-stats-identity.js`, a classic script so the
   content script can use it, and `lookup-stats.js`.
+- **Sentences.** `sentence.js` is Yomitan's sentence extraction: the content
+  script cuts the text around a match at terminators, matching quotes and line
+  breaks before it becomes the Anki sentence, the Note prefill and the `%s`
+  of a custom link.
 - **Anki.** `anki.js` is the AnkiConnect gateway and `anki-setup.js`
   recognises an existing mining setup. `anki-templates.js`, `anki-values.js`,
   `anki-glossary.js`, `anki-pitch.js`, `anki-resources.js` and `anki-audio.js` build the note
@@ -117,8 +121,11 @@ the service worker and both engine runtimes run the same code.
   [hachidori-anki](https://github.com/bee-san/hachidori-anki), which owns the
   Python relay, its tests, and packaging.
 - **Pages.** `settings-search.js` and `settings-dom.js` serve Settings;
+  `settings-theme.js` is the classic script in its `<head>` that applies the
+  saved theme before the first paint, ahead of the `settings.js` module;
   `experimental-settings.js` renders the Advanced → Experimental features
-  switches from the registry in `reader-options.js`;
+  switches from the registry in `reader-options.js`; `memory-settings.js`
+  the Advanced → Memory readout and each Library row's *In memory* line;
   `keybind-settings.js`, `custom-button-settings.js` and `external-links.js`
   the keybinds and custom buttons in the popup; `local-file-access.js` the
   notice about Chrome's *Allow access to file URLs* permission;

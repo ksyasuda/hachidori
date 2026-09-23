@@ -1,6 +1,6 @@
 {
   "repository": "https://github.com/bee-san/hachidori",
-  "revision": "4be36f5e87ab946574d6c0279c6e7dd6fee36c45",
+  "revision": "d68089e8e7b383cd09be0cc4a0e90984ef473e4b",
   "hoshidicts": {
     "repository": "https://github.com/bee-san/hoshidicts",
     "revision": "3066e606a75e2d79c2d2c1bc89d6c5bd2587f284"
@@ -9,12 +9,12 @@
   "artifacts": {
     "extension/vendor/avif-encoder.mjs": "442a13571f3e8ee8117bc886e06ab52b4c5ebde7cb1659071fb498bfc0bea434",
     "extension/vendor/avif-encoder.wasm": "384b6299418d989cde5fd7660caf167aa8d4cfcedca53b2e73ddd086fc047797",
-    "extension/vendor/hoshidicts-threaded-idbfs.mjs": "1ba718b4d0464d4fcfb3f3140f7c501e31398007a48539a733cb61e8c429b183",
-    "extension/vendor/hoshidicts-threaded-idbfs.wasm": "f5f3b2ff84532bfe1946b01ab89138b84609605fa299918af5c1799984bcc93d",
-    "extension/vendor/hoshidicts-threaded.mjs": "f8a5b896c3415d02ae181c6290ab2424c134db8792644d22aca97b6808db871f",
-    "extension/vendor/hoshidicts-threaded.wasm": "b204067d0026c1c7b423f4b2529f043cb9380a1b0661a356db8b3be4a0a0ca10",
+    "extension/vendor/hoshidicts-threaded-idbfs.mjs": "e3a3e527a77cbeaafaab49d1da9cb855e0f6a91811fdaa9d2e4216022c002f63",
+    "extension/vendor/hoshidicts-threaded-idbfs.wasm": "5c84b4b066059d03a309fc329edf76ceb587189a7d1483b93c0194d6158810d4",
+    "extension/vendor/hoshidicts-threaded.mjs": "dba8c6c229ff221bcca4c5501d62b1a184c44d5c43a5556fb615d16aa608d5b4",
+    "extension/vendor/hoshidicts-threaded.wasm": "0a7c7caeb1e5288f762208abf340ac9aa8c8768f7643a4b77d495244296da3cf",
     "extension/vendor/hoshidicts.mjs": "0e6c572fb5fbcd1964ee69d09eb5e41af4befe0f7cdedd5c0273a39b315b0697",
-    "extension/vendor/hoshidicts.wasm": "075303bb107a583217db8678ff2b8147b8859b4a58b940f4f4070fd9f6702b41"
+    "extension/vendor/hoshidicts.wasm": "016756ede5b57284a34a7bd47ecfbbe1c90ea726310d96b770547de6265a6211"
   },
   "localChanges": [
     "Expose popup host attributes, successful lookups, mouse events and host commands to SubMiner; visibility uses native Hachidori events.",

@@ -20,12 +20,13 @@
   <a href="docs/architecture.md">Architecture</a> ·
   <a href="extension/README.md">Extension</a> ·
   <a href="docs/sharing.md">Sharing</a> ·
+  <a href="docs/memory.md">Memory</a> ·
   <a href="docs/chrome-web-store.md">Chrome Web Store guide</a> ·
   <a href="docs/privacy.md">Privacy</a> ·
   <a href="CONTRIBUTING.md">Contributing</a>
 </p>
 
-Hachidori is a blazing fast Japanese Dictionary Chrome Extension that is feature rich and optionated.
+Hachidori is a blazing fast Japanese Dictionary Chrome Extension that is feature rich and opinionated.
 
 ## Install in 15 seconds
 

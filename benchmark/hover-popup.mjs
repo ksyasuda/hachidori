@@ -20,8 +20,8 @@ const samples = Number(process.env.HACHIDORI_HOVER_SAMPLES ?? 3);
 assert.ok(Number.isSafeInteger(samples) && samples > 0);
 const settings = { hoverEnabled: true, lookupMode: 'hover', hoverDelayMs: 0, popupNestingMaxDepth: 2,
   popupWidthPx: 520, popupHeightPx: 500, popupColumns: 1, maxResults: 32,
-  definitionBlurEnabled: false };
-const words = ['食べる', '漢字'];
+  definitionBlurEnabled: false, showCompactDefinitionSummary: true, compactDefinitionSummaryCount: 3 };
+const words = ['食べる', '漢字', '深層'];
 const manifest = { revision: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim(),
   node: process.version, cpu: cpus()[0].model, logicalCpus: cpus().length, load: loadavg(), settings, words,
   extensionSha256: directoryContentSha256(resolve(root, 'extension')),
@@ -31,9 +31,14 @@ const manifest = { revision: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: r
   archives: archives.map(path => ({ path, bytes: readFileSync(path).length, sha256: sha256(readFileSync(path)) })) };
 writeFileSync(resolve(output, 'manifest.json'), JSON.stringify(manifest, null, 2));
 const puppeteer = await import(pathToFileURL(process.env.HACHIDORI_PUPPETEER).href);
+// A 5,000-character paragraph in one text node with the word 600 characters in
+// and no sentence terminator: the sentence walk has its whole extent to cover
+// both ways, and everything beyond the extent is there to be left unread.
+const longParagraph = `${'あ'.repeat(600)}食べる${'い'.repeat(4397)}`;
 const server = createServer((_request, response) => {
   response.setHeader('Content-Type', 'text/html; charset=utf-8');
-  response.end('<!doctype html><meta charset="utf-8"><style>body{font:32px sans-serif;margin:60px}span{display:inline-block;margin-right:100px}</style><span id="w0">食べる</span><span id="w1">漢字</span>');
+  response.end('<!doctype html><meta charset="utf-8"><style>body{font:32px sans-serif;margin:60px}span{display:inline-block;margin-right:100px}#hit-tile{position:absolute;left:60px;top:650px;width:200px;height:96px;padding:12px 24px}#long{position:absolute;left:60px;top:780px;width:1300px;height:200px;margin:0;overflow:hidden;font:14px/1.2 sans-serif;word-break:break-all}</style><span id="w2">深層</span><span id="w0">食べる</span><span id="w1">漢字</span><br><a id="hit-tile">食べる</a>'
+    + `<p id="long">${longParagraph}</p>`);
 });
 await new Promise(resolveListen => server.listen(0, '127.0.0.1', resolveListen));
 const rows = [];
@@ -152,6 +157,11 @@ try {
       await tab.screenshot({ path: resolve(output, `session-${session}-cold.png`) });
       for (let i = 0; i < 2; i++) await scan((i + 1) % 2, `warmup-${i}`);
       for (let i = 0; i < 8; i++) await scan((i + 1) % 2, `root-${i}`);
+      // The depth-40 entry alternates with a flat one so each hover replaces a popup.
+      for (let i = 0; i < 8; i++) {
+        await scan(2, `deep-nesting-${i}`);
+        await scan((i + 1) % 2, `deep-nesting-flat-${i}`);
+      }
       await tab.tracing.start({ path: resolve(output, `session-${session}-trace.json`), screenshots: false });
       await scan(1, 'trace-0');
       await scan(0, 'trace-1');
@@ -181,13 +191,36 @@ try {
       const final = await evaluate('__hoverProbe.state()');
       assert.equal(final[0].expressions[0], words[0], 'delayed genuine reply cannot repaint newer result');
       writeFileSync(resolve(output, `session-${session}-rapid.json`), JSON.stringify({ superseded, delivered, final, metrics }, null, 2));
-      const points = await evaluate(`JSON.stringify(${JSON.stringify(words)}.map(word => __hoverProbe.point(word)))`);
+      // Only the two flat entries name each other in their definitions.
+      const points = await evaluate(`JSON.stringify(${JSON.stringify(words.slice(0, 2))}.map(word => __hoverProbe.point(word)))`);
       const nested = JSON.parse(points);
       if (nested.every(Boolean)) {
         await scan(1, 'child-first', 1, nested[1]);
         await scan(0, 'child-replace', 1, nested[0]);
         await tab.screenshot({ path: resolve(output, `session-${session}-child.png`) });
       } else console.log(JSON.stringify({ session, nested: 'not supported by visible first definition', points: nested }));
+      const hitPoints = await tab.$eval('#hit-tile', node => {
+        const range = document.createRange();
+        range.setStart(node.firstChild, 0); range.setEnd(node.firstChild, 1);
+        const rect = range.getBoundingClientRect();
+        return { glyph: { x: rect.left + rect.width * .2, y: rect.top + rect.height / 2 },
+          padding: { x: rect.left - 20, y: rect.top + rect.height / 2 } };
+      });
+      hitPoints.long = await tab.$eval('#long', node => {
+        const offset = node.firstChild.nodeValue.indexOf('食べる');
+        const range = document.createRange();
+        range.setStart(node.firstChild, offset); range.setEnd(node.firstChild, offset + 1);
+        const rect = range.getBoundingClientRect();
+        return { x: rect.left + rect.width * .3, y: rect.top + rect.height / 2 };
+      });
+      const hitTesting = await evaluate(`__hoverProbe.hitTesting(${JSON.stringify(hitPoints)})`);
+      const sentenceCost = await evaluate(`__hoverProbe.sentenceCost(${JSON.stringify(hitPoints.long)})`);
+      writeFileSync(resolve(output, `session-${session}-hit-testing.json`), JSON.stringify({
+        points: hitPoints, samples: hitTesting, sentenceCost,
+        boundary: 'synchronous production resolveCandidate; 100 warmups per point excluded; excludes event scheduling, messaging, lookup and rendering',
+        longParagraph: { characters: longParagraph.length, matchOffset: longParagraph.indexOf('食べる') },
+      }, null, 2));
+      console.log(JSON.stringify({ session, hitTesting, sentenceCost }));
     } finally {
       await browser?.close();
       rmSync(directory, { recursive: true, force: true });
