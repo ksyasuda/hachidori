@@ -330,7 +330,7 @@ const PLANNED = [
   "source highlights reconcile selected text mutations without changing selection",
   "hover popups stay open while a drag selects text, prefill the highlight and close on a plain click",
   "nested source highlights retain ancestor ownership when children close in native and fallback modes",
-  "plain definition text opens nested child lookups with native hover, activation, miss and depth behavior",
+  "plain definition text opens nested child lookups with native hover, activation, miss, line-end and depth behavior",
   "fallback source paint stays exact through clipping, scrolling, visibility and cleanup",
   "fallback source paint tracks CSS transitions and animated ancestors",
   "fallback source paint follows sibling layout changes inside fixed-size ancestors",
@@ -983,6 +983,38 @@ async function popupReader(page, depth = 0) {
           }
         }
         return null;
+      }`,
+    });
+    return result.value ?? null;
+  }
+
+  // Prepends one short line per text to the first glossary and returns a point
+  // past the first line's last glyph, where caret APIs snap back into the text.
+  // An empty list removes the lines again.
+  async function definitionLineEndPoint(lines) {
+    const object = await resolvePopupObject();
+    if (object === null) return null;
+    const { result } = await cdp.send("Runtime.callFunctionOn", {
+      objectId: object.objectId,
+      returnByValue: true,
+      arguments: [{ value: lines }],
+      functionDeclaration: `function (lines) {
+        for (const row of this.querySelectorAll("[data-line-end-probe]")) row.remove();
+        const glossary = this.querySelector(".gsm-hoshidicts-glossary-content");
+        if (!glossary || lines.length === 0) return null;
+        const rows = lines.map(text => {
+          const row = this.ownerDocument.createElement("div");
+          row.dataset.lineEndProbe = "";
+          row.textContent = text;
+          return row;
+        });
+        glossary.prepend(...rows);
+        const range = this.ownerDocument.createRange();
+        range.selectNodeContents(rows[0]);
+        const text = range.getBoundingClientRect();
+        const box = rows[0].getBoundingClientRect();
+        if (box.right - text.right < 40) return null;
+        return { x: (text.right + box.right) / 2, y: text.top + text.height / 2 };
       }`,
     });
     return result.value ?? null;
@@ -1713,7 +1745,7 @@ async function popupReader(page, depth = 0) {
   }
 
   return {
-    anki, ankiAccessibility, audio, click, compactSummaries, compactSummaryTextRect, definitionBlur, definitionTextRect, dictionaryTabs, deinflection, externalLink, focusAnki, glossaryCard, imagePreview,
+    anki, ankiAccessibility, audio, click, compactSummaries, compactSummaryTextRect, definitionBlur, definitionLineEndPoint, definitionTextRect, dictionaryTabs, deinflection, externalLink, focusAnki, glossaryCard, imagePreview,
     lookupStatistics, nested, rect, sourcePaint, retainedControls, selectGlossaryText, state, visible,
     waitForVisible, waitForHidden, writeNote,
   };
@@ -3147,6 +3179,14 @@ async function checkNestedLinks(settings, tab, popup, browser) {
     const missingParent = await popup.state();
     const missingChild = await child.state();
 
+    // Past a short line's end the caret snaps back into it, and a scan from
+    // there would run on into the next line's word.
+    const lineEndPoint = await popup.definitionLineEndPoint([fixture.missing, fixture.child]);
+    if (lineEndPoint) await tab.mouse.move(lineEndPoint.x, lineEndPoint.y);
+    await new Promise(resolve => setTimeout(resolve, 800));
+    const lineEndChild = await child.state();
+    await popup.definitionLineEndPoint([]);
+
     await setDepth(0);
     await moveToDefinition(definitionSource);
     await new Promise(resolve => setTimeout(resolve, 500));
@@ -3188,6 +3228,8 @@ async function checkNestedLinks(settings, tab, popup, browser) {
       definitionParent,
       definitionSource,
       depthDisabledChild,
+      lineEndChild,
+      lineEndPoint,
       missingChild,
       missingParent,
       missingSource,
@@ -3336,7 +3378,7 @@ async function checkNestedLinks(settings, tab, popup, browser) {
     await tab.bringToFront();
     await tab.keyboard.press("Escape");
   }
-  check("plain definition text opens nested child lookups with native hover, activation, miss and depth behavior",
+  check("plain definition text opens nested child lookups with native hover, activation, miss, line-end and depth behavior",
     definitionEvidence.definitionSource?.text === fixture.child[0]
       && definitionEvidence.definitionChild?.plain.includes(fixture.child)
       && definitionEvidence.definitionParent?.plain.includes(fixture.query)
@@ -3351,6 +3393,8 @@ async function checkNestedLinks(settings, tab, popup, browser) {
       && definitionEvidence.missingSource?.text === fixture.missing[0]
       && definitionEvidence.missingParent?.plain.includes(fixture.query)
       && !child.visible(definitionEvidence.missingChild)
+      && definitionEvidence.lineEndPoint !== null
+      && !child.visible(definitionEvidence.lineEndChild)
       && !child.visible(definitionEvidence.depthDisabledChild)
       && definitionEvidence.activationGated
       && definitionEvidence.activationChild?.plain.includes(fixture.child),

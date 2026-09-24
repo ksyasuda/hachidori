@@ -851,6 +851,31 @@
   }
 
   /**
+   * The offset of the glyph under (clientX, clientY) in the caret range's text
+   * node, or -1 when the point is beside it. Caret APIs snap to nearby text even
+   * in padding or past a line's end, so admit only the pointed glyph, with two
+   * CSS pixels for thin glyphs and subpixel layout.
+   */
+  function pointedGlyphOffset(caretRange, clientX, clientY) {
+    const node = caretRange.startContainer;
+    const text = node.nodeValue || "";
+    let offset = caretRange.startOffset;
+    // Caret alignment can step back onto the low surrogate of a wide glyph.
+    if (offset > 0 && (text.charCodeAt(offset) & 0xfc00) === 0xdc00) offset -= 1;
+    if (offset >= text.length) return -1;
+    const glyph = document.createRange();
+    glyph.setStart(node, offset);
+    glyph.setEnd(node, offset + (text.codePointAt(offset) > 0xffff ? 2 : 1));
+    for (const rect of glyph.getClientRects()) {
+      if (clientX >= rect.left - 2 && clientX <= rect.right + 2
+          && clientY >= rect.top - 2 && clientY <= rect.bottom + 2) {
+        return offset;
+      }
+    }
+    return -1;
+  }
+
+  /**
    * Builds a candidate for the caret at (clientX, clientY), or null when there
    * is nothing Japanese to look up there.
    */
@@ -861,23 +886,8 @@
         || !document.elementFromPoint(clientX, clientY)?.contains(node)) {
       return null;
     }
-    const text = node.nodeValue || "";
-    let offset = caretRange.startOffset;
-    // Caret alignment can step back onto the low surrogate of a wide glyph.
-    if (offset > 0 && (text.charCodeAt(offset) & 0xfc00) === 0xdc00) offset -= 1;
-    if (offset >= text.length) return null;
-    const glyph = document.createRange();
-    glyph.setStart(node, offset);
-    glyph.setEnd(node, offset + (text.codePointAt(offset) > 0xffff ? 2 : 1));
-    // Caret APIs snap to nearby text even in padding. Admit only the pointed
-    // glyph, with two CSS pixels for thin glyphs and subpixel layout.
-    for (const rect of glyph.getClientRects()) {
-      if (clientX >= rect.left - 2 && clientX <= rect.right + 2
-          && clientY >= rect.top - 2 && clientY <= rect.bottom + 2) {
-        return resolveCandidateAt(node, offset);
-      }
-    }
-    return null;
+    const offset = pointedGlyphOffset(caretRange, clientX, clientY);
+    return offset < 0 ? null : resolveCandidateAt(node, offset);
   }
 
   function resolveCandidateAt(startNode, startOffset) {
@@ -950,6 +960,10 @@
     if (startNode.nodeType !== Node.TEXT_NODE) {
       return null;
     }
+    const startOffset = pointedGlyphOffset(caretRange, clientX, clientY);
+    if (startOffset < 0) {
+      return null;
+    }
     const lookupText = startNode.parentElement?.closest(
       ".gsm-hoshidicts-glossary-content, .gsm-hoshidicts-compact-definition-summary"
     );
@@ -983,7 +997,7 @@
     }
     let entries = collectScanEntries(
       startNode,
-      Math.min(caretRange.startOffset, (startNode.nodeValue || "").length),
+      startOffset,
       lookupText,
       scanWindow(),
       styleCache
