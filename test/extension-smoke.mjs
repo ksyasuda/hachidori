@@ -18661,8 +18661,15 @@ async function contentNoteStage() {
       return { glossary, term, textNode: term.firstChild };
     }
 
+    // jsdom lays nothing out; put every glyph under the case's pointer.
+    function glyphsUnderPointer(harness) {
+      harness.popup.ownerDocument.defaultView.Range.prototype.getClientRects =
+        () => [{ left: 110, top: 70, right: 130, bottom: 90 }];
+    }
+
     const hover = await createHarness();
     try {
+      glyphsUnderPointer(hover);
       await hover.initialLookup();
       const parent = hover.driver.viewRequest();
       const first = appendGlossary(hover, "食用語");
@@ -18767,6 +18774,8 @@ async function contentNoteStage() {
         offset: 0,
       });
       const linkBoundary = hover.driver.resolveDefinitionCandidate(120, 80)?.query === "食";
+      // Past a line's end the caret still snaps into it; the glyph is not there.
+      const besideGlyph = hover.driver.resolveDefinitionCandidate(300, 80) === null;
 
       async function definitionLookup(onlyScanJapaneseText, text) {
         const language = await createHarness(
@@ -18774,6 +18783,7 @@ async function contentNoteStage() {
           { options: { onlyScanJapaneseText } },
         );
         try {
+          glyphsUnderPointer(language);
           await language.initialLookup();
           const latin = appendGlossary(language, text);
           language.popup.ownerDocument.caretPositionFromPoint = () => ({
@@ -18806,6 +18816,7 @@ async function contentNoteStage() {
         japaneseOnly,
         mixedNumeral,
         linkBoundary,
+        besideGlyph,
         missPreservedParent,
         nativeCaret,
         parentRetained,
@@ -18815,6 +18826,7 @@ async function contentNoteStage() {
 
       const activation = await createHarness();
       try {
+        glyphsUnderPointer(activation);
         activation.emitOptions({
           activationKey: "Shift",
           hoverDelayMs: 0,
