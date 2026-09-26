@@ -727,6 +727,29 @@ off it collects `scanLength` as before, so the engine never sees a longer key.
 Scans shorter than eight code points never extend, so a clicked-kanji lookup
 stays one character.
 
+Google Docs paints its pages to `<canvas>`, so no caret API finds text there.
+While the experimental **Google Docs** flag (`options.experimental.googleDocs`)
+is on, the service worker registers `google-docs-flag.js` through
+`chrome.scripting` as a `document_start`, main-world content script on
+`*://docs.google.com/*` (and unregisters it when the flag goes off). The script
+sets `window._docs_annotate_canvas_by_ext` to the allow-listed ID Yomitan uses,
+which makes Docs also draw an SVG annotation layer: one
+`.kix-canvas-tile-content svg>g>rect` per run of text, carrying the run in
+`aria-label` with its `x`, `y`, `transform` and `data-font-css`. On
+`docs.google.com` the reader then tries that layer before the caret path: it
+enables a probe stylesheet that makes only those rects hit-testable for the
+duration of one `elementFromPoint`, lays an invisible SVG `<text>` imposter
+with the run's position, transform and font over the hovered rect, bisects the
+glyph offset from the imposter's client rects, and hands the imposter's text
+node to the ordinary scan and sentence pipeline with the imposter as the sole
+source. One imposter is kept per hovered rect so repeated moves share the
+pending lookup and the popup stays anchored; hovering another rect replaces it,
+and turning the flag off or tearing the reader down removes it and the probe
+stylesheet. The sentence is therefore the hovered run, the highlight is drawn
+on the invisible imposter, and Google may change the mechanism without notice,
+which is why the feature is experimental. With the flag off, or on any other
+host, nothing is injected and scanning is unchanged.
+
 Pointer scanning first requires the caret's complete Unicode character rectangle
 to contain the pointer, with two CSS pixels of tolerance. The hit-tested page
 element must contain that text node, so padded tiles and unrelated elements
@@ -1484,7 +1507,9 @@ the palette without being clipped by the glossary card or popup scrollport.
 The preview copies the original image's exact current source and alt text; it
 does not resolve media again or change inline dimensions. The shared positioning
 function clamps it to the viewport with an 8-pixel margin. Pixelated and
-monochrome presentation are retained, and reduced motion disables the animation.
+monochrome presentation are retained: a monochrome image is drawn in the palette
+text colour by a layer masked with the image, in the card and in the preview.
+Reduced motion disables the animation.
 
 Each popup owns one requested preview image, including a still-loading image.
 A load may resume only that current intent: it cannot replace a newer
@@ -1978,7 +2003,11 @@ upload. Pronunciation enrichment compares its complete desired values
 against the applied text-only write and the current note.
 A lost write acknowledgement is not retried; confirmed note IDs stay successful
 even if readback, enrichment, or subsequent reader refresh fails, including
-across a settings change.
+across a settings change. A saved field that differs from the submitted value
+(for example one an Anki add-on fills on add) is reported as a warning and does
+not skip deferred pronunciation; only a failed readback or a first field Anki
+did not save as submitted does, and enrichment still refuses to update a
+pronunciation field whose current value changed.
 
 Only requested glossary variants are exported through the shared structured
 renderer into inert HTML. Dictionary CSS remains scoped, and image filenames
