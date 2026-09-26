@@ -79,9 +79,18 @@ function names(action, reply) {
 // pass one delayed stale reply without allowing an unbounded server-side queue.
 // The private worker's feature handlers still select actions and bind every
 // conversation to its configured endpoint and API key.
-export function createAnkiGateway({ fetch = globalThis.fetch, timeoutMs = 10_000 } = {}) {
+export function createAnkiGateway({ fetch = globalThis.fetch, timeoutMs = 10_000,
+  readSubminerProxyUrl = async () => (await globalThis.chrome?.storage?.local?.get("subminerAnkiProxyUrl"))?.subminerAnkiProxyUrl,
+} = {}) {
   const maximumActive = 4;
   const queues = new Map();
+
+  async function isSubminerEndpoint(endpoint) {
+    const url = globalThis.HDReaderOptions.normaliseAnkiConnectUrl(endpoint);
+    if (url === null) return false;
+    try { return url === await readSubminerProxyUrl(); }
+    catch { return false; }
+  }
 
   async function dispatch({ url, body, requestTimeoutMs }, queue) {
     const controller = new AbortController();
@@ -179,6 +188,22 @@ export function createAnkiGateway({ fetch = globalThis.fetch, timeoutMs = 10_000
     endpoint = globalThis.HDReaderOptions.DEFAULT_OPTIONS.anki.url) {
     const url = globalThis.HDReaderOptions.normaliseAnkiConnectUrl(endpoint);
     if (url === null) throw new Error("Enter a valid HTTP or HTTPS AnkiConnect URL in Settings, without a username or password.");
+    const privateParams = value => value && (Object.hasOwn(value, "subminerEnrich")
+      || Object.hasOwn(value, "subminerDuplicateNoteIds"));
+    const containsPrivateParams = privateParams(params)
+      || (action === "multi" && params.actions.some(entry => privateParams(entry.params)));
+    if (containsPrivateParams) {
+      if (!await isSubminerEndpoint(url)) {
+        const strip = value => {
+          if (!privateParams(value)) return value;
+          const { subminerEnrich, subminerDuplicateNoteIds, ...publicParams } = value;
+          return publicParams;
+        };
+        params = action === "multi"
+          ? { ...strip(params), actions: params.actions.map(entry => ({ ...entry, params: strip(entry.params) })) }
+          : strip(params);
+      }
+    }
     const key = apiKey ? { key: apiKey } : {};
     // Sub-actions are rebuilt from their action and params so nothing else a
     // caller passes reaches the wire.
@@ -222,7 +247,7 @@ export function createAnkiGateway({ fetch = globalThis.fetch, timeoutMs = 10_000
     const fields = models.includes(model) ? read("modelFieldNames", replies[2]) : [];
     return { connected, model, decks, models, fields, errors };
   }
-  return { discover, invoke };
+  return { discover, invoke, isSubminerEndpoint };
 }
 
 // Shared by Settings and authoritative mining readiness checks. Validation

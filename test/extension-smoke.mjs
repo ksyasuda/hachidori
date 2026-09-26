@@ -25,6 +25,7 @@ import { dirname, resolve } from "node:path";
 import { homedir } from "node:os";
 import { createAnkiWorkerService } from "../extension/anki-worker.js";
 import { buildAnkiFields } from "../extension/anki-values.js";
+import { buildAnkiResourceFields } from "../extension/anki-resources.js";
 import { createSetupInstaller } from "../extension/setup-installer.js";
 import { canDiscoverSharingHost } from "../extension/sharing-protocol.js";
 import { ankiSetupFamily } from "../extension/anki-setup.js";
@@ -46,6 +47,7 @@ import {
   EXPECTED,
   TRAINED_TERMS,
   TRAINED_TITLE,
+  buildNotAZip,
   buildRecommendedZip,
   buildTitledZip,
   buildLongKeyZip,
@@ -60,6 +62,7 @@ import {
   imagePreviewFixture,
   imageSizingFixture,
   makePng,
+  structuredContentDeepFixture,
 } from "./make-fixture.mjs";
 import { recommendedIndexUrlMatches } from "../extension/managed-dictionary-source.js";
 import { RECOMMENDED_DICTIONARIES as RECOMMENDED_CATALOGUE } from "../extension/recommended-dictionaries.js";
@@ -136,8 +139,8 @@ function genericPackage(overrides = {}) {
     ...overrides,
   };
 }
-// Where chrome-e2e.mjs already keeps puppeteer-core, so one out-of-repo tree
-// holds every test dependency. HACHIDORI_JSDOM or NODE_PATH override it.
+// Legacy external tooling cache, used after the repository's locked test tooling.
+// HACHIDORI_JSDOM or NODE_PATH override both locations.
 const DEFAULT_JSDOM_TREE = resolve(
   process.env.XDG_CACHE_HOME || resolve(homedir(), ".cache"),
   "hachidori-e2e",
@@ -842,6 +845,7 @@ function loadBackgroundScript(sandbox, { overlayMode = false } = {}) {
     .replace(/import\s*\{[\s\S]*?\}\s*from\s*"\.\/sharing-client\.js";\s*/u, "")
     .replace(/import\s*\{[\s\S]*?\}\s*from\s*"\.\/sharing-protocol\.js";\s*/u, "")
     .replace(/import \{ applyCustomJavaScript \} from "\.\/custom-javascript\.js";\s*/u, "")
+    .replace(/import \{ applyGoogleDocsFlag \} from "\.\/google-docs\.js";\s*/u, "")
     .replace(/import \{ HOST_CAPABILITIES, OVERLAY_MODE \} from "\.\/overlay-mode\.js";\s*/u, "");
   sandbox.TextEncoder ??= TextEncoder;
   sandbox.AbortController ??= AbortController;
@@ -861,6 +865,7 @@ function loadBackgroundScript(sandbox, { overlayMode = false } = {}) {
     lookupAnkiIndex,
     detectLocalAudioSource: sandbox.detectLocalAudioSource ?? realDetectLocalAudioSource,
     applyCustomJavaScript: sandbox.applyCustomJavaScript ?? (() => Promise.resolve()),
+    applyGoogleDocsFlag: sandbox.applyGoogleDocsFlag ?? (() => Promise.resolve()),
   });
   const context = createContext(sandbox);
   context.globalThis = context;
@@ -1268,6 +1273,57 @@ async function automaticBackupBackgroundStage() {
       && Date.parse(loweredStore.backups[0].createdAt) === now,
     JSON.stringify({ threeDay: threeDayStore.backups.map(record => record.createdAt), threeDayListed,
       lowered: loweredStore.backups.map(record => record.createdAt) }));
+}
+
+async function managedCheckStage() {
+  const bus = makeBus(), storage = makeStorage(), alarms = makeAlarms();
+  const chrome = makeChrome("check-worker", bus, storage, alarms);
+  const dictionaries = ["first", "second"].map((id, index) => genericPackage({
+    id, title: id, path: `/dicts/${id}`, revision: "test-1", enabled: index === 0,
+    isUpdatable: true, indexUrl: `https://example.com/${id}.json`, downloadUrl: `https://example.com/${id}.zip`,
+  }));
+  await chrome.storage.local.set({ dictionaryState: { schemaVersion: 1, revision: 1, groups: [], dictionaries },
+    dictionaryUpdates: { revision: 1, schedule: "off", lastCheckedAt: null } });
+  const fetched = [], relayed = [];
+  bus.addListener("check-engine", (message, _sender, sendResponse) => {
+    if (message?.target !== "hoshidicts-offscreen" || message.relayed !== true) return false;
+    relayed.push(message.type);
+    sendResponse({ type: `${message.type}_result`, requestId: message.requestId, ok: true });
+    return true;
+  });
+  loadBackgroundScript({ chrome, console, setTimeout, clearTimeout, Promise, Error, TypeError,
+    fetch: async url => {
+      fetched.push(url);
+      return { ok: true, url, json: async () => ({ revision: "test-2" }) };
+    } });
+  const send = fields => bus.sendMessage("check-page", { target: "hachidori-updates", type: "hd_updates_check", ...fields });
+  const selected = await send({ dictionaryIds: ["second"] });
+  const selectedState = (await chrome.storage.local.get("dictionaryState")).dictionaryState;
+  check("a scoped check requests one index and changes only that package's check status without importing",
+    selected.ok && selected.outcomes.length === 1 && selected.outcomes[0].id === "second"
+      && JSON.stringify(fetched) === JSON.stringify([dictionaries[1].indexUrl])
+      && JSON.stringify(selectedState.dictionaries[0]) === JSON.stringify(dictionaries[0])
+      && selectedState.dictionaries[1].lastUpdateCheck?.status === "update-available"
+      && selectedState.dictionaries.every((entry, index) => entry.revision === dictionaries[index].revision
+        && entry.path === dictionaries[index].path)
+      && !relayed.includes("hd_import"),
+    JSON.stringify({ selected, selectedState, fetched, relayed }));
+  fetched.length = 0;
+  const all = await send({});
+  const allState = (await chrome.storage.local.get("dictionaryState")).dictionaryState;
+  check("Check now checks all managed indexes but never imports or changes installed revisions when newer indexes exist",
+    all.ok && all.outcomes.length === 2
+      && JSON.stringify(fetched) === JSON.stringify(dictionaries.map(entry => entry.indexUrl))
+      && allState.dictionaries.every((entry, index) => entry.lastUpdateCheck?.status === "update-available"
+        && entry.revision === dictionaries[index].revision && entry.path === dictionaries[index].path)
+      && !relayed.includes("hd_import"),
+    JSON.stringify({ all, allState, fetched, relayed }));
+  fetched.length = 0;
+  const empty = await send({ dictionaryIds: [] });
+  const invalid = await Promise.all([null, "second", {}].map(dictionaryIds => send({ dictionaryIds })));
+  check("scoped checks accept an empty selection and reject non-array selections before fetching",
+    empty.ok && empty.outcomes.length === 0 && invalid.every(reply => !reply.ok && /dictionary IDs/u.test(reply.error))
+      && fetched.length === 0, JSON.stringify({ empty, invalid, fetched }));
 }
 
 async function managedScheduleStage() {
@@ -2957,27 +3013,32 @@ async function sharingTransitionStage() {
     const write = (patch, baseRevision = current().revision) => overlay.send("hd_options_write",
       { baseRevision, options: patch }, "hoshidicts-worker");
     const initial = structuredClone(current());
-    const blockedTemplates = await write({
-      anki: globalThis.HDReaderOptions.normaliseOptions({}).anki,
-    });
-    const local = await write({ hoverEnabled: false, popupWidthPx: 480 });
+    const localAnki = globalThis.HDReaderOptions.normaliseAnki({ templates: [{
+      ...globalThis.HDReaderOptions.DEFAULT_ANKI_TEMPLATE, deck: "Overlay deck", model: "Basic",
+    }] });
+    const savedTemplates = await write({ anki: localAnki });
+    const local = await write({ hoverEnabled: false, popupWidthPx: 480, customButtons: [{
+      id: "overlay-link", type: "link", label: "Overlay link", url: "https://overlay.example/%w",
+    }] });
     const rawHost = { ...overlay.hello.snapshot.options, revision: 11, popupTheme: "dracula", popupWidthPx: 1200 };
     socket.receive({ kind: "storage", changes: { options: rawHost } });
     await until(() => current().popupTheme === "dracula");
     const mirrored = structuredClone(current());
     socket.receive({ kind: "storage", changes: { options: overlay.hello.snapshot.options } });
     await tick();
-    check("a linked overlay keeps activation, highlighting and geometry local through host option batches",
+    check("a linked overlay keeps mining, activation, highlighting and geometry local through host option batches",
       initial.hoverEnabled && initial.lookupMode === "hover" && !initial.sourceHighlightEnabled
         && initial.popupWidthPx === 420 && initial.popupTheme === "light"
-        && blockedTemplates.ok === false
-        && blockedTemplates.error === "The linked Hachidori does not support host-owned Anki mining. Update it and try again."
-        && local.ok && local.options.revision === initial.revision + 1 && socket.requests().length === 0
+        && savedTemplates.ok && savedTemplates.options.anki.deck === "Overlay deck"
+        && savedTemplates.options.revision === initial.revision + 1
+        && local.ok && local.options.revision === savedTemplates.options.revision + 1 && socket.requests().length === 0
+        && mirrored.anki.deck === "Overlay deck"
+        && mirrored.customButtons[0]?.id === "overlay-link" && mirrored.customLinks[0]?.label === "Overlay link"
         && mirrored.popupWidthPx === 480 && !mirrored.hoverEnabled && mirrored.lookupMode === "hover"
         && !mirrored.sourceHighlightEnabled && mirrored.revision === local.options.revision + 1
         && current().revision === mirrored.revision && current().popupTheme === "dracula"
         && overlay.storage.raw.get("sharingLocalState").options.popupWidthPx === 480,
-      JSON.stringify({ initial, blockedTemplates, local, mirrored, current: current() }));
+      JSON.stringify({ initial, savedTemplates, local, mirrored, current: current() }));
 
     async function answerWrite(promise, hostOptions, expectedCount, ok = true) {
       await until(() => socket.requests().length === expectedCount);
@@ -2995,9 +3056,10 @@ async function sharingTransitionStage() {
     const stale = await write({ popupWidthPx: 900 }, initial.revision);
     check("overlay saves translate host revisions, split mixed patches and reject stale local edits",
       shared.request.baseRevision === 11 && shared.reply.ok && shared.reply.options.popupWidthPx === 480
-        && shared.reply.options.revision === 13
+        && shared.reply.options.revision === mirrored.revision + 1
         && mixed.request.baseRevision === 12 && JSON.stringify(mixed.request.options) === JSON.stringify({ popupTheme: "light" })
-        && mixed.reply.ok && mixed.reply.options.popupWidthPx === 520 && mixed.reply.options.revision === 15
+        && mixed.reply.ok && mixed.reply.options.popupWidthPx === 520
+        && mixed.reply.options.revision === shared.reply.options.revision + 2
         && JSON.stringify(current()) === JSON.stringify(afterMixed)
         && stale.ok === false && stale.conflict === true && socket.requests().length === 2,
       JSON.stringify({ shared, mixed, afterMixed, current: current(), stale }));
@@ -4479,6 +4541,7 @@ function loadSettingsScript(window, { overlayMode = false, recommendedInstall = 
     customJavaScript: true,
     localFileAccessPrompt: !overlayMode,
     mediaCapture: !overlayMode,
+    lowMemoryMode: true,
   };
   window.MINING_CAPABILITIES = { screenshot: !overlayMode, browserSpeech: !overlayMode };
   window.chrome.runtime.connect ??= () => ({
@@ -4506,6 +4569,8 @@ function loadSettingsScript(window, { overlayMode = false, recommendedInstall = 
     .replace(/^import .*\n/gmu, "").replace(/^export\s+/gmu, "");
   const experimentalSettings = readFileSync(resolve(EXTENSION, "experimental-settings.js"), "utf8")
     .replace(/^export\s+/gmu, "");
+  const memorySettings = readFileSync(resolve(EXTENSION, "memory-settings.js"), "utf8")
+    .replace(/^import[^\n]+\n/gmu, "").replace(/^export\s+/gmu, "");
   const settingsDom = readFileSync(resolve(EXTENSION, "settings-dom.js"), "utf8").replace(/^export\s+/gmu, "");
   const anki = readFileSync(resolve(EXTENSION, "anki.js"), "utf8")
     .replace(/^import[^\n]+\n/gmu, "").replace(/^export\s+/gmu, "");
@@ -4551,6 +4616,7 @@ function loadSettingsScript(window, { overlayMode = false, recommendedInstall = 
     .replace(/import \{ createLocalFileAccessController \} from "\.\/local-file-access\.js";\s*/u, "")
     .replace(/import \{ createBackupSettingsController \} from "\.\/backup-settings\.js";\s*/u, "")
     .replace(/import \{ createExperimentalSettings \} from "\.\/experimental-settings\.js";\s*/u, "")
+    .replace(/import \{ createMemorySettings \} from "\.\/memory-settings\.js";\s*/u, "")
     .replace(/^import .* from "\.\/dictionary-name-drafts\.js";\s*/gmu, "")
     .replace(/import\s*\{[\s\S]*?\}\s*from\s*"\.\/dictionary-progress\.js";\s*/u, "")
     .replace(/import \{ createAnkiTemplateSettingsController \} from "\.\/anki-settings\.js";\s*/u, "")
@@ -4577,7 +4643,7 @@ function loadSettingsScript(window, { overlayMode = false, recommendedInstall = 
     };
   }
   window.eval(
-    `${externalLinks}\n${customButtonSettings}\n${readerOptions}\n${recommended.replace(/^export\s+/gmu, "")}\n${customDictionary}\n${managedSource}\n${groupState}\n${groups}\n${nameDrafts}\n${dictionaryProgress}\n${dictionaryImport}\nasync function readDictionaryArchiveIdentity(file) { return window.__readDictionaryArchiveIdentity(file); }\n${setupState}\n${settingsDom}\n${audioSettings}\n${ankiTemplates}\n${anki}\n${ankiSettings}\n${automaticBackups}\n${backupSettings}\n${experimentalSettings}\n${localFileAccess}\n${settings}`,
+    `${externalLinks}\n${customButtonSettings}\n${readerOptions}\n${recommended.replace(/^export\s+/gmu, "")}\n${customDictionary}\n${managedSource}\n${groupState}\n${groups}\n${nameDrafts}\n${dictionaryProgress}\n${dictionaryImport}\nasync function readDictionaryArchiveIdentity(file) { return window.__readDictionaryArchiveIdentity(file); }\n${setupState}\n${settingsDom}\n${audioSettings}\n${ankiTemplates}\n${anki}\n${ankiSettings}\n${automaticBackups}\n${backupSettings}\n${experimentalSettings}\n${memorySettings}\n${localFileAccess}\n${settings}`,
   );
 }
 
@@ -4597,6 +4663,18 @@ async function checkReaderOptionsTransport(pageChrome, storage) {
     const readerContext = createContext({});
     runInContext(readFileSync(resolve(EXTENSION, "reader-options.js"), "utf8"), readerContext);
     const reader = readerContext.HDReaderOptions;
+    const noticeCases = [];
+    for (const value of [false, true, "false", 0, null]) {
+      await local.set({ options: saved.options });
+      const reply = await send(message({ showNoResultNotice: value }));
+      noticeCases.push(typeof value === "boolean"
+        ? reply.ok === true && reply.options?.showNoResultNotice === value
+        : reply.ok === false && await unchanged(saved));
+    }
+    check("selection notices default on and use strict boolean options CAS",
+      reader.normaliseOptions({}).showNoResultNotice === true
+        && reader.normaliseOptions({ showNoResultNotice: "false" }).showNoResultNotice === true
+        && noticeCases.every(Boolean), JSON.stringify(noticeCases));
     const cssCases = [];
     for (const value of ["", "/* 日本語 */\r\n.gsm-hoshidicts-popup { color: red; }\n", "/*" + "x".repeat(40_000) + "*/"]) {
       await local.set({ options: saved.options });
@@ -4809,6 +4887,8 @@ async function checkReaderOptionsTransport(pageChrome, storage) {
       { frequencyOrder: "sideways" }, { frequencyDictionary: {} },
       { kanjiClickDictionary: { title: "字", kind: "other" } },
       { kanjiClickDictionary: { title: "", kind: "kanji" } },
+      { kanjiClickDictionary: { kind: "tabGroup", id: "" } },
+      { kanjiClickDictionary: { kind: "tabGroup", title: "kanji-group" } },
     ];
     const rejected = [];
     for (const patch of invalid) {
@@ -4867,6 +4947,33 @@ async function checkReaderOptionsTransport(pageChrome, storage) {
         && stateCommit.ok === true && pruned.revision === 4 && pruned.scanLength === 16
         && Object.keys(pruned).length === 2,
       JSON.stringify({ missingRevision, sparseUnchanged, empty, absentUnchanged, stateCommit, pruned }));
+    await local.remove("dictionaryState");
+    await local.set({ options: saved.options });
+
+    // A clicked-kanji group reference is a stable ID, like an Image source
+    // group: strict CAS keeps it exactly, a dictionary commit that keeps the
+    // group leaves it alone, and removing the group resets the option.
+    const groupRef = { kind: "tabGroup", id: "kanji-group" };
+    const kanjiGroup = { id: "kanji-group", name: "Kanji", dictionaryIds: [] };
+    const optionsRevision = async () => (await local.get("options")).options.revision;
+    const stateCas = (baseRevision, groups) => send({ target: "hoshidicts-worker", type: "hd_state_cas", baseRevision, dictionaries: [], groups });
+    const groupCreated = await stateCas(0, [kanjiGroup]);
+    const groupWrite = await send(message({ kanjiClickDictionary: { ...groupRef, ignored: true } }, { baseRevision: await optionsRevision() }));
+    const groupRepeat = await send(message({ kanjiClickDictionary: groupRef }, { baseRevision: groupWrite.options?.revision }));
+    const groupRenamed = await stateCas(1, [{ ...kanjiGroup, name: "Kanji dictionaries" }]);
+    const afterRename = (await local.get("options")).options;
+    const groupRemoved = await stateCas(2, []);
+    const afterRemoval = (await local.get("options")).options;
+    const missingGroup = await send(message({ kanjiClickDictionary: { kind: "tabGroup", id: "never-created" } }, { baseRevision: afterRemoval.revision }));
+    check("a clicked-kanji group reference passes strict options CAS, survives group edits and resets with the group's removal",
+      groupCreated.ok === true && groupWrite.ok === true && groupRepeat.ok === true
+        && JSON.stringify(groupWrite.options?.kanjiClickDictionary) === JSON.stringify(groupRef)
+        && groupRepeat.options?.revision === groupWrite.options?.revision
+        && groupRenamed.ok === true && JSON.stringify(afterRename) === JSON.stringify(groupWrite.options)
+        && groupRemoved.ok === true && afterRemoval.kanjiClickDictionary === ""
+        && afterRemoval.revision === groupWrite.options.revision + 1
+        && missingGroup.ok === true && missingGroup.options?.kanjiClickDictionary === "",
+      JSON.stringify({ groupCreated, groupWrite, groupRepeat, groupRenamed, afterRename, groupRemoved, afterRemoval, missingGroup }));
     await local.remove("dictionaryState");
     await local.set({ options: saved.options });
 
@@ -5044,18 +5151,6 @@ const RECOMMENDED_DICTIONARIES = [
     revision: "2026.09.10",
     capabilities: ["term"],
   },
-  {
-    sourceId: "sankoku8-eng",
-    name: "Sankoku 8 English",
-    publisherUrl: "https://github.com/shoui520/sankoku8-eng",
-    downloadUrl: "https://github.com/shoui520/sankoku8-eng/releases/download/latest/en.zip",
-    indexUrl: null,
-    githubRepositoryId: "1371843420",
-    requiredCapability: "term",
-    title: "sankoku8-gpt-5.6-luna",
-    revision: "sankoku8-gpt-5.6-luna",
-    capabilities: ["term"],
-  },
 ];
 
 function checkRecommendedDictionaries() {
@@ -5094,7 +5189,7 @@ function checkRecommendedDictionaries() {
   const actual = RECOMMENDED_CATALOGUE.map(catalogueContract);
   const expected = RECOMMENDED_DICTIONARIES.map(catalogueContract);
   check(
-    "the catalogue names exactly six trusted recommendations and their publishers",
+    "the catalogue names exactly five trusted recommendations and their publishers",
     JSON.stringify(actual) === JSON.stringify(expected),
     JSON.stringify(actual),
   );
@@ -5179,6 +5274,7 @@ async function main() {
   await backupLifecyclePortStage();
   await automaticBackupBackgroundStage();
   await managedScheduleStage();
+  await managedCheckStage();
   await lookupStatsStage();
   await audioRelayStage();
   await ankiBackgroundStage();
@@ -5432,7 +5528,7 @@ async function main() {
   let streamError = null;
   try {
     streamed = await engineService.streamResponseToFile(
-      {
+      { FS: {
         open: (path) => ({ fd: 7, path }),
         // WasmFS FS.write copies byte by byte from JavaScript, so the body must
         // arrive as one write rather than one per stream chunk.
@@ -5445,7 +5541,7 @@ async function main() {
         close() {
           streamClosed = true;
         },
-      },
+      } },
       {
         body: {
           getReader: () => ({
@@ -5483,7 +5579,7 @@ async function main() {
     stateCasAttempts: 0,
     durableFilesystemWrites: 0,
   };
-  const nativeCounts = { resets: 0, adds: 0, removes: 0, reorders: 0 };
+  const nativeCounts = { resets: 0, adds: 0, removes: 0, reorders: 0, lookups: 0 };
   const createObservedHoshidicts = async (...args) => {
     const module = await createHoshidicts(...args);
     observedEngine = module;
@@ -5509,6 +5605,8 @@ async function main() {
         loadedDictionaryPaths.delete(argumentValues[0]);
       } else if (name === "hdw_set_dict_order" && result) {
         nativeCounts.reorders += 1;
+      } else if (name === "hdw_lookup") {
+        nativeCounts.lookups += 1;
       }
       return result;
     };
@@ -5599,7 +5697,9 @@ async function main() {
     "error",
     "failedDictionaries",
     "generation",
+    "lastLoadPath",
     "loading",
+    "lowMemory",
     "ok",
     "ready",
     "requestId",
@@ -5677,6 +5777,40 @@ async function main() {
     [true, { schemaVersion: 1, revision: 1, dictionaries: [], groups: [] }, false],
   );
 
+  // hd_engine_config: the offscreen document reads the engine's own option;
+  // a page cannot, and a change to the stored option is pushed to the document.
+  const engineConfigSender = { id: swChrome.runtime.id, url: swChrome.runtime.getURL("offscreen.html") };
+  const readEngineConfig = (sender) => bus.sendMessage("offscreen-config", {
+    target: "hoshidicts-worker", type: "hd_engine_config", requestId: "engine-config",
+  }, sender);
+  const configFromPage = await readEngineConfig({ id: swChrome.runtime.id, url: swChrome.runtime.getURL("settings.html") });
+  const pushFromPage = await pageChrome.runtime.sendMessage({ target: "hoshidicts-offscreen", type: "hd_engine_config", lowMemoryMode: true });
+  const configOff = await readEngineConfig(engineConfigSender);
+  const optionsBeforeLowMemory = (await storage.api().local.get("options")).options;
+  const pushesBefore = bus.log.filter((row) => row.type === "hd_engine_config" && row.from === "sw").length;
+  const lowMemoryWrite = await writeReaderOptions(optionsBeforeLowMemory.revision, { lowMemoryMode: true });
+  const enginePushes = () => bus.log.filter((row) => row.type === "hd_engine_config" && row.from === "sw").length;
+  for (let attempt = 0; attempt < 50 && enginePushes() === pushesBefore; attempt += 1) {
+    await new Promise((done) => setTimeout(done, 2));
+  }
+  const configOn = await readEngineConfig(engineConfigSender);
+  // An unrelated option write does not push.
+  const unrelatedWrite = await writeReaderOptions(lowMemoryWrite.options.revision, { scanLength: 20 });
+  await new Promise((done) => setTimeout(done, 20));
+  const pushesAfterUnrelated = enginePushes();
+  check(
+    "hd_engine_config is read by the engine host only and pushed when the option changes",
+    configFromPage?.ok === false
+      && pushFromPage?.ok === false
+      && configOff?.ok === true && configOff.lowMemoryMode === false
+      && lowMemoryWrite.ok === true
+      && configOn?.ok === true && configOn.lowMemoryMode === true
+      && unrelatedWrite.ok === true
+      && pushesAfterUnrelated === pushesBefore + 1,
+    JSON.stringify({ configFromPage, pushFromPage, configOff, configOn, pushesBefore, pushesAfterUnrelated }),
+  );
+  await writeReaderOptions(unrelatedWrite.options.revision, { lowMemoryMode: false, scanLength: optionsBeforeLowMemory.scanLength ?? 16 });
+
   const zip = new Uint8Array(await readFile(FIXTURE));
   const blobUrl = createObjectURL(zip);
   const imported = await request("hd_import", { blobUrl, fileName: "hachidori-fixture.zip", lowRam: false });
@@ -5750,6 +5884,28 @@ async function main() {
   const afterLogicalImport = await request("hd_status");
   equal("one logical package loads all four native capabilities", afterLogicalImport.dictionaryCount, 4);
   check("syncfs(false) wrote the dictionary to IndexedDB", idb.count("/dicts") > 0, `${idb.count("/dicts")} rows in ${idb.names()}`);
+
+  // hd_memory: the heap, and each loaded package's mapped file bytes once per
+  // native kind it was added as (the fixture package loads under four).
+  const memory = await request("hd_memory");
+  const mappedFileBytes = ["hash.table", "bloom.filter", "blobs.bin", "media.bin", "media.idx", "scan.idx", "dict.zstd"]
+    .reduce((sum, name) => {
+      try { return sum + observedEngine.FS.stat(`${importedPackage.path}/${name}`).size; } catch { return sum; }
+    }, 0);
+  check(
+    "hd_memory reports the heap and each loaded package's mapped bytes",
+    memory.ok === true
+      && Number.isInteger(memory.heapBytes)
+      && memory.heapBytes === observedEngine.HEAPU8.byteLength
+      && memory.dictionaries.length === 1
+      && memory.dictionaries[0].id === importedPackage.id
+      && memory.dictionaries[0].title === importedPackage.title
+      && memory.dictionaries[0].path === importedPackage.path
+      && mappedFileBytes > 0
+      && memory.dictionaries[0].bytes === mappedFileBytes * 4
+      && memory.heapBytes >= memory.dictionaries[0].bytes,
+    JSON.stringify({ memory, mappedFileBytes }),
+  );
 
   // A dictionary with keys longer than the scan length: the import records the
   // longest such key on the package row (from scan.idx), and the same
@@ -7483,6 +7639,48 @@ async function main() {
   await request("hd_remove", { title: updatedTitle });
   await request("hd_remove", { title: recommended.title });
 
+  // A package installed while its source was still recommended keeps that
+  // sourceId after the catalogue drops the entry (#290). It is then an ordinary
+  // local dictionary: never an update candidate, untouched by a check, and
+  // still answering lookups.
+  section("retired recommended source");
+  const retiredTitle = "sankoku8-gpt-5.6-luna";
+  const retiredImport = await request("hd_import", {
+    blobUrl: createObjectURL(buildRecommendedZip({
+      title: retiredTitle, revision: "sankoku8-gpt-5.6-luna", indexUrl: null, downloadUrl: null, capabilities: ["term"],
+    })),
+    fileName: "en.zip",
+  });
+  const retiredBase = await storedDictionaryState();
+  const retiredId = retiredBase.dictionaries.find((entry) => entry.title === retiredTitle)?.id;
+  // The record exactly as the installer committed it while the source was catalogued.
+  const retiredSeed = await pageChrome.runtime.sendMessage({
+    target: "hoshidicts-worker", type: "hd_state_cas", baseRevision: retiredBase.revision,
+    dictionaries: retiredBase.dictionaries.map((entry) => entry.id !== retiredId ? entry : {
+      ...entry, sourceId: "sankoku8-eng", isUpdatable: false, indexUrl: null,
+      downloadUrl: "https://github.com/shoui520/sankoku8-eng/releases/download/latest/en.zip",
+    }),
+  });
+  const retiredBefore = await storedDictionaryState();
+  const retiredRowsBefore = idb.keys("/dicts").sort();
+  const retiredCheck = await pageChrome.runtime.sendMessage({ target: updateTarget, type: "hd_updates_check" });
+  const retiredScoped = await pageChrome.runtime.sendMessage({ target: updateTarget, type: "hd_updates_check", dictionaryIds: [retiredId] });
+  const retiredAfter = await storedDictionaryState();
+  const retiredLookup = await request("hd_lookup", { text: "辞書" });
+  check(
+    "a package from a retired recommended source stays local-only through update checks and keeps answering lookups",
+    retiredImport.ok === true && retiredSeed?.ok === true
+      && retiredBefore.dictionaries.find((entry) => entry.id === retiredId)?.sourceId === "sankoku8-eng"
+      && retiredCheck?.ok === true && retiredCheck.outcomes.every((outcome) => outcome.id !== retiredId)
+      && Number.isFinite(Date.parse(retiredCheck.settings?.lastCheckedAt))
+      && retiredScoped?.ok === true && retiredScoped.outcomes.length === 0
+      && JSON.stringify(retiredAfter.dictionaries) === JSON.stringify(retiredBefore.dictionaries)
+      && JSON.stringify(idb.keys("/dicts").sort()) === JSON.stringify(retiredRowsBefore)
+      && retiredLookup.ok === true && JSON.stringify(retiredLookup).includes(`${retiredTitle} term fixture`),
+    JSON.stringify({ retiredImport, retiredSeed, retiredCheck, retiredScoped, retiredBefore, retiredAfter, retiredLookup }),
+  );
+  await request("hd_remove", { title: retiredTitle });
+
   // Model an actual pre-D9 install: legacy rows named a canonical title path,
   // before immutable UUID generation roots existed.
   const legacyPath = `/dicts/${FIXTURE_TITLE}`;
@@ -7740,6 +7938,7 @@ async function main() {
     baseRevision: stateWithThreePackages.revision,
     dictionaries: [...stateWithThreePackages.dictionaries].reverse(),
   });
+  const reorderSkippedWarmup = nativeCounts.lookups === nativeBeforeReorder.lookups;
   const lookupAfterReorder = await request("hd_lookup", { text: "食べる" });
   const statusAfterReorder = await request("hd_status");
   const dictionaryNames = (lookup) => lookup.results.flatMap((result) =>
@@ -7752,6 +7951,8 @@ async function main() {
       && nativeCounts.resets === nativeBeforeReorder.resets
       && nativeCounts.adds === nativeBeforeReorder.adds
       && nativeCounts.reorders === nativeBeforeReorder.reorders + 1
+      && reorderSkippedWarmup
+      && statusAfterReorder.lastLoadPath === "order-only"
       && statusAfterReorder.dictionaryCount === statusBeforeReorder.dictionaryCount
       && statusAfterReorder.generation === statusBeforeReorder.generation + 1
       && lookupAfterReorder.ok === true
@@ -7936,10 +8137,25 @@ async function main() {
         === JSON.stringify(authoritativeInvalidState.dictionaries.map(({ id, path }) => [id, path])),
     JSON.stringify({ invalidStateWrite, invalidReload, invalidStatus, lookupBesideInvalid, stateAfterInvalidReload }),
   );
+  const beforeFailedPackageOrder = { ...nativeCounts };
+  const reorderedInvalidState = await request("hd_apply_state", {
+    baseRevision: stateAfterInvalidReload.revision,
+    dictionaries: [...stateAfterInvalidReload.dictionaries].reverse(),
+  });
+  const reorderedInvalidStatus = await request("hd_status");
+  check("reordering beside an unloadable committed package neither reloads nor loses its diagnostic",
+    reorderedInvalidState.ok === true
+      && nativeCounts.resets === beforeFailedPackageOrder.resets
+      && nativeCounts.adds === beforeFailedPackageOrder.adds
+      && nativeCounts.lookups === beforeFailedPackageOrder.lookups
+      && nativeCounts.reorders === beforeFailedPackageOrder.reorders + 1
+      && reorderedInvalidStatus.lastLoadPath === "order-only"
+      && JSON.stringify(reorderedInvalidStatus.failedDictionaries) === JSON.stringify(invalidStatus.failedDictionaries),
+    JSON.stringify({ beforeFailedPackageOrder, nativeCounts, reorderedInvalidStatus }));
   const disabledInvalidWrite = await pageChrome.runtime.sendMessage({
     target: "hoshidicts-worker",
     type: "hd_state_cas",
-    baseRevision: stateAfterInvalidReload.revision,
+    baseRevision: reorderedInvalidState.state.revision,
     dictionaries: stateAfterInvalidReload.dictionaries.map((dictionary) =>
       dictionary.title === invalidLoadTitle ? { ...dictionary, enabled: false } : dictionary),
   });
@@ -7955,10 +8171,25 @@ async function main() {
       && disabledInvalidStatus.failedDictionaries[0].id === invalidPackage.id,
     JSON.stringify({ disabledInvalidWrite, disabledInvalidReload, disabledInvalidStatus }),
   );
+  const beforeDisabledPackageOrder = { ...nativeCounts };
+  const reorderedDisabledInvalid = await request("hd_apply_state", {
+    baseRevision: stateAfterDisabledInvalidReload.revision,
+    dictionaries: [...stateAfterDisabledInvalidReload.dictionaries].reverse(),
+  });
+  const reorderedDisabledStatus = await request("hd_status");
+  check("an unchanged disabled failed package does not force order-only edits to rebuild",
+    reorderedDisabledInvalid.ok === true
+      && nativeCounts.resets === beforeDisabledPackageOrder.resets
+      && nativeCounts.adds === beforeDisabledPackageOrder.adds
+      && nativeCounts.lookups === beforeDisabledPackageOrder.lookups
+      && nativeCounts.reorders === beforeDisabledPackageOrder.reorders + 1
+      && reorderedDisabledStatus.lastLoadPath === "order-only"
+      && JSON.stringify(reorderedDisabledStatus.failedDictionaries) === JSON.stringify(disabledInvalidStatus.failedDictionaries),
+    JSON.stringify({ beforeDisabledPackageOrder, nativeCounts, reorderedDisabledStatus }));
   const repairedStateWrite = await pageChrome.runtime.sendMessage({
     target: "hoshidicts-worker",
     type: "hd_state_cas",
-    baseRevision: stateAfterDisabledInvalidReload.revision,
+    baseRevision: reorderedDisabledInvalid.state.revision,
     dictionaries: stateAfterDisabledInvalidReload.dictionaries.filter(
       (dictionary) => dictionary.title !== invalidLoadTitle,
     ),
@@ -8880,15 +9111,15 @@ async function main() {
       // The scenario injects exactly two failures: jmnedict fails to download and
       // the kanji dictionary fails to import. The rest succeed.
       && JSON.stringify(recommendedSettings.firstOutcomes.map(({ error }) => error))
-        === JSON.stringify([false, true, true, false, false, false])
+        === JSON.stringify([false, true, true, false, false])
       && recommendedSettings.partial.state
         === `Finished ${RECOMMENDED_DICTIONARIES.length} of ${RECOMMENDED_DICTIONARIES.length}`
-          + " recommended dictionaries — 4 imported, 2 failed."
+          + " recommended dictionaries — 3 imported, 2 failed."
       && recommendedSettings.starterHiddenAfterFirst === false
       && recommendedSettings.partial.starterHidden === false
       && recommendedSettings.partial.retryHidden === false
       && JSON.stringify(recommendedSettings.partial.sourceIds)
-        === JSON.stringify(["jitendex", "jiten", "bees-ultimate-grammar-dictionary", "sankoku8-eng"])
+        === JSON.stringify(["jitendex", "jiten", "bees-ultimate-grammar-dictionary"])
       && JSON.stringify(recommendedSettings.retrySourceIds)
         === JSON.stringify(["jmnedict", "bees-ultimate-kanji-dictionary"])
       && recommendedSettings.completeSourceIds.length === RECOMMENDED_DICTIONARIES.length
@@ -8905,13 +9136,20 @@ async function main() {
       && managedUpdateSettings.initial.lastChecked.includes("9/4/2026")
       && managedUpdateSettings.initial.managedStatus.includes("Update available")
       && managedUpdateSettings.initial.managedUpdateHidden === false
+      && managedUpdateSettings.initial.managedCheckHidden === false
       && managedUpdateSettings.initial.insecureMetadata.includes("Local archive")
       && managedUpdateSettings.initial.insecureStatus === "Not update-checkable"
       && managedUpdateSettings.initial.insecureUpdateHidden === true
+      && managedUpdateSettings.initial.insecureCheckHidden === true
       && managedUpdateSettings.initial.localStatus === "Not update-checkable"
       && managedUpdateSettings.initial.localUpdateHidden === true
+      && managedUpdateSettings.initial.localCheckHidden === true
       && managedUpdateSettings.checkRequest?.type === "hd_updates_check"
+      && managedUpdateSettings.checkRequest.dictionaryIds === undefined
       && managedUpdateSettings.checkedState.includes("1 update available")
+      && managedUpdateSettings.rowCheckRequest?.dictionaryIds?.join(",") === "managed-id"
+      && managedUpdateSettings.rowCheckDisabled === true
+      && managedUpdateSettings.rowCheckedState === "Checked 1 managed dictionary — 1 update available, 0 failed."
       && managedUpdateSettings.oneRequest?.type === "hd_updates_install"
       && managedUpdateSettings.oneRequest.dictionaryIds?.join(",") === "managed-id"
       && managedUpdateSettings.afterOneStatus.startsWith("Up to date")
@@ -9411,6 +9649,9 @@ async function main() {
       && downloadEvents.length >= 1 && downloadEvents.every((event) => event.totalBytes === null)
       && downloadEvents.at(-1).receivedBytes === jmnedictArchive.byteLength
       && installingEvents.length === 1 && installingEvents[0].receivedBytes === jmnedictArchive.byteLength
+      // An IDBFS runtime has no isolated importer, so the archive is imported
+      // inside the live engine and the bridge is told to refuse reads.
+      && installingEvents[0].fallback === "memory"
       && importProgress.indexOf(installingEvents[0]) > importProgress.indexOf(downloadEvents.at(-1))
       && Number.isFinite(stagedLookupMs) && Number.isFinite(installPauseMs) && installPauseMs >= 0
       && wrongArchive.ok === false && wrongArchive.error.includes("catalogue archive URL")
@@ -9425,19 +9666,216 @@ async function main() {
   );
   console.log(`        staged lookup ${stagedLookupMs.toFixed(1)} ms; serialized install ${installPauseMs.toFixed(1)} ms`);
 
+  await isolatedImportStage({ createHoshidicts, offscreenChrome, storedDictionaryState, idb, trainedExpression });
+
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);
 }
 
+/* ------------------------------------------------------- isolated import stage */
+
+// The direct-OPFS runtime imports through a second engine instance while this
+// one keeps answering (engine-service.js runIsolatedImportTransaction). The
+// isolated importer here is the real importDictionaryArchive on this engine's
+// own filesystem, which is what a second instance on the same OPFS root
+// amounts to; a hold before the native import stands in for its duration.
+async function isolatedImportStage({ createHoshidicts, offscreenChrome, storedDictionaryState, idb, trainedExpression }) {
+  section("isolated import: lookups keep answering, the generation swaps in place");
+  const service = await import(
+    `file://${resolve(EXTENSION, "engine-service.js").replace(/\\/gu, "/")}?isolated`
+  );
+  let stageEngine = null;
+  const native = { resets: 0, adds: 0, removes: 0, reorders: 0, imports: 0 };
+  const progress = [];
+  let hold = null;
+  let importerFailure = null;
+  let failedRoot = null;
+  let conflictCas = false;
+  let casConflicts = 0;
+  const isolatedImport = async (request) => {
+    if (hold !== null) await hold;
+    if (importerFailure !== null) {
+      // A worker that died mid-import leaves whatever it had written.
+      failedRoot = request.generationRoot;
+      stageEngine.FS.mkdirTree(`${request.generationRoot}/partial`);
+      stageEngine.FS.writeFile(`${request.generationRoot}/partial/blobs.bin`, new Uint8Array(16));
+      throw importerFailure;
+    }
+    return service.importDictionaryArchive(stageEngine, request.archive, request.generationRoot,
+      request.lowRam, request.fileName, request.expectedArchiveBytes, request.resources);
+  };
+  service.configureEngineService(
+    async (message) => {
+      if (message.type === "hd_state_cas" && conflictCas) {
+        casConflicts += 1;
+        const current = await offscreenChrome.runtime.sendMessage({ target: "hoshidicts-worker", type: "hd_state_read" });
+        return { ok: false, conflict: true, error: "injected commit conflict", state: current.state };
+      }
+      return offscreenChrome.runtime.sendMessage(message);
+    },
+    {
+      createHoshidicts: async (...args) => {
+        const module = await createHoshidicts(...args);
+        stageEngine = module;
+        const ccall = module.ccall.bind(module);
+        module.ccall = (name, returnType, argumentTypes, argumentValues) => {
+          const result = ccall(name, returnType, argumentTypes, argumentValues);
+          if (name === "hdw_reset") native.resets += 1;
+          else if (name === "hdw_add_dict" && result) native.adds += 1;
+          else if (name === "hdw_remove_dict" && result) native.removes += 1;
+          else if (name === "hdw_set_dict_order" && result) native.reorders += 1;
+          else if (name === "hdw_import") native.imports += 1;
+          return result;
+        };
+        return module;
+      },
+      storageBackend: "idbfs",
+      lowRam: true,
+      reportProgress: (event) => progress.push(structuredClone(event)),
+      isolatedImport,
+    },
+  );
+  let counter = 0;
+  const request = (type, fields = {}) => {
+    counter += 1;
+    return service.handleEngineMessage({ type, requestId: `isolated-${counter}`, ...fields });
+  };
+  service.startEngine();
+  let status = await request("hd_status");
+  const deadline = Date.now() + 30000;
+  while (!(status.ok && status.ready && !status.loading) && Date.now() < deadline) {
+    await new Promise((done) => setTimeout(done, 25));
+    status = await request("hd_status");
+  }
+  const loadedCount = status.dictionaryCount;
+  const snapshot = () => ({ ...native });
+  const generationRoots = () => idb.keys("/dicts").filter((path) => /^\/dicts\/\.hdw-generation-[^/]+$/u.test(path));
+  const memoryRow = async (title) => (await request("hd_memory")).dictionaries.filter((entry) => entry.title === title);
+  const title = "isolated-update-target";
+  const query = "更新語";
+  const archive = (revision) => new Uint8Array(buildTitledZip(title, {
+    revision: `rev-${revision}`,
+    terms: [[query, "こうしんご", "", "", 0, [`revision ${revision}`], 1, ""]],
+  }));
+  const revisionOf = (lookup) => lookup.results?.[0]?.term?.glossaries
+    ?.map((entry) => entry.glossary).join("\n").match(/"revision (\d+)"/u)?.[1] ?? null;
+
+  // First install: the new package is added beside the loaded set.
+  const beforeInstall = snapshot();
+  const install = await request("hd_import", { blobUrl: createObjectURL(archive(1)), fileName: `${title}.zip` });
+  const installedState = await storedDictionaryState();
+  const installedPackage = installedState.dictionaries.find((entry) => entry.title === title);
+  const afterInstall = snapshot();
+  check(
+    "an isolated first install adds the new generation without resetting or reloading the loaded set",
+    install.ok === true && install.report?.success === true && native.imports === beforeInstall.imports + 1
+      && installedPackage?.revision === "rev-1" && ownedGenerationRoot(installedPackage.path, title) !== ""
+      && afterInstall.resets === beforeInstall.resets && afterInstall.removes === beforeInstall.removes
+      && afterInstall.adds === beforeInstall.adds + 1 && afterInstall.reorders === beforeInstall.reorders + 1
+      && (await request("hd_status")).dictionaryCount === loadedCount + 1
+      && revisionOf(await request("hd_lookup", { text: query })) === "1"
+      && progress.filter((event) => event.phase === "installing").every((event) => event.fallback === undefined),
+    JSON.stringify({ install, installedPackage, beforeInstall, afterInstall, progress }),
+  );
+
+  // Update: while the isolated importer works, both the replaced package and
+  // the others answer from the committed generations.
+  const release = Promise.withResolvers();
+  hold = release.promise;
+  const generationBefore = (await request("hd_status")).generation;
+  const beforeUpdate = snapshot();
+  const rootsBefore = generationRoots();
+  const update = request("hd_import", { blobUrl: createObjectURL(archive(2)), fileName: `${title}.zip` });
+  await new Promise((done) => setTimeout(done, 50));
+  const statusDuring = await request("hd_status");
+  const duringTarget = await request("hd_lookup", { text: query });
+  const duringOther = await request("hd_lookup", { text: trainedExpression });
+  const nativeDuring = snapshot();
+  hold = null;
+  release.resolve();
+  const updated = await update;
+  const updatedState = await storedDictionaryState();
+  const updatedPackage = updatedState.dictionaries.find((entry) => entry.title === title);
+  const afterUpdate = snapshot();
+  const afterLookup = await request("hd_lookup", { text: query });
+  const rootsAfter = generationRoots();
+  const oldRoot = ownedGenerationRoot(installedPackage.path, title);
+  const newRoot = ownedGenerationRoot(updatedPackage?.path, title);
+  check(
+    "lookups during an isolated update answer from the old generation, then the new one swaps in without a reset",
+    statusDuring.loading === true && statusDuring.generation === generationBefore
+      && duringTarget.ok === true && revisionOf(duringTarget) === "1" && duringTarget.generation === generationBefore
+      && duringOther.ok === true && duringOther.results.some((result) => result.term?.expression === trainedExpression)
+      && JSON.stringify(nativeDuring) === JSON.stringify(beforeUpdate)
+      && updated.ok === true && updatedPackage?.id === installedPackage.id && updatedPackage.revision === "rev-2"
+      && newRoot !== "" && newRoot !== oldRoot
+      && afterUpdate.resets === beforeUpdate.resets && afterUpdate.imports === beforeUpdate.imports + 1
+      && afterUpdate.removes === beforeUpdate.removes + 1 && afterUpdate.adds === beforeUpdate.adds + 1
+      && afterUpdate.reorders === beforeUpdate.reorders + 1
+      && afterLookup.generation === generationBefore + 1 && revisionOf(afterLookup) === "2"
+      && (await request("hd_status")).dictionaryCount === loadedCount + 1
+      && updatedState.dictionaries.filter((entry) => entry.id === installedPackage.id).length === 1
+      && (await memoryRow(title)).map((entry) => entry.path).join() === updatedPackage.path
+      && rootsBefore.includes(oldRoot) && !rootsAfter.includes(oldRoot) && rootsAfter.includes(newRoot),
+    JSON.stringify({ statusDuring, duringTarget: revisionOf(duringTarget), duringOther: duringOther.ok, nativeDuring, beforeUpdate,
+      afterUpdate, updated, updatedPackage, rootsBefore, rootsAfter, afterLookup: revisionOf(afterLookup) }),
+  );
+
+  // The importer fails: nothing in the engine changes and its debris is removed.
+  const beforeFailure = snapshot();
+  const generationBeforeFailure = (await request("hd_status")).generation;
+  importerFailure = new Error("injected import worker failure");
+  const failedImport = await request("hd_import", { blobUrl: createObjectURL(archive(3)), fileName: `${title}.zip` });
+  importerFailure = null;
+  const brokenReport = await request("hd_import", { blobUrl: createObjectURL(new Uint8Array(buildNotAZip())), fileName: "broken.zip" });
+  const afterFailure = snapshot();
+  const stateAfterFailure = await storedDictionaryState();
+  check(
+    "a failed isolated import leaves the engine untouched and removes its generation root",
+    failedImport.ok === false && failedImport.error.includes("injected import worker failure")
+      && brokenReport.ok === false && brokenReport.report?.success === false
+      // The broken archive reached the native importer; the loaded set did not move.
+      && JSON.stringify(afterFailure) === JSON.stringify({ ...beforeFailure, imports: beforeFailure.imports + 1 })
+      && (await request("hd_status")).generation === generationBeforeFailure
+      && revisionOf(await request("hd_lookup", { text: query })) === "2"
+      && JSON.stringify(stateAfterFailure) === JSON.stringify(updatedState)
+      && JSON.stringify(generationRoots()) === JSON.stringify(rootsAfter)
+      && failedRoot !== null && !stageEngine.FS.analyzePath(failedRoot).exists,
+    JSON.stringify({ failedImport, brokenReport, beforeFailure, afterFailure, failedRoot, roots: generationRoots() }),
+  );
+
+  // The commit conflicts: the new package is unloaded again, the old one kept.
+  conflictCas = true;
+  const beforeConflict = snapshot();
+  const conflicted = await request("hd_import", { blobUrl: createObjectURL(archive(3)), fileName: `${title}.zip` });
+  conflictCas = false;
+  const afterConflict = snapshot();
+  const stateAfterConflict = await storedDictionaryState();
+  const conflictLookup = await request("hd_lookup", { text: query });
+  check(
+    "an isolated update whose commit conflicts unloads the new generation and keeps the committed one",
+    conflicted.ok === false && conflicted.error.includes("injected commit conflict") && casConflicts === 3
+      && JSON.stringify(stateAfterConflict) === JSON.stringify(updatedState)
+      && afterConflict.resets === beforeConflict.resets
+      && afterConflict.removes === beforeConflict.removes + 2 && afterConflict.adds === beforeConflict.adds + 2
+      && conflictLookup.ok === true && revisionOf(conflictLookup) === "2"
+      && (await memoryRow(title)).map((entry) => entry.path).join() === updatedPackage.path
+      && JSON.stringify(generationRoots()) === JSON.stringify(rootsAfter)
+      && (await request("hd_status")).ok === true,
+    JSON.stringify({ conflicted, casConflicts, beforeConflict, afterConflict, conflictLookup: revisionOf(conflictLookup), roots: generationRoots() }),
+  );
+  await request("hd_remove", { id: installedPackage.id, title });
+}
+
 /* ------------------------------------------------------- renderer integration stage */
 
-// jsdom is not a repo dependency: it lives in the same out-of-repo tree as
-// puppeteer-core, so a checkout carries neither. ESM ignores NODE_PATH, hence
-// resolving through require() before importing.
+// Prefer locked test tooling, while preserving external dependency overrides.
+// ESM ignores NODE_PATH, hence resolving through require() before importing.
 function jsdomSearchPaths() {
   return [
     ...(process.env.HACHIDORI_JSDOM ? [process.env.HACHIDORI_JSDOM] : []),
     ...(process.env.NODE_PATH ? process.env.NODE_PATH.split(":").filter(Boolean) : []),
+    resolve(HERE, "tooling"),
     ROOT,
     HERE,
     DEFAULT_JSDOM_TREE,
@@ -9493,6 +9931,7 @@ async function settingsNavigationStage() {
       requests.push(structuredClone(message));
       if (message.type === "hd_state_read") return { ok: true, state: structuredClone(state) };
       if (message.type === "hd_status") return { ok: true, ready: true, loading: false, dictionaryCount: 2 };
+      if (message.type === "hd_memory") return { ok: true, heapBytes: 0, dictionaries: [] };
       if (message.type === "hd_custom_read") return { ok: true, document: { schemaVersion: 1, revision: 0,
         semanticRevision: "a".repeat(64), text: "" } };
       if (message.type === "hd_backup_auto_list") {
@@ -9946,7 +10385,7 @@ async function startupPageStage() {
       && JSON.stringify(actions().map(([id]) => id)) === JSON.stringify(["setup-retry", "setup-continue"])
       && JSON.stringify(rows()) === JSON.stringify([["jitendex", "Not installed"], ["jmnedict", "Already installed"],
         ["bees-ultimate-kanji-dictionary", "Already installed"], ["jiten", "Not installed"],
-        ["bees-ultimate-grammar-dictionary", "Already installed"], ["sankoku8-eng", "Already installed"]]);
+        ["bees-ultimate-grammar-dictionary", "Already installed"]]);
 
     installReply = () => runA(1, [entry("jitendex", "waiting"), entry("jiten", "waiting")]);
     document.getElementById("setup-retry").focus();
@@ -9959,7 +10398,7 @@ async function startupPageStage() {
       && currentStep() === "dictionaries" && doneSteps() === 0
       && JSON.stringify(rows()) === JSON.stringify([["jitendex", "Waiting"], ["jmnedict", "Already installed"],
         ["bees-ultimate-kanji-dictionary", "Already installed"], ["jiten", "Waiting"],
-        ["bees-ultimate-grammar-dictionary", "Already installed"], ["sankoku8-eng", "Already installed"]])
+        ["bees-ultimate-grammar-dictionary", "Already installed"]])
       && document.querySelector('#setup-body a[href="settings.html#add-dictionaries"]') !== null
       && document.querySelectorAll("#setup-actions button").length === 0
       && status().textContent === "Installing default dictionaries…";
@@ -9998,7 +10437,7 @@ async function startupPageStage() {
     const failureView = heading() === "Some dictionaries could not be installed"
       && JSON.stringify(rows()) === JSON.stringify([["jitendex", "Installed in 3.2 seconds"], ["jmnedict", "Already installed"],
         ["bees-ultimate-kanji-dictionary", "Already installed"], ["jiten", "Failed: could not read jiten-frequency.zip: HTTP 503"],
-        ["bees-ultimate-grammar-dictionary", "Already installed"], ["sankoku8-eng", "Already installed"]])
+        ["bees-ultimate-grammar-dictionary", "Already installed"]])
       && JSON.stringify(actions()) === JSON.stringify([["setup-retry", "Retry missing dictionaries", "primary-button"], ["setup-continue", "Continue setup", "ghost"]])
       && document.getElementById("setup-countdown-label") === null && installs().length === 2;
 
@@ -10803,7 +11242,7 @@ async function sourceHighlightStage() {
   const highlighter = window.HDPopup.createSourceHighlighter(window, document, "test-source");
   const candidate = id => {
     const element = document.getElementById(id);
-    return { sourceElements: [element], sentence: element.textContent, matchOffset: id === "a" ? 1 : 0 };
+    return { sourceElements: [element], sourceText: element.textContent, sourceOffset: id === "a" ? 1 : 0 };
   };
   const visits = { a: 0, b: 0 };
   const createWalker = document.createTreeWalker.bind(document);
@@ -10844,7 +11283,7 @@ async function sourceHighlightStage() {
     shadow.append(nested);
     left.append(host);
     document.body.append(left, right);
-    a.apply({ sourceElements: [nested], sentence: "読む", matchOffset: 0 }, "読む");
+    a.apply({ sourceElements: [nested], sourceText: "読む", sourceOffset: 0 }, "読む");
     right.append(host);
     await settle();
     host.remove();
@@ -10864,7 +11303,7 @@ async function sourceHighlightStage() {
     suspendSource.textContent = "食べる";
     document.body.append(suspendSource);
     const suspendScope = highlighter.scope("suspend");
-    const suspendCandidate = { sourceElements: [suspendSource], sentence: suspendSource.textContent, matchOffset: 0 };
+    const suspendCandidate = { sourceElements: [suspendSource], sourceText: suspendSource.textContent, sourceOffset: 0 };
     suspendScope.apply(suspendCandidate, "食べる");
     const publishedBefore = texts() === "食べる";
     const releaseFirst = highlighter.suspend();
@@ -10888,11 +11327,11 @@ async function sourceHighlightStage() {
     });
     document.body.append(...boxes);
     const boxedScope = highlighter.scope("boxed");
-    boxedScope.apply({ sourceElements: boxes.map((box) => box.firstChild), sentence: "食べた", matchOffset: 1 }, "べた");
+    boxedScope.apply({ sourceElements: boxes.map((box) => box.firstChild), sourceText: "食べた", sourceOffset: 1 }, "べた");
     const boxedRanges = ranges();
     const boxedPainted = texts() === "べ|た" && boxedRanges.length === 2
       && boxedRanges.every((range, index) => range.startContainer === boxes[index + 1].firstChild);
-    // Text changing elsewhere in the sentence leaves the match in place.
+    // Text changing elsewhere in the sources leaves the match in place.
     boxes[0].firstChild.data = "俺";
     await settle();
     const boxedNeighbour = texts() === "べ|た";
@@ -10949,12 +11388,12 @@ async function sourceHighlightFallbackCase(window) {
     return queryDocument(selector, ...args);
   };
   try {
-    first.apply({ sourceElements: [source], sentence: source.textContent, matchOffset: 1 }, "食べる");
+    first.apply({ sourceElements: [source], sourceText: source.textContent, sourceOffset: 1 }, "食べる");
     await frame();
     const mark = marks()[0];
     const exact = marks().length === 1 && mark.style.left === "100px" && mark.style.top === "200px"
       && mark.style.width === "50px" && mark.style.height === "16px";
-    second.apply({ sourceElements: [otherSource], sentence: otherSource.textContent, matchOffset: 0 }, "Keep");
+    second.apply({ sourceElements: [otherSource], sourceText: otherSource.textContent, sourceOffset: 0 }, "Keep");
     await frame();
     const both = marks().length === 2 && marks()[0] === mark;
     const beforeClear = geometryReads;
@@ -10987,7 +11426,7 @@ async function sourceHighlightFallbackCase(window) {
     await frame();
     delete document.getAnimations;
     delete sibling.getAnimations;
-    second.apply({ sourceElements: [otherSource], sentence: otherSource.textContent, matchOffset: 0 }, "Keep");
+    second.apply({ sourceElements: [otherSource], sourceText: otherSource.textContent, sourceOffset: 0 }, "Keep");
     await frame();
     source.style.visibility = "hidden";
     second.clear(); // Preserve pending source geometry before reconnecting observers.
@@ -11045,7 +11484,7 @@ async function sourceHighlightFallbackCase(window) {
     const adoptedBefore = document.adoptedStyleSheets;
     document.adoptedStyleSheets = [pageStyle.sheet, sharedStyle.sheet];
     otherShadow.adoptedStyleSheets = [pageStyle.sheet];
-    second.apply({ sourceElements: [shadowSource], sentence: "Keep", matchOffset: 0 }, "Keep");
+    second.apply({ sourceElements: [shadowSource], sourceText: "Keep", sourceOffset: 0 }, "Keep");
     await frame();
     await frame();
     const beforeSheetSwitch = coverScans;
@@ -11069,7 +11508,7 @@ async function sourceHighlightFallbackCase(window) {
     let documentRoot;
     try {
       view.renderKanji({ character: "食", entries: [] },
-        { sourceElements: [source], sentence: source.textContent, matchOffset: 1 });
+        { sourceElements: [source], sourceText: source.textContent, sourceOffset: 1 });
       await frame();
       documentRoot = document.body.querySelectorAll(":scope > .gsm-hoshidicts-source-highlight-layer").length === 1;
     } finally { view.destroy(); popup.remove(); }
@@ -11342,6 +11781,17 @@ async function designPreviewStage() {
       ? { ...entry, displayName: "Unrelated renamed dictionary" } : entry) };
     update();
     kanjiSource &&= query(".gsm-hoshidicts-glossary-card") === kanjiCard;
+    // A group sample shows one card per member behind member tabs, in group order.
+    state = { ...state, revision: 3, groups: [{ id: "kanji-group", name: "Kanji", dictionaryIds: ["second", "first"] }] };
+    options = { ...options, kanjiClickDictionary: { kind: "tabGroup", id: "kanji-group" } };
+    update();
+    kanjiSource &&= JSON.stringify([...popup.querySelectorAll('[role="tab"]')].map(tab => tab.textContent))
+      === JSON.stringify(["All", "Second", "Unrelated renamed dictionary"])
+      && JSON.stringify([...popup.querySelectorAll(".gsm-hoshidicts-glossary-card-title")].map(title => title.title))
+        === JSON.stringify(["Second", "First"])
+      && popup.textContent.includes("ショク · ジキ") && popup.textContent.includes("sample single-kanji entry")
+      && query("form") === kanjiNote;
+    state = { ...state, revision: 4, groups: [] };
     options = { ...options, kanjiClickDictionary: { title: "Second", kind: "kanji" } };
     update();
     kanjiSource &&= query(".gsm-hoshidicts-kanji-glyph")?.textContent === "食"
@@ -12694,11 +13144,14 @@ async function settingsManagedUpdatesStage() {
       lastChecked: window.document.getElementById("update-last-checked")?.textContent ?? "",
       managedStatus: managedRow()?.querySelector(".dict-update-status")?.textContent ?? "",
       managedUpdateHidden: managedRow()?.querySelector(".dict-update")?.hidden,
+      managedCheckHidden: managedRow()?.querySelector(".dict-update-check")?.hidden,
       insecureMetadata: insecureRow()?.querySelector(".dict-metadata")?.textContent ?? "",
       insecureStatus: insecureRow()?.querySelector(".dict-update-status")?.textContent ?? "",
       insecureUpdateHidden: insecureRow()?.querySelector(".dict-update")?.hidden,
+      insecureCheckHidden: insecureRow()?.querySelector(".dict-update-check")?.hidden,
       localStatus: localRow()?.querySelector(".dict-update-status")?.textContent ?? "",
       localUpdateHidden: localRow()?.querySelector(".dict-update")?.hidden,
+      localCheckHidden: localRow()?.querySelector(".dict-update-check")?.hidden,
     },
   };
 
@@ -12707,6 +13160,13 @@ async function settingsManagedUpdatesStage() {
   await waitSchedule(() => !window.document.getElementById("update-check-now")?.disabled);
   result.checkRequest = updateRequests.find((request) => request.type === "hd_updates_check");
   result.checkedState = window.document.getElementById("update-state")?.textContent ?? "";
+
+  managedRow()?.querySelector(".dict-update-check")?.click();
+  result.rowCheckDisabled = managedRow()?.querySelector(".dict-update-check")?.disabled;
+  await waitSchedule(() => updateRequests.filter(request => request.type === "hd_updates_check").length === 2);
+  await waitSchedule(() => !window.document.getElementById("update-check-now")?.disabled);
+  result.rowCheckRequest = updateRequests.filter(request => request.type === "hd_updates_check")[1];
+  result.rowCheckedState = window.document.getElementById("update-state")?.textContent ?? "";
 
   managedRow()?.querySelector(".dict-update")?.click();
   await waitSchedule(() => updateRequests.filter((request) => request.type === "hd_updates_install").length >= 1);
@@ -14044,6 +14504,7 @@ async function staleKanjiResponseStage(invalidation) {
   window.eval(readFileSync(resolve(EXTENSION, "reader-options.js"), "utf8"));
   window.eval(readFileSync(resolve(EXTENSION, "dictionary-group-state.js"), "utf8"));
   window.eval(readFileSync(resolve(EXTENSION, "lookup-stats-identity.js"), "utf8"));
+  window.eval(readFileSync(resolve(EXTENSION, "sentence.js"), "utf8"));
   window.eval(instrumented);
   const anchor = window.document.getElementById("anchor");
   const popup = window.document.createElement("div");
@@ -14122,13 +14583,13 @@ async function contentNoteStage() {
   const { JSDOM } = jsdom;
   const settle = () => new Promise((resolvePromise) => setTimeout(resolvePromise, 0));
 
-  async function createHarness(kanjiClickDictionary = { title: "Generic", kind: "term" }, { holdLookupStats = false, options: optionOverrides = {}, deferInitialStorage = false } = {}) {
+  async function createHarness(kanjiClickDictionary = { title: "Generic", kind: "term" }, { holdLookupStats = false, options: optionOverrides = {}, deferInitialStorage = false, url = "https://example.test/" } = {}) {
     const dom = new JSDOM(
       "<!doctype html><body><span id=anchor>\u98df\u3079\u305f</span></body>",
       {
         pretendToBeVisual: true,
         runScripts: "outside-only",
-        url: "https://example.test/",
+        url,
       },
     );
     const { window } = dom;
@@ -14336,6 +14797,8 @@ async function contentNoteStage() {
     hideTimerPending() { return hideTimer !== null; },
     viewRequest(depth = 0) { return levels[depth]?.currentViewRequest; },
     resolveCandidate,
+    resolveSelectedLookupCandidate,
+    resolveSelectionScanCandidate,
     resolveDefinitionCandidate(clientX, clientY, depth = 0) {
       return resolveDefinitionCandidate(clientX, clientY, levels[depth]);
     },
@@ -14383,6 +14846,7 @@ async function contentNoteStage() {
     window.eval(readFileSync(resolve(EXTENSION, "reader-options.js"), "utf8"));
     window.eval(readFileSync(resolve(EXTENSION, "dictionary-group-state.js"), "utf8"));
     window.eval(readFileSync(resolve(EXTENSION, "lookup-stats-identity.js"), "utf8"));
+    window.eval(readFileSync(resolve(EXTENSION, "sentence.js"), "utf8"));
     window.eval(readFileSync(resolve(EXTENSION, "audio-content.js"), "utf8"));
     window.eval(readFileSync(resolve(EXTENSION, "anki-content.js"), "utf8"));
     window.eval(instrumented);
@@ -14405,7 +14869,10 @@ async function contentNoteStage() {
         text,
       })),
       sentence: "\u98df\u3079\u305f",
+      sentenceSource: "\u98df\u3079\u305f",
       sourceElements: [anchor],
+      sourceOffset: 0,
+      sourceText: "\u98df\u3079\u305f",
       vertical: false,
     };
 
@@ -15315,6 +15782,85 @@ async function contentNoteStage() {
     return outcomes;
   }
 
+  async function kanjiGroupCase() {
+    const outcomes = {};
+    const packages = [
+      genericPackage({ id: "terms-a", title: "Terms A", path: "/dicts/Terms A" }),
+      genericPackage({ id: "native-b", title: "Native B", path: "/dicts/Native B", termCount: 0, kanjiCount: 1 }),
+      genericPackage({ id: "terms-c", title: "Terms C", path: "/dicts/Terms C" }),
+      genericPackage({ id: "native-d", title: "Native D", path: "/dicts/Native D", termCount: 0, kanjiCount: 1 }),
+    ];
+    const groupState = (revision, dictionaryIds) => ({ schemaVersion: 1, revision, dictionaries: packages,
+      groups: [{ id: "kanji-group", name: "Kanji", dictionaryIds }] });
+    const nativeEntry = (dictionary) => ({ dictionary, onyomi: "ショク", kunyomi: "", tags: "", definitions: ["eat"], stats: [] });
+    const harness = await createHarness({ kind: "tabGroup", id: "kanji-group" });
+    const pendingLookup = (dictionary) => {
+      const index = harness.pending.findIndex(({ request }) =>
+        request.type === "hd_lookup_dictionary" && request.dictionary === dictionary);
+      return index < 0 ? null : harness.pending.splice(index, 1)[0];
+    };
+    const issued = (start) => harness.sent.slice(start)
+      .filter((request) => ["hd_kanji", "hd_lookup_dictionary"].includes(request.type))
+      .map((request) => request.dictionary ?? request.type);
+    try {
+      harness.emitState(groupState(2, ["terms-a", "native-b", "terms-c"]));
+      await harness.initialLookup();
+      const start = harness.sent.length;
+      const clicked = harness.driver.showKanji("食");
+      const fanOut = issued(start);
+      // Replies land out of group order; the merged view still follows the group,
+      // and a native entry outside the group stays out of it.
+      harness.reply(pendingLookup("Terms C"), { dictionaryCount: 4, results: [harness.term("食", "Terms C")] });
+      harness.reply(harness.take("hd_kanji"), { kanji: { character: "食", entries: [nativeEntry("Native D"), nativeEntry("Native B")] } });
+      harness.reply(pendingLookup("Terms A"), { dictionaryCount: 4, results: [harness.term("食", "Terms A")] });
+      await clicked;
+      const render = harness.render();
+      const nativeGlossary = render.kind === "terms" ? JSON.parse(render.results[1]?.term.glossaries[0]?.glossary ?? "null") : null;
+      outcomes["a clicked-kanji group asks every member at once and renders merged results as ordered member tabs"] =
+        JSON.stringify(fanOut) === JSON.stringify(["hd_kanji", "Terms A", "Terms C"])
+        && render.kind === "terms"
+        && JSON.stringify(render.results.map((result) => [result.term.expression, result.term.reading,
+          result.term.glossaries.map((glossary) => glossary.dictionary)]))
+          === JSON.stringify([["食", "よみ", ["Terms A", "Terms C"]], ["食", "", ["Native B"]]])
+        && nativeGlossary?.[0]?.type === "structured-content"
+        && JSON.stringify(nativeGlossary).includes("ショク") && JSON.stringify(nativeGlossary).includes("eat")
+        && JSON.stringify(render.context.dictionaryTabScope) === JSON.stringify(["Terms A", "Native B", "Terms C"])
+        && typeof render.context.onBack === "function";
+      await render.context.onBack();
+
+      // A group that misses everywhere falls back to the automatic native
+      // entries the fan-out already returned.
+      const missStart = harness.sent.length;
+      const missed = harness.driver.showKanji("食");
+      harness.reply(pendingLookup("Terms A"), { dictionaryCount: 4, results: [] });
+      harness.reply(pendingLookup("Terms C"), { dictionaryCount: 4, results: [] });
+      harness.reply(harness.take("hd_kanji"), { kanji: { character: "食", entries: [nativeEntry("Native D")] } });
+      await missed;
+      outcomes["a clicked-kanji group that misses everywhere falls back to automatic native kanji without another request"] =
+        harness.render().kind === "kanji"
+        && JSON.stringify(harness.render().value.entries.map((entry) => entry.dictionary)) === JSON.stringify(["Native D"])
+        && JSON.stringify(issued(missStart)) === JSON.stringify(["hd_kanji", "Terms A", "Terms C"]);
+      await harness.render().context.onBack();
+
+      // A term-only group defers the native fallback until every member misses.
+      harness.emitState(groupState(3, ["terms-c", "terms-a"]));
+      const termsStart = harness.sent.length;
+      const termsOnly = harness.driver.showKanji("食");
+      const eager = issued(termsStart);
+      harness.reply(pendingLookup("Terms A"), { dictionaryCount: 4, results: [] });
+      harness.reply(pendingLookup("Terms C"), { dictionaryCount: 4, results: [] });
+      await harness.settle();
+      harness.reply(harness.take("hd_kanji"), { kanji: { character: "食", entries: [nativeEntry("Native B")] } });
+      await termsOnly;
+      outcomes["a term-only clicked-kanji group asks for native kanji only after every member misses"] =
+        JSON.stringify(eager) === JSON.stringify(["Terms C", "Terms A"])
+        && JSON.stringify(issued(termsStart)) === JSON.stringify(["Terms C", "Terms A", "hd_kanji"])
+        && harness.render().kind === "kanji"
+        && harness.render().value.entries[0].dictionary === "Native B";
+    } finally { harness.close(); }
+    return outcomes;
+  }
+
   async function eventFirstCase() {
     const harness = await createHarness();
     await harness.initialLookup();
@@ -15760,7 +16306,8 @@ async function contentNoteStage() {
       const oneBatch = frames.size === 1 && layouts === 0;
       frame();
       recordMasonryReads = false;
-      const resize = layouts === 4 && rootReads === 1 && popupReads === 4 && frames.size === 0
+      // Placement measures each pane's source text, never the panes themselves.
+      const resize = layouts === 4 && rootReads === 1 && popupReads === 0 && frames.size === 0
         && initialMasonryReads.length === 8 && initialMasonryReads.every(read =>
           read.widths.every(width => width !== "" && width === read.widths[0])
           && read.transforms.every(transform => transform === ""))
@@ -15776,7 +16323,7 @@ async function contentNoteStage() {
       layouts = 0; rootReads = 0; popupReads = 0;
       observers.forEach(observer => observer.callback());
       frame();
-      const observerFollowup = layouts === 4 && rootReads === 1 && popupReads === 4 && frames.size === 0
+      const observerFollowup = layouts === 4 && rootReads === 1 && popupReads === 0 && frames.size === 0
         && [0, 1, 2, 3].every(depth => {
           const popup = harness.driver.popupAt(depth);
           const card = popup.querySelector(".gsm-hoshidicts-glossary-grid").firstElementChild;
@@ -15971,6 +16518,139 @@ async function contentNoteStage() {
     harness.close();
     return { "ancestor pointer return prunes descendants but preserves drafts and a stationary departure resumes scanning":
       corridor && reactivated && parentReturn && draftRetained && beforeGrace && lookup?.request.text === "new page word" };
+  }
+
+  // Issue #299: a child opens beside its own source text, like Yomitan, not
+  // beside its parent's box. The placement loop reads no pane rectangles.
+  async function nestedPlacementCase() {
+    const harness = await createHarness();
+    const window = harness.anchor.ownerDocument.defaultView;
+    try {
+      await harness.initialLookup();
+      const open = async (query, depth) => {
+        const operation = harness.internalLink({ query }, depth);
+        harness.reply(harness.take("hd_lookup"), { dictionaryCount: 1, results: [harness.term(query)] });
+        await operation;
+        return harness.driver.viewRequest(depth + 1).candidate.anchor;
+      };
+      const childLink = await open("child", 0);
+      const grandchildLink = await open("grandchild", 1);
+      const box = (left, top, width, height) => () => ({ left, top, right: left + width, bottom: top + height, width, height });
+      let paneReads = 0;
+      for (const depth of [0, 1, 2]) {
+        harness.driver.popupAt(depth).getBoundingClientRect = () => { paneReads += 1; return box(0, 0, 0, 0)(); };
+      }
+      const geometry = (depth) => {
+        const popup = harness.driver.popupAt(depth);
+        return { left: Number.parseFloat(popup.style.left), top: Number.parseFloat(popup.style.top),
+          width: Number.parseFloat(popup.style.width), height: Number.parseFloat(popup.style.height),
+          toolbar: popup.dataset.toolbarPosition };
+      };
+      const same = (actual, expected) => Object.entries(expected).every(([key, value]) => actual[key] === value);
+      // Room below the word: the child hangs from the word's line, left aligned,
+      // and its Automatic toolbar sits at the top, nearest the word.
+      childLink.getBoundingClientRect = box(300, 200, 40, 20);
+      grandchildLink.getBoundingClientRect = box(330, 700, 40, 20);
+      harness.callbacks(0).positionPopup();
+      const below = same(geometry(1), { left: 300, top: 224, width: 560, height: 420, toolbar: "top" });
+      // No room below the grandchild's word: it rises above that word instead,
+      // still measured from its own link rather than the child's pane.
+      const above = same(geometry(2), { left: 330, top: 276, width: 560, height: 420, toolbar: "bottom" });
+      // The viewport clamps the left edge without moving the vertical anchor.
+      childLink.getBoundingClientRect = box(900, 200, 40, 20);
+      harness.callbacks(1).positionPopup();
+      const clamped = same(geometry(1), { left: 458, top: 224 });
+      const noPaneReads = paneReads === 0;
+      // A pane whose word fits on neither side takes the roomier side, clamped
+      // to the viewport; a preferred edge overrides the automatic toolbar.
+      harness.emitOptions({ popupToolbarPosition: "bottom" });
+      childLink.getBoundingClientRect = box(300, 200, 40, 20);
+      harness.callbacks(1).positionPopup();
+      const explicitToolbar = same(geometry(1), { left: 300, top: 224, toolbar: "bottom" });
+      harness.emitOptions({ popupToolbarPosition: "auto" });
+      window.innerHeight = 500;
+      childLink.getBoundingClientRect = box(300, 260, 40, 20);
+      harness.callbacks(1).positionPopup();
+      const roomier = same(geometry(1), { left: 300, top: 6, toolbar: "bottom" });
+      window.innerHeight = 768;
+      // Scale and zoom convert the word's page rectangle into popup pixels.
+      harness.emitOptions({ popupToolbarPosition: "auto", popupScalePercent: 50 });
+      harness.callbacks(1).positionPopup();
+      const scaled = same(geometry(1), { left: 600, top: 564, width: 560, height: 420 });
+      return { "child popups anchor to their own source text below or above it and read no pane rectangles":
+        below && above && clamped && noPaneReads && explicitToolbar && roomier && scaled
+        || { below, above, clamped, noPaneReads, explicitToolbar, roomier, scaled } };
+    } finally { harness.close(); }
+  }
+
+  // Issue #299: a primary press in an ancestor retires its descendants at once,
+  // even focused ones, without waiting for the hover-hide delay. Drafts stay
+  // protected, and a press on a link keeps that link's own child for its click.
+  async function nestedClickCase() {
+    const harness = await createHarness();
+    const window = harness.anchor.ownerDocument.defaultView;
+    const timers = new Map();
+    let nextTimer = 0;
+    try {
+      await harness.initialLookup();
+      const parent = harness.driver.viewRequest();
+      const open = async (query, depth) => {
+        const operation = harness.internalLink({ query }, depth);
+        harness.reply(harness.take("hd_lookup"), { dictionaryCount: 1, results: [harness.term(query)] });
+        await operation;
+        return harness.driver.viewRequest(depth + 1);
+      };
+      const press = (target, init = {}) => target.dispatchEvent(new window.MouseEvent("mousedown", { bubbles: true, button: 0, ...init }));
+      window.setTimeout = (callback, delay) => { timers.set(++nextTimer, { callback, delay }); return nextTimer; };
+      window.clearTimeout = (id) => timers.delete(id);
+      const child = await open("child", 0);
+      await open("grandchild", 1);
+      const grandchildPopup = harness.driver.popupAt(2);
+      grandchildPopup.tabIndex = -1;
+      grandchildPopup.focus();
+      const sent = harness.sent.length;
+      press(harness.driver.popupAt(1));
+      const childPress = !harness.driver.popupAt(2) && grandchildPopup.hidden && grandchildPopup.isConnected === false
+        && harness.driver.viewRequest(1) === child && !harness.driver.snapshot(1).popupHidden
+        && harness.driver.viewRequest() === parent && harness.sent.length === sent
+        && harness.popup.getRootNode().activeElement !== child.candidate.anchor;
+      await open("grandchild again", 1);
+      press(harness.popup, { button: 2 });
+      const secondaryIgnored = Boolean(harness.driver.popupAt(2)) && Boolean(harness.driver.popupAt(1));
+      // A pending definition scan cannot reopen what the press dismissed.
+      harness.driver.onPopupMouseMove({ target: harness.popup, clientX: 20, clientY: 20, buttons: 0 }, 0);
+      const scanArmed = [...timers.values()].some((timer) => timer.delay === 0);
+      press(harness.popup);
+      const rootPress = !harness.driver.popupAt(1) && !harness.driver.popupAt(2) && !harness.driver.snapshot().popupHidden
+        && harness.driver.viewRequest() === parent && scanArmed && ![...timers.values()].some((timer) => timer.delay === 0);
+      // A press on an internal link keeps that link's own child for the click
+      // to reuse or replace, and retires only the branch below it.
+      const linked = await open("linked", 0);
+      await open("below linked", 1);
+      const anchor = linked.candidate.anchor;
+      anchor.dataset.hoshidictsQuery = "linked";
+      press(anchor);
+      const linkPress = harness.driver.viewRequest(1) === linked && !harness.driver.snapshot(1).popupHidden
+        && !harness.driver.popupAt(2);
+      // A draft or pending append protects descendants from an ancestor press.
+      harness.edit(true, 1);
+      press(harness.popup);
+      const draftRetained = harness.driver.viewRequest(1) === linked && harness.driver.snapshot(1).noteEditing;
+      harness.edit(false, 1);
+      press(harness.popup);
+      const closedDraftDismissed = !harness.driver.popupAt(1) && !harness.driver.snapshot().popupHidden;
+      // A late reply for a child pending at the press cannot revive it.
+      const pending = harness.internalLink({ query: "late" });
+      const request = harness.take("hd_lookup");
+      press(harness.popup);
+      const pendingPruned = !harness.driver.popupAt(1);
+      harness.reply(request, { dictionaryCount: 1, results: [harness.term("late")] });
+      await pending;
+      const lateIgnored = !harness.driver.popupAt(1) && harness.driver.viewRequest() === parent && !harness.driver.snapshot().popupHidden;
+      return { "an ancestor press dismisses focused, hovered and pending descendants at once while drafts and link presses are left alone":
+        childPress && secondaryIgnored && rootPress && linkPress && draftRetained && closedDraftDismissed && pendingPruned && lateIgnored
+        || { childPress, secondaryIgnored, rootPress, linkPress, draftRetained, closedDraftDismissed, pendingPruned, lateIgnored } };
+    } finally { harness.close(); }
   }
 
   async function nestedNotesCase() {
@@ -16667,6 +17347,69 @@ async function contentNoteStage() {
     return result;
   }
 
+  async function selectionLanguageCase() {
+    const outcomes = [];
+    for (const onlyScanJapaneseText of [true, false]) {
+      for (const query of ["hello", "hello world", "https://example.test", "食べる", "hello食べる"]) {
+        const harness = await createHarness(undefined, { options: { onlyScanJapaneseText } });
+        const window = harness.popup.ownerDocument.defaultView;
+        // The following Japanese text must not make an English selection scannable.
+        harness.anchor.textContent = query + "食べる";
+        const selection = window.getSelection();
+        selection.setBaseAndExtent(harness.anchor.firstChild, 0, harness.anchor.firstChild, query.length);
+        const exact = harness.driver.resolveSelectedLookupCandidate();
+        const scan = harness.driver.resolveSelectionScanCandidate();
+        window.document.dispatchEvent(new window.Event("selectionchange"));
+        const lookup = harness.take("hd_lookup");
+        const allowed = !onlyScanJapaneseText || query.includes("食");
+        if (lookup) harness.reply(lookup, { dictionaryCount: 1, results: [harness.term(query)] });
+        await harness.settle();
+        outcomes.push({ query, onlyScanJapaneseText, passed: Boolean(exact) === allowed
+          && Boolean(scan) === allowed && Boolean(lookup) === allowed
+          && harness.driver.snapshot().popupHidden === !allowed });
+        harness.close();
+      }
+    }
+    return { "both selection resolvers apply the Japanese gate to the selected text":
+      outcomes.every(value => value.passed) || outcomes };
+  }
+
+  async function selectionNoticeCase() {
+    const outcomes = [];
+    for (const showNoResultNotice of [true, false]) {
+      for (const dictionaryCount of [0, 1]) {
+        const harness = await createHarness(undefined, { options: { showNoResultNotice } });
+        const window = harness.popup.ownerDocument.defaultView;
+        harness.anchor.textContent = "ぬるぽがっ";
+        window.getSelection().selectAllChildren(harness.anchor);
+        window.document.dispatchEvent(new window.Event("selectionchange"));
+        const lookup = harness.take("hd_lookup");
+        if (lookup) harness.reply(lookup, { dictionaryCount, results: [] });
+        await harness.settle();
+        const visible = dictionaryCount === 0 || showNoResultNotice;
+        const missed = lookup !== null && harness.driver.snapshot().popupHidden === !visible
+          && (!visible || (harness.render()?.kind === "notice"
+            && harness.render().value.startsWith(dictionaryCount === 0
+              ? "No dictionaries loaded." : "No definition found.")));
+        // The miss keeps the unchanged selection, shown or hidden; a new selection looks up.
+        harness.driver.scanPointer({ target: harness.anchor, clientX: 200, clientY: 200 });
+        const retained = harness.take("hd_lookup") === null;
+        harness.anchor.textContent = "食べる";
+        window.getSelection().selectAllChildren(harness.anchor);
+        window.document.dispatchEvent(new window.Event("selectionchange"));
+        const next = harness.take("hd_lookup");
+        if (next) harness.reply(next, { dictionaryCount: 1, results: [harness.term("食べる")] });
+        await harness.settle();
+        outcomes.push({ showNoResultNotice, dictionaryCount, missed, retained,
+          passed: missed && retained && next?.request.text === "食べる"
+            && harness.render()?.kind === "terms" && !harness.driver.snapshot().popupHidden });
+        harness.close();
+      }
+    }
+    return { "selection miss notices are optional while the no-dictionaries notice stays visible":
+      outcomes.every(value => value.passed) || outcomes };
+  }
+
   async function selectionEditingCase() {
     const outcomes = [];
     for (const tag of ["button", "span", "contents", "restored", "restored-child"]) {
@@ -17149,9 +17892,12 @@ async function contentNoteStage() {
       && harness.take("hd_lookup") === null && rendered?.results.length === 1
       && rendered.results[0].term.expression === "食べる"
       && rendered.candidate.query === query
-      && rendered.candidate.sentence === " 食べたかった "
-      && rendered.candidate.matchOffset === 1
-      && rendered.candidate.sourceElements.map((node) => node.textContent).join("") === rendered.candidate.sentence;
+      && rendered.candidate.sentence === "食べたかった"
+      && rendered.candidate.matchOffset === 0
+      && rendered.candidate.sourceText === " 食べたかった "
+      && rendered.candidate.sourceOffset === 1
+      && rendered.candidate.sourceElements.map((node) => node.textContent).join("") === rendered.candidate.sourceText;
+    harness.emitOptions({ lookupMode: "activation", activationKey: "K", scanLength: 1, onlyScanJapaneseText: false });
     const raw = " hello\n world ";
     const rawRequest = selectText(raw);
     if (rawRequest) harness.reply(rawRequest, { dictionaryCount: 1, results: [] });
@@ -17244,12 +17990,13 @@ async function contentNoteStage() {
     const experimental = { ...globalThis.HDReaderOptions.DEFAULT_OPTIONS.experimental, longKeyScan: true };
     const harness = await createHarness(undefined, { options: { experimental } });
     const window = harness.popup.ownerDocument.defaultView;
-    window.Range.prototype.getClientRects = () => [];
+    window.Range.prototype.getClientRects = () => [{ left: 0, top: 0, right: 20, bottom: 20 }];
     const document = window.document;
     const block = document.createElement("p");
     block.style.display = "block";
     block.textContent = "\u3042".repeat(300);
     document.body.append(block);
+    document.elementFromPoint = () => block;
     const scan = () => {
       const range = document.createRange();
       range.setStart(block.firstChild, 0);
@@ -17293,15 +18040,180 @@ async function contentNoteStage() {
         flagOff === 9 && flagBackOn === 45 || { flagOff, flagBackOn } };
   }
 
+  async function hoverGlyphCase() {
+    const harness = await createHarness();
+    const { ownerDocument: document } = harness.popup;
+    const window = document.defaultView;
+    const label = document.createElement("a");
+    label.textContent = "𠮷食べた";
+    const cover = document.createElement("div");
+    document.body.append(label, cover);
+    let offset = 0;
+    document.caretRangeFromPoint = () => {
+      const range = document.createRange();
+      range.setStart(label.firstChild, offset);
+      range.collapse(true);
+      return range;
+    };
+    document.elementFromPoint = () => label;
+    const probes = [];
+    window.Range.prototype.getClientRects = function () {
+      probes.push(this.toString());
+      return [{ left: 10, right: 30, top: 10, bottom: 30 }];
+    };
+    const scan = (x, y) => harness.driver.resolveCandidate(x, y);
+    const inside = scan(15, 20)?.query === label.textContent;
+    const padding = scan(15, 50) === null;
+    const slack = scan(8.5, 20)?.query === label.textContent && scan(7, 20) === null;
+    document.elementFromPoint = () => cover;
+    const covered = scan(15, 20) === null;
+    document.elementFromPoint = () => document.body;
+    const ancestor = scan(15, 20)?.query === label.textContent;
+    document.elementFromPoint = () => label;
+    offset = 2; // Right half of a supplementary glyph: caret is after both code units.
+    const supplementary = scan(25, 20)?.query === label.textContent && probes.includes("𠮷");
+    offset = label.textContent.length;
+    const end = scan(50, 50) === null;
+    harness.close();
+    return {
+      "hover requires the pointed glyph within two pixels and rejects occluding elements":
+        (inside && padding && slack && covered && ancestor && end)
+        || { inside, padding, slack, covered, ancestor, end },
+      "hover in the trailing half of a supplementary glyph starts at its complete code point": supplementary,
+    };
+  }
+
+  // Google Docs paints text to <canvas>; with the flag script set it also draws
+  // `.kix-canvas-tile-content svg>g>rect` annotations carrying each text run in
+  // aria-label. The reader turns the hovered rect into an invisible SVG <text>
+  // imposter and scans that, as Yomitan's google-docs-util does.
+  function buildDocsTile(document, runs) {
+    const SVG = "http://www.w3.org/2000/svg";
+    const tile = document.createElement("div");
+    tile.className = "kix-canvas-tile-content";
+    const canvas = document.createElement("canvas");
+    const svg = document.createElementNS(SVG, "svg");
+    const group = document.createElementNS(SVG, "g");
+    const rects = runs.map((run, index) => {
+      const rect = document.createElementNS(SVG, "rect");
+      rect.setAttribute("aria-label", run);
+      rect.setAttribute("x", "100");
+      rect.setAttribute("y", String(20 + index * 40));
+      rect.setAttribute("transform", "matrix(1,0,0,1,0,0)");
+      rect.setAttribute("data-font-css", "400 14px Arial");
+      group.append(rect);
+      return rect;
+    });
+    svg.append(group);
+    tile.append(canvas, svg);
+    document.body.append(tile);
+    return { tile, canvas, svg, group, rects };
+  }
+
+  async function googleDocsCase() {
+    const { DEFAULT_OPTIONS } = globalThis.HDReaderOptions;
+    const on = { ...DEFAULT_OPTIONS.experimental, googleDocs: true };
+    const off = { ...DEFAULT_OPTIONS.experimental };
+    const harness = await createHarness(undefined, {
+      url: "https://docs.google.com/document/d/example/edit",
+    });
+    const { ownerDocument: document } = harness.popup;
+    const window = document.defaultView;
+    const run = "犬と一緒に公園を散歩する。";
+    const { canvas, group, rects: [rect, other] } = buildDocsTile(document, [run, "彼女は毎朝六時に起きて、"]);
+    // Ten CSS pixels per character from x=100; each imposter inherits its rect's row.
+    window.Range.prototype.getClientRects = function () {
+      const row = Number.parseFloat(this.startContainer.parentElement?.getAttribute?.("y") ?? "20");
+      return [{ left: 100 + this.startOffset * 10, right: 100 + this.endOffset * 10, top: row, bottom: row + 20 }];
+    };
+    const probeStyle = () => [...document.querySelectorAll("style")]
+      .find(style => style.textContent.includes("kix-canvas-tile-content"));
+    // Docs' tiles are only hit-testable while the reader's probe style is enabled.
+    let probed = 0;
+    let rectUnderPointer = rect;
+    document.elementFromPoint = () => {
+      const style = probeStyle();
+      if (style && style.disabled === false) {
+        probed += 1;
+        return rectUnderPointer;
+      }
+      return canvas;
+    };
+    document.caretRangeFromPoint = () => null;
+    const imposters = () => [...group.querySelectorAll("text")];
+    const scan = (x, y) => harness.driver.resolveCandidate(x, y);
+    const flag = (experimental) => harness.emitOptions({ hoverDelayMs: 0, lookupMode: "hover", scanLength: 9, experimental });
+
+    // Default: the flag is off, so Docs behaves as before and nothing is injected.
+    const flagOff = scan(185, 30);
+    const nothingInjected = probeStyle() === undefined && imposters().length === 0 && probed === 0;
+
+    flag(on);
+    const candidate = scan(185, 30); // Over 散, the ninth character.
+    const first = candidate?.scanEntries?.[0];
+    const imposter = imposters()[0];
+    const resolved = candidate?.query === "散歩する。" && candidate.sentence === run && candidate.matchOffset === 8
+      && candidate.sourceText === run && candidate.sourceOffset === 8 && first?.node === imposter?.firstChild
+      && candidate.anchor === imposter && candidate.anchorRange.toString() === "散" && candidate.vertical === false
+      && imposter.getAttribute("x") === "100" && imposter.getAttribute("y") === "20"
+      && imposter.style.getPropertyPriority("opacity") === "important" && probed === 1
+      && probeStyle().disabled === true;
+    const again = scan(195, 30); // 歩: same run, so the anchor node is shared.
+    const shared = again !== null && imposter !== undefined && again.anchor === imposter
+      && again.scanEntries[0].node === imposter.firstChild
+      && again.query === "歩する。" && imposters().length === 1;
+    rectUnderPointer = other;
+    const moved = scan(105, 70);
+    const replaced = moved?.query === "彼女は毎朝六時に起" && moved.sentence === "彼女は毎朝六時に起きて、"
+      && imposters().length === 1 && imposters()[0] !== imposter && moved.anchor === imposters()[0];
+    rectUnderPointer = null;
+    const margin = scan(5, 5);
+    const nothingElse = margin === null && imposters().length === 1;
+
+    rectUnderPointer = rect;
+    harness.driver.onMouseMove({ target: canvas, clientX: 185, clientY: 30 });
+    await harness.settle();
+    const request = harness.take("hd_lookup");
+    const lookedUp = request?.request.text === "散歩する。";
+
+    flag(off);
+    const flagOffAgain = scan(185, 30);
+    const released = imposters().length === 0 && probeStyle() === undefined;
+    harness.close();
+
+    // The same tile on another host is canvas as before, flag or no flag.
+    const elsewhere = await createHarness(undefined, { options: { experimental: on } });
+    const elsewhereDocument = elsewhere.popup.ownerDocument;
+    const built = buildDocsTile(elsewhereDocument, [run]);
+    elsewhereDocument.elementFromPoint = () => built.rects[0];
+    elsewhereDocument.caretRangeFromPoint = () => null;
+    const otherHost = elsewhere.driver.resolveCandidate(185, 30) === null
+      && elsewhereDocument.querySelector("style") === null && built.group.querySelector("text") === null;
+    elsewhere.close();
+
+    return {
+      "Google Docs annotation rects scan through an SVG imposter while the flag is on":
+        resolved && shared && replaced && nothingElse && lookedUp
+        || { candidate: candidate && { query: candidate.query, sentence: candidate.sentence, matchOffset: candidate.matchOffset },
+          resolved, shared, replaced, nothingElse, lookedUp, probed },
+      "the Docs path is inert while its flag is off and on other hosts":
+        flagOff === null && nothingInjected && flagOffAgain === null && released && otherHost
+        || { flagOff, nothingInjected, flagOffAgain, released, otherHost },
+    };
+  }
+
   async function scanExtractionCase() {
     const harness = await createHarness();
     const window = harness.popup.ownerDocument.defaultView;
-    window.Range.prototype.getClientRects = () => [];
     const document = window.document;
     const block = document.createElement("p");
     block.style.display = "block";
     document.body.append(block);
     const scan = (node, offset = 0) => {
+      document.elementFromPoint = () => node.parentElement;
+      window.Range.prototype.getClientRects = function () {
+        return this.startOffset === offset ? [{ left: 0, top: 0, right: 1, bottom: 1 }] : [];
+      };
       const range = document.createRange();
       range.setStart(node, offset);
       range.collapse(true);
@@ -17310,8 +18222,8 @@ async function contentNoteStage() {
     };
     block.innerHTML = '<b style="display:inline">食</b><i style="display:inline">べたかった</i>。';
     const inline = scan(block.firstChild.firstChild);
-    const crossedInline = inline?.query === "食べたかった。"
-      && inline.sourceElements.map((element) => element.textContent).join("") === inline.sentence;
+    const crossedInline = inline?.query === "食べたかった。" && inline.sentence === "食べたかった。"
+      && inline.sourceElements.map((element) => element.textContent).join("") === inline.sourceText;
     block.textContent = "hello world";
     const japaneseOnly = scan(block.firstChild) === null;
     harness.emitOptions({ onlyScanJapaneseText: false });
@@ -17391,13 +18303,16 @@ async function contentNoteStage() {
     const boxed = scan(glyphSpan.firstChild);
     const { scanLength } = window.HDReaderOptions.DEFAULT_OPTIONS;
     const boxedFirst = boxed?.query === Array.from(firstText).slice(2, 2 + scanLength).join("") && boxed.matchOffset === 2
-      && boxed.sentence === firstText && boxed.anchor === glyphSpan
+      && boxed.sentence === firstText && boxed.sourceOffset === 2 && boxed.anchor === glyphSpan
       && boxed.sourceElements.every((node) => node.nodeType === 3 && firstBlock.contains(node))
-      && boxed.sourceElements.map((node) => node.textContent).join("") === boxed.sentence
+      && boxed.sourceElements.map((node) => node.textContent).join("") === boxed.sourceText
+      && boxed.sourceText === firstText
       && boxed.vertical === false;
     const boxedSecond = scan(secondBlock.children[1].firstChild);
-    const boxedNext = boxedSecond?.query === "あ、やっぱり……」" && boxedSecond.sentence === "「あ、やっぱり……」"
-      && boxedSecond.matchOffset === 1 && boxedSecond.vertical === true;
+    // The flex glyph boxes are one line; the quotes around it are not part of its sentence.
+    const boxedNext = boxedSecond?.query === "あ、やっぱり……」" && boxedSecond.sentence === "あ、やっぱり……"
+      && boxedSecond.matchOffset === 0 && boxedSecond.sourceText === "「あ、やっぱり……」"
+      && boxedSecond.sourceOffset === 1 && boxedSecond.vertical === true;
     firstBlock.remove();
     secondBlock.remove();
     for (const separator of separators) separator.remove();
@@ -17415,6 +18330,96 @@ async function contentNoteStage() {
     };
   }
 
+  // Yomitan's sentence around the match (issue #292): a texthooker line, one
+  // sentence out of several in a text node, and the refinement to the matched
+  // word once the engine has answered.
+  async function sentenceBoundaryCase() {
+    const harness = await createHarness();
+    const window = harness.popup.ownerDocument.defaultView;
+    const document = window.document;
+    const scan = (node, offset = 0) => {
+      document.elementFromPoint = () => node.parentElement;
+      window.Range.prototype.getClientRects = function () {
+        return this.startOffset === offset ? [{ left: 0, top: 0, right: 1, bottom: 1 }] : [];
+      };
+      const range = document.createRange();
+      range.setStart(node, offset);
+      range.collapse(true);
+      document.caretRangeFromPoint = () => range;
+      return harness.driver.resolveCandidate(0, 0);
+    };
+    const summary = (candidate) => candidate && {
+      sentence: candidate.sentence, matchOffset: candidate.matchOffset,
+      sourceText: candidate.sourceText, sourceOffset: candidate.sourceOffset,
+    };
+    // texthooker-ui (PR #79): every hooked line is a <p> followed by a "\n" text
+    // node inside a flex <main>; a milestone <div> sits between two lines with
+    // no whitespace node before the next <p>.
+    const main = document.createElement("main");
+    main.style.cssText = "display:flex;flex-direction:column";
+    main.innerHTML = '\n<p>一行目の文</p>\n<p id="hooked">二行目に食べたかった言葉</p>\n'
+      + '<div style="display:flex"><div style="display:flex"><span>Milestone 1000 (1024)</span></div></div>'
+      + '<p id="after">三行目の文</p>\n';
+    document.body.append(main);
+    const hooked = summary(scan(document.getElementById("hooked").firstChild, 4));
+    const hookedLine = JSON.stringify(hooked) === JSON.stringify({
+      sentence: "二行目に食べたかった言葉", matchOffset: 4, sourceText: "二行目に食べたかった言葉", sourceOffset: 4,
+    });
+    const after = summary(scan(document.getElementById("after").firstChild));
+    const afterMilestone = JSON.stringify(after) === JSON.stringify({
+      sentence: "三行目の文", matchOffset: 0, sourceText: "三行目の文", sourceOffset: 0,
+    });
+    main.remove();
+
+    const block = document.createElement("div");
+    block.textContent = "一つ目の文だ。二つ目に食べたかった。三つ目の文だ。";
+    document.body.append(block);
+    const middle = summary(scan(block.firstChild, 11));
+    const middleSentence = JSON.stringify(middle) === JSON.stringify({
+      sentence: "二つ目に食べたかった。", matchOffset: 4, sourceText: block.textContent, sourceOffset: 11,
+    });
+    // A source line wrap inside a paragraph renders as one line, so it becomes
+    // spaces inside the sentence rather than its end; a preserved line break
+    // ends it. jsdom reports the longhand only when it is declared.
+    block.innerHTML = "<span>一つ目の文だ。二つ目に食べ\n  たかった。三つ目の文だ。</span>";
+    const wrapped = summary(scan(block.firstChild.firstChild, 11));
+    const wrappedSentence = wrapped?.sentence === "二つ目に食べ   たかった。" && wrapped.matchOffset === 4
+      && wrapped.sourceText === block.textContent;
+    block.firstChild.style.setProperty("white-space-collapse", "preserve");
+    const preserved = summary(scan(block.firstChild.firstChild, 11));
+    const preservedSentence = preserved?.sentence === "二つ目に食べ" && preserved.matchOffset === 4;
+    block.remove();
+
+    // The reply extends the match from the hovered glyph to the matched word:
+    // the dots of U.S.A. are not sentence terminators once it is the match.
+    harness.emitOptions({ onlyScanJapaneseText: false });
+    const paragraph = document.createElement("p");
+    paragraph.textContent = "The U.S.A. is big. Yes.";
+    document.body.append(paragraph);
+    const candidate = scan(paragraph.firstChild, 4);
+    const provisional = summary(candidate);
+    const operation = harness.driver.runLookup(candidate);
+    const request = harness.take("hd_lookup");
+    if (request) harness.reply(request, { dictionaryCount: 1, results: [harness.term("U.S.A.")] });
+    await operation;
+    await harness.settle();
+    const rendered = harness.render();
+    const refined = provisional?.sentence === "The U." && provisional.matchOffset === 4
+      && request?.request.text.startsWith("U.S.A. is big.") && rendered?.kind === "terms"
+      && rendered.candidate.sentence === "The U.S.A. is big." && rendered.candidate.matchOffset === 4
+      && rendered.candidate.sourceText === paragraph.textContent && rendered.candidate.sourceOffset === 4;
+    paragraph.remove();
+    harness.close();
+    return {
+      "a texthooker line is its own sentence, whether a newline node or only a block edge separates it from its neighbours":
+        (hookedLine && afterMilestone) || { hooked, after },
+      "one sentence of a text node is cut at its terminators while collapsed line wraps stay inside it":
+        (middleSentence && wrappedSentence && preservedSentence) || { middle, wrapped, preserved },
+      "the engine reply refines the sentence around the whole matched word":
+        refined || { provisional, request: request?.request.text, rendered: summary(rendered?.candidate) },
+    };
+  }
+
   async function autofocusedSearchCase() {
     const outcomes = [];
     for (const lookupMode of ["hover", "activation"]) {
@@ -17429,6 +18434,8 @@ async function contentNoteStage() {
         + '昨日すき焼きを<span style="display:inline">食べました</span></a>';
       document.body.append(search, example);
       const link = example.querySelector("a");
+      document.elementFromPoint = () => link;
+      window.Range.prototype.getClientRects = () => [{ left: 190, top: 190, right: 210, bottom: 210 }];
       const range = document.createRange();
       range.setStart(link.firstChild, 0);
       range.collapse(true);
@@ -17654,8 +18661,15 @@ async function contentNoteStage() {
       return { glossary, term, textNode: term.firstChild };
     }
 
+    // jsdom lays nothing out; put every glyph under the case's pointer.
+    function glyphsUnderPointer(harness) {
+      harness.popup.ownerDocument.defaultView.Range.prototype.getClientRects =
+        () => [{ left: 110, top: 70, right: 130, bottom: 90 }];
+    }
+
     const hover = await createHarness();
     try {
+      glyphsUnderPointer(hover);
       await hover.initialLookup();
       const parent = hover.driver.viewRequest();
       const first = appendGlossary(hover, "食用語");
@@ -17760,6 +18774,8 @@ async function contentNoteStage() {
         offset: 0,
       });
       const linkBoundary = hover.driver.resolveDefinitionCandidate(120, 80)?.query === "食";
+      // Past a line's end the caret still snaps into it; the glyph is not there.
+      const besideGlyph = hover.driver.resolveDefinitionCandidate(300, 80) === null;
 
       async function definitionLookup(onlyScanJapaneseText, text) {
         const language = await createHarness(
@@ -17767,6 +18783,7 @@ async function contentNoteStage() {
           { options: { onlyScanJapaneseText } },
         );
         try {
+          glyphsUnderPointer(language);
           await language.initialLookup();
           const latin = appendGlossary(language, text);
           language.popup.ownerDocument.caretPositionFromPoint = () => ({
@@ -17799,6 +18816,7 @@ async function contentNoteStage() {
         japaneseOnly,
         mixedNumeral,
         linkBoundary,
+        besideGlyph,
         missPreservedParent,
         nativeCaret,
         parentRetained,
@@ -17808,6 +18826,7 @@ async function contentNoteStage() {
 
       const activation = await createHarness();
       try {
+        glyphsUnderPointer(activation);
         activation.emitOptions({
           activationKey: "Shift",
           hoverDelayMs: 0,
@@ -18916,18 +19935,19 @@ async function contentNoteStage() {
     lookupStatistics: { ...await lookupStatisticsCase(), ...await lookupStatisticsRaceCase() },
     definitionBlur: { ...await definitionBlurCase(), ...await ankiMaturityBlurCase(),
       ...await frequencyDefinitionBlurCase() },
-    kanjiNavigation: await kanjiNavigationCase(),
+    kanjiNavigation: { ...await kanjiNavigationCase(), ...await kanjiGroupCase() },
     externalLinks: await externalLinksCase(),
-    scanning: { ...await pendingScanCase(), ...await definitionTextLookupCase(), ...await scanExtractionCase(), ...await longKeyWindowCase(), ...await matchedAnchorCase(), ...await popupWheelCase(), ...await movedMatchEndpointCase(),
+    scanning: { ...await pendingScanCase(), ...await definitionTextLookupCase(), ...await scanExtractionCase(), ...await sentenceBoundaryCase(), ...await longKeyWindowCase(), ...await hoverGlyphCase(), ...await googleDocsCase(), ...await matchedAnchorCase(), ...await popupWheelCase(), ...await movedMatchEndpointCase(),
       ...await autofocusedSearchCase(), ...await focusedEditingCase(), ...await shadowEditingCase(),
       ...await exactSelectionCase(), ...await selectedWordEditorCase(), ...await selectionActivationCase(),
       ...await selectionCancellationCase(), ...await selectionRecoveryCase(),
       ...await releasedSelectionDragCase(),
       ...await selectedTextCase(), ...await selectionDescriptorCase(), ...await selectionInvalidationCase(),
+      ...await selectionLanguageCase(), ...await selectionNoticeCase(),
       ...await selectionEditingCase(), ...await popupSelectionCase() },
     activation: await activationCase(),
     mediaOwnership: { ...await mediaOwnershipCase(), ...await imageSourceRoutingCase(), ...await boundedMediaCase(), ...await previewInvalidationCase(),
-      ...await nestedLevelsCase(), ...await livePresentationCase(), ...await inheritedTabsCase(), ...await nestedResizeCase(), ...await columnPreferenceCase(), ...await nestedNotesCase(), ...await nestedPointerCase(), ...await nestedReplyRaceCase(),
+      ...await nestedLevelsCase(), ...await livePresentationCase(), ...await inheritedTabsCase(), ...await nestedResizeCase(), ...await columnPreferenceCase(), ...await nestedNotesCase(), ...await nestedPointerCase(), ...await nestedPlacementCase(), ...await nestedClickCase(), ...await nestedReplyRaceCase(),
       ...await retainedParentNavigationCase() },
     newestOnlyOptions,
     renderFailure: await renderFailureCase(),
@@ -18975,6 +19995,23 @@ async function renderStage({ imageLookup, kanji, lookup, media }) {
       ["auto", "beside", "bottom", "bottom"], ["auto", null, undefined, "top"],
       ["top", "above", "bottom", "top"], ["bottom", "below", "top", "bottom"],
     ].every(([preference, placement, current, expected]) => HDPopup.resolveToolbarPosition(preference, placement, current) === expected));
+  check("calculatePopupPosition prefers above for roots and below for nested panes, falling back to the roomier side", (() => {
+    const viewport = { width: 1000, height: 600 };
+    const place = (anchor, preferBelow, height = 200) =>
+      HDPopup.calculatePopupPosition(anchor, { width: 300, height }, viewport, { preferBelow });
+    const roomy = { left: 100, top: 250, right: 140, bottom: 270 };
+    const low = { left: 100, top: 500, right: 140, bottom: 520 };
+    const high = { left: 100, top: 40, right: 140, bottom: 60 };
+    const root = place(roomy), child = place(roomy, true);
+    // A 400px pane fits on neither side of a word 190px from the top: the
+    // roomier side wins and the viewport clamps the result.
+    const upper = place({ left: 100, top: 190, right: 140, bottom: 210 }, true, 400);
+    const lower = place({ left: 100, top: 400, right: 140, bottom: 420 }, true, 400);
+    return root.placement === "above" && root.top === 46 && child.placement === "below" && child.top === 274
+      && child.left === 100 && place(low, true).placement === "above" && place(low, true).top === 296
+      && place(high).placement === "below" && place(high).top === 64
+      && upper.placement === "below" && upper.top === 194 && lower.placement === "above" && lower.top === 6;
+  })());
   check("render/glossary.js publishes HDGlossary", Boolean(HDGlossary), "HDGlossary was undefined");
   check("render/popup.js publishes HDPopup", Boolean(HDPopup), "HDPopup was undefined");
   if (!HDGlossary || !HDPopup) {
@@ -19490,6 +20527,49 @@ async function renderStage({ imageLookup, kanji, lookup, media }) {
       [null, ["Dictionary A", "Dictionary C", "Dictionary B"]], [null, ["Dictionary A", "Dictionary C", "Dictionary B"]],
       [null, ["Dictionary A", "Dictionary C", "Dictionary B"]], [null, ["Dictionary A", "Dictionary C", "Dictionary B"]],
     ]), JSON.stringify(inheritedProjections));
+  // A clicked-kanji group compares its members side by side: every member with
+  // an entry is its own tab in group order, replacing the group and favourite
+  // tabs, and a native kanji entry renders as one structured card.
+  const nativeEntry = kanji.entries[0];
+  const scopeSelections = [];
+  view.renderResults([{ ...noteResults[0], term: { ...noteResults[0].term, expression: kanji.character, reading: "",
+    glossaries: [
+      { dictionary: "Dictionary B", glossary: JSON.stringify(["a term member's single-kanji entry"]) },
+      { dictionary: nativeEntry.dictionary, glossary: HDPopup.kanjiEntryGlossary(nativeEntry) },
+    ] } }], candidate, { ...tabContext, expandAll: true,
+    dictionaryTabScope: ["Missing", nativeEntry.dictionary, "Dictionary B"],
+    onDictionaryTabSelected(selection) { scopeSelections.push(selection); } });
+  const scopeTabs = () => [...popup.querySelectorAll('[role="tab"]')].map((tab) => [tab.textContent, { ...tab.dataset }]);
+  const allScopeTabs = scopeTabs();
+  popup.querySelector(`[role="tab"][data-dictionary="${nativeEntry.dictionary}"]`)?.click();
+  const nativeCard = popup.querySelector(".gsm-hoshidicts-glossary-card");
+  const nativeContent = nativeCard?.querySelector(".gsm-hoshidicts-glossary-content");
+  const nativeCardState = {
+    cards: [...popup.querySelectorAll(".gsm-hoshidicts-glossary-card-title")].map((title) => title.title),
+    structured: nativeContent?.classList.contains("structured-content"),
+    readings: [...nativeContent?.querySelectorAll("[data-sc-content=reading]") ?? []].map((node) => node.textContent),
+    tags: nativeContent?.querySelector("[data-sc-content=tags]")?.textContent,
+    meanings: [...nativeContent?.querySelectorAll("ol > li") ?? []].map((item) => item.textContent),
+    details: [...nativeContent?.querySelectorAll("details table tr") ?? []]
+      .map((row) => [...row.cells].map((cell) => cell.textContent)),
+    summary: nativeContent?.querySelector("details > summary")?.textContent,
+  };
+  // The live presentation update keeps the scope: a renamed group cannot bring
+  // the ordinary group tabs back or drop the selected member.
+  view.updateDictionaryPresentation({ ...tabContext, dictionaryTabGroups: [
+    { id: "scoped", name: "Renamed", dictionaries: [nativeEntry.dictionary, "Dictionary B"] }] });
+  check("a clicked-kanji group renders each contributing member as an ordered tab and native entries as structured cards",
+    JSON.stringify(allScopeTabs) === JSON.stringify([
+      ["All", {}], [nativeEntry.dictionary, { dictionary: nativeEntry.dictionary }], ["Favourite B", { dictionary: "Dictionary B" }],
+    ])
+      && JSON.stringify(scopeTabs()) === JSON.stringify(allScopeTabs)
+      && JSON.stringify(scopeSelections) === JSON.stringify([null, { dictionary: nativeEntry.dictionary }])
+      && JSON.stringify(nativeCardState) === JSON.stringify({
+        cards: [nativeEntry.dictionary], structured: true,
+        readings: ["On ショク · ジキ", "Kun く.う · た.べる"], tags: "jouyou grade2", meanings: ["food", "eat", "meal"],
+        details: nativeEntry.stats.map(({ name, value }) => [name, value]), summary: "Details",
+      }),
+    JSON.stringify({ allScopeTabs, afterUpdate: scopeTabs(), scopeSelections, nativeCardState }));
   const selectedTabs = [];
   view.renderResults(noteResults, candidate, {
     dictionaryPresentation: [{ title: "Dictionary B", displayName: "Favourite B", favorite: true }],
@@ -19777,6 +20857,7 @@ async function renderStage({ imageLookup, kanji, lookup, media }) {
     calculatePopupPosition: HDPopup.calculatePopupPosition,
     result: imageLookup.results[0], mediaUrl: media.dataUrl });
   structuredRenderStage({ HDGlossary, HDPopup, document, window, candidate, result: lookup.results[0] });
+  await deepStructuredContentStage({ HDGlossary, HDPopup, document });
   externalLinksRenderStage({ HDGlossary, HDPopup, document, window, candidate, result: lookup.results[0] });
   internalLinksRenderStage({ HDGlossary, document, window });
   await retainedNavigationRenderStage({ HDGlossary, HDPopup, document, window, candidate, result: lookup.results[0] });
@@ -21125,9 +22206,12 @@ async function imagePreviewStage({ view, popup, shadow, document, window, candid
       lazy && first?.parentNode === shadow && first.getAttribute("aria-hidden") === "true"
         && firstSource?.src === mediaUrl && firstSource.alt === "A image"
         && first.dataset.appearance === "monochrome" && first.dataset.imageRendering === "pixelated"
+        // The monochrome mask layer paints the preview's own copy of the source.
+        && first.style.getPropertyValue("--image") === `url("${mediaUrl}")`
         && shadow.activeElement === links[0] && stable && requests === beforeRequests
         && links[0].querySelector(".gloss-image-container").style.width === "16px",
-      JSON.stringify({ lazy, stable, requests, beforeRequests, source: firstSource?.src }));
+      JSON.stringify({ lazy, stable, requests, beforeRequests, source: firstSource?.src,
+        previewImage: first?.style.getPropertyValue("--image") }));
 
     event(links[0], "mouseleave");
     const focusSurvivedLeave = preview() === first;
@@ -21597,6 +22681,66 @@ function structuredRenderStage({ HDGlossary, HDPopup, document, window, candidat
     view.destroy();
     popup.remove();
   }
+}
+
+// Depth is not a failure condition anywhere in the render path (#287): the
+// glossary, the compact summary and Anki fields owe deep content its leaf text.
+async function deepStructuredContentStage({ HDGlossary, HDPopup, document }) {
+  const fixture = structuredContentDeepFixture();
+  const depth = (value, level = 0) => Array.isArray(value)
+    ? Math.max(level, ...value.map(child => depth(child, level + 1)))
+    : value !== null && typeof value === "object"
+      ? depth(value.type === "text" && Object.hasOwn(value, "text") ? value.text : value.content, level + 1)
+      : level;
+  const render = glossary => {
+    const parent = document.createElement("div");
+    HDGlossary.appendTextOnlyGlossary(document, parent, glossary);
+    return parent.textContent;
+  };
+  const summary = glossary => HDPopup.extractCompactDefinitionSummary([{ dictionary: fixture.title, glossary }], null, 6)?.items;
+  const ankiFields = async glossary => (await buildAnkiResourceFields({
+    term: { expression: fixture.query, reading: fixture.query, rules: "", frequencies: [], pitches: [],
+      glossaries: [{ dictionary: fixture.title, glossary, definitionTags: "", termTags: "" }] },
+    trace: [], dictionaryAliases: {}, frequencyDictionaries: [], generation: 1,
+  }, { Rich: { value: "{glossary}", overwriteMode: "coalesce" }, Plain: { value: "{glossary-plain-no-dictionary}", overwriteMode: "coalesce" } },
+  { document, dictionaryPaths: { [fixture.title]: "/dicts/deep" }, styles: async () => [] })).fields;
+  const fixtureDepth = depth(JSON.parse(fixture.glossary)[0]);
+  const rendered = render(fixture.glossary);
+  check("a 大辞泉-shaped glossary nested beyond the former depth limit renders its deepest gloss",
+    fixtureDepth >= 25 && rendered.includes(fixture.leaf), JSON.stringify({ fixtureDepth, rendered }));
+  const items = summary(fixture.glossary);
+  check("the compact summary of that glossary is every gloss in order without labels or examples",
+    JSON.stringify(items) === JSON.stringify(fixture.summary) && items.every(item => !item.includes("用例")),
+    JSON.stringify({ items, expected: fixture.summary }));
+  const fields = await ankiFields(fixture.glossary);
+  check("Anki glossary and glossary-plain fields contain that glossary's deepest gloss",
+    fields.Rich.includes(fixture.leaf) && fields.Plain.includes(fixture.leaf),
+    JSON.stringify(fields));
+
+  const nested = wrappers => {
+    let value = "leaf";
+    for (let index = 0; index < wrappers; index += 1) {
+      value = index % 2 === 0 ? { type: "text", text: value } : { tag: "span", content: [value] };
+    }
+    return JSON.stringify([value]);
+  };
+  const depths = [1, 10, 24, 25, 64, 500];
+  const outcomes = await Promise.all(depths.map(async wrappers => {
+    const glossary = nested(wrappers);
+    const fields = await ankiFields(glossary);
+    return {
+      wrappers, depth: depth(JSON.parse(glossary)[0]), rendered: render(glossary), items: summary(glossary),
+      plain: fields.Plain, richLeaf: fields.Rich.includes("leaf"),
+    };
+  }));
+  // The preview keeps its 512-node budget (COMPACT_DEFINITION_MAX_NODES): 500
+  // wrappers are 750 values, so only that budget, never depth, ends its summary.
+  check("rendering, compact summaries and Anki fields never fail on depth alone",
+    outcomes.every(outcome => outcome.depth >= outcome.wrappers && outcome.rendered === "leaf"
+      && (outcome.depth < 512 ? JSON.stringify(outcome.items) === '["leaf"]' : outcome.items === undefined)
+      && outcome.plain === "leaf" && outcome.richLeaf),
+    JSON.stringify(outcomes.map(({ wrappers, depth, rendered, items, plain, richLeaf }) =>
+      ({ wrappers, depth, rendered, items, plain, richLeaf }))));
 }
 
 main().catch((error) => {

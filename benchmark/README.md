@@ -69,6 +69,36 @@ The lookup benchmark intentionally excludes web-page scanning, the configured
 hover delay, and popup rendering. It measures the extension's backend lookup
 path without injecting benchmark code into the engine.
 
+## Hover popup and glyph hit testing
+
+`hover-popup.mjs` drives real pointer movement through the content script and
+records input-to-first-result and input-to-complete-result timings, cold and warm,
+with result signatures and raw samples from three fresh Chrome profiles:
+
+```sh
+node benchmark/hover-popup-fixture.mjs /tmp/hover-fixture.zip
+HACHIDORI_CHROME=/path/to/chrome HACHIDORI_PUPPETEER=/path/to/puppeteer-core.js \
+  node benchmark/hover-popup.mjs /tmp/hover-results /tmp/hover-fixture.zip
+```
+
+Use `HACHIDORI_HOVER_SAMPLES` to change the profile count. Each profile also times
+1,000 production `resolveCandidate()` calls at a glyph, 1,000 at a point in
+the tile's padding, 20 CSS pixels left of the text, and 1,000 at a word 600
+characters into a 5,000-character paragraph held in one text node with no
+sentence terminator, after 100 excluded warmups per point.
+`session-*-hit-testing.json` records coordinates, duration and accepted
+candidate counts, so a padding miss can be distinguished from a false lookup.
+Its `sentenceCost` times the sentence extraction alone on that long-paragraph
+candidate at extents from 50 to 800 characters, and on synthetic texts of
+1,000 to 50,000 characters at the default extent, so its cost can be checked
+to grow with the extent rather than the paragraph.
+Those synchronous timings exclude pointer scheduling, messaging, engine lookup
+and rendering; the normal hover timings include them. The three-entry fixture
+isolates scanning and rendering overhead and does not represent a large library.
+Its `deep-nesting-*` scans hover 深層, whose gloss sits under 40 nested
+elements, alternating with the flat entries (`deep-nesting-flat-*`); compact
+summaries are on, so those timings include the summary walkers.
+
 ## Linked-browser relay latency
 
 The existing two-browser Sharing suite can record healthy linked-browser lookup
@@ -121,7 +151,19 @@ after clicking a kanji when a term dictionary is selected. It pins Bee's
 Ultimate Kanji Dictionary by byte length and SHA-256, uses three fresh profiles
 by default, measures both immediately after import and after a complete Chrome
 restart, and interleaves ordinary `hd_lookup` controls. Every selected reply
-must be semantically identical to the ordinary reply for the same character.
+must be semantically identical to the ordinary reply's cards for Bee's for the
+same character.
+
+It also measures a clicked-kanji **group of three**: Bee's beside two in-memory
+members from `test/make-fixture.mjs`'s `kanjiGroupFixture()`, one kanji-bank
+dictionary and one more term dictionary, both answering every query character.
+The three archives import as one Settings batch and the group is created
+through the worker's dictionary CAS. `groupMs` times the content script's
+fan-out for that group, one `hd_kanji` and two `hd_lookup_dictionary` requests
+dispatched and awaited together on the page clock, and checks every member's
+reply; `groupToSelectedMedianRatio` compares its median with the single
+selected lookup. Like the single case, it excludes click dispatch and popup
+rendering.
 
 ```bash
 export HACHIDORI_KANJI_ARCHIVE=/absolute/path/to/bees-ultimate-kanji-dictionary.zip
@@ -130,13 +172,62 @@ HACHIDORI_KANJI_QUIET=1 node benchmark/kanji-click.mjs
 
 Override the repeated work with `HACHIDORI_KANJI_SAMPLES` and
 `HACHIDORI_KANJI_PASSES`. Set `HACHIDORI_BENCH_REPO` to benchmark another
-Hachidori checkout with the same harness during an A/B comparison. The result
-includes exact revisions, an extension-tree hash, archive and Chrome identities,
-host details, first-request timings, and steady p50/p95 timings. Like the
-general lookup benchmark, it deliberately excludes hover delay, click dispatch,
-and popup rendering.
+Hachidori checkout with the same harness during an A/B comparison, and
+`HACHIDORI_ALLOW_NO_SANDBOX=1` where sandboxed Chrome cannot start. The result
+includes exact revisions, an extension-tree hash, archive, member fixture and
+Chrome identities, host details, first-request timings, and steady p50/p95
+timings. Like the general lookup benchmark, it deliberately excludes hover
+delay, click dispatch, and popup rendering.
 
 ## Tiny deterministic acceptance run
+
+### Dictionary reordering
+
+`dictionary-reorder.mjs` imports six-term fixture clones with distinct titles
+through the real Settings file input, growing each fresh profile to 10, 50 and
+150 dictionaries. At each size it excludes two warmup moves and measures ten
+arrow moves. Every saved order is checked against a real lookup's glossary
+order. It uses the browser harness's launch arguments, verified shutdown and
+durable `raw.jsonl` writer.
+
+```sh
+HACHIDORI_CHROME=/path/to/pinned/chrome HACHIDORI_PUPPETEER=/path/to/puppeteer-core.js \
+  node benchmark/dictionary-reorder.mjs --revision BASE_SHA --samples 3 \
+  --output benchmark/results/reorder-before
+HACHIDORI_CHROME=/path/to/pinned/chrome HACHIDORI_PUPPETEER=/path/to/puppeteer-core.js \
+  node benchmark/dictionary-reorder.mjs --revision HEAD_SHA --samples 3 \
+  --expect-path order-only --output benchmark/results/reorder-after
+```
+
+Use fresh output directories and the same Node, Chrome and tooling. For paired
+comparisons run one sample per command, alternating the two revisions at least
+three times. `--revision` extracts only that committed extension into the output
+directory; it does not switch branches or touch another checkout. Without it,
+the current working extension is measured. `--counts`, `--moves`, `--samples`
+and `--low-memory true` select the matrix. The definition records the revision,
+extension hash, archive identities, runtime versions and host. Each size also
+saves a Library screenshot on its first sample.
+
+All timings use the Settings page clock: click to the changed DOM rank and
+position, click to the engine acknowledgement, send to acknowledgement, and
+click to the first successful lookup using the committed order. Click to
+acknowledgement includes the 150 ms trailing debounce; send to acknowledgement
+excludes it. Reply timings stop before subsequent Settings renders (including
+group and option controls). The lookup metric includes any such work that delays
+the lookup, but does not establish final UI settlement. The DOM metric excludes
+paint and CDP overhead. The small fixtures
+measure Settings/message/native-order overhead, not large-dictionary I/O or
+import speed. Old revisions without `hd_status.lastLoadPath` record
+`unreported-baseline`; the extension smoke suite's native-call spies establish
+their reset/add/warm-lookup behaviour independently.
+
+With `--low-memory true`, setup waits for the import's required worker recycle
+before measuring. After each size's moves it waits beyond the two-second idle
+window and checks the saved lookup order again. A separate `phase: "idle"` raw
+row records whether the engine generation restarted; those waits are excluded
+from move latency and must be reported separately. `--expect-path order-only`
+also requires that no deferred worker rebuild occurs. The [issue #285 measurements](../docs/dictionary-reorder-benchmark.md)
+record the settled baseline, paired results and timing limitations.
 
 ### Recommended installation
 
@@ -182,6 +273,51 @@ The live descendant RSS/CPU integration check requires Linux `/proc` and is
 explicitly skipped on other platforms. Its Linux assertions remain unchanged;
 the other framework tests, including the current-account Chrome cache fixture,
 also run on macOS. This does not add non-Linux process metrics to the runner.
+
+## Low memory mode
+
+`low-memory-mode.mjs` alternates fresh-profile samples with
+[Low memory mode](../docs/memory.md) off and on: one archive imported through
+Settings' real file input, the import wall time (file selection to ready
+status), the engine heap (`hd_memory.heapBytes`) and the summed Chrome
+process-tree RSS right after the import settles and, with the mode on, again
+after the worker has been recycled, then the median and p95 of repeated
+`hd_lookup` round trips. Peak import RSS is not sampled; the standard runner
+above does that.
+
+```sh
+node benchmark/low-memory-mode.mjs --archive /path/to/jitendex.zip --samples 3 \
+  --output benchmark/results/low-memory-mode.json
+```
+
+## Dictionary update availability
+
+`dictionary-update.mjs` measures what a reader sees while a dictionary is
+replaced by a newer generation. Each sample is a fresh profile; for each library
+size in `--others` it imports that many six-term fixture clones through the
+real Settings file input, then updates the target dictionary through the same
+`hd_import` transaction a managed update runs (a same-title archive at the next
+revision) while the page issues `hd_lookup` round trips every 100 ms,
+alternating a word only the target answers with a word only the others answer.
+It records the import wall time, the lookups refused with `engine-mutating` and
+the window they span, the slowest answered lookup (an in-place swap shows up as
+latency, not as a refusal), when the first reply carried the new revision, the
+engine heap before and after, the transient OPFS bytes while both generations
+exist, and whether `hd_status.updating` was reported.
+
+```sh
+node benchmark/dictionary-update.mjs --output benchmark/results/dictionary-update
+node benchmark/dictionary-update.mjs --revision origin/main --output benchmark/results/dictionary-update-base
+node benchmark/dictionary-update.mjs --archive jitendex.zip --update-archive jitendex-next.zip --query 食べる
+```
+
+`--revision` snapshots another commit's `extension/` tree with `git archive`, so
+a base can be measured from the same worktree. The default target is a
+synthetic 100,000-row dictionary (`--target-rows`); `--archive` measures a real
+one and `--update-archive` supplies its next revision (a copy whose
+`index.json` revision differs). Rows go to `raw.jsonl` with `definition.json`
+beside them. The other dictionaries are small, so their reload cost is small;
+lookups are backend round trips, not page scanning or popup rendering.
 
 ## Standard Jitendex + Pixiv Light matrix
 

@@ -29,7 +29,8 @@ settings.html / content.js
                  └─ offscreen.js
                       ├─ probes pthread, shared-memory, and direct-OPFS support
                       ├─ primary: engine-worker.js
-                      │    └─ pthread Wasm + WasmFS direct OPFS
+                      │    ├─ pthread Wasm + WasmFS direct OPFS
+                      │    └─ import-worker.js: a second instance per hd_import
                       ├─ no OPFS access handles: engine-worker-idbfs.js
                       │    └─ pthread Wasm + classic FS + IDBFS
                       └─ fallback: engine-service.js
@@ -85,12 +86,25 @@ Each dictionary import follows one logical transaction:
 
 1. `settings.html` sends the next local ZIP with `hd_import`, or the shared offscreen installer sends the next missing catalogue source's pinned archive URL.
 2. The service worker transfers the archive to the offscreen document.
-3. The engine worker imports Yomitan banks through the Hoshidicts C++ importer into a fresh `/dicts/.hdw-generation-<UUID>/<title>` root. A committed root is never overwritten in place.
+3. On the direct-OPFS runtime, the engine worker hands the archive to `import-worker.js`: a second Hoshidicts instance on the same OPFS root, which imports the Yomitan banks through the C++ importer into a fresh `/dicts/.hdw-generation-<UUID>/<title>` root and is terminated once it has reported. A committed root is never overwritten in place, and the live engine keeps answering lookups from the committed generations throughout: `hdw_import` is one synchronous native call, so whichever instance runs it answers nothing until it returns.
 4. The generated files are flushed to the storage backend before metadata can reference them.
-5. The candidate's exact manifest path is strict-loaded, including disabled packages, before the service worker compare-and-set commits it. A package already committed at its path that no longer loads does not block the candidate; see below.
-6. Only a confirmed commit publishes the new dictionary count and generation.
-7. The engine re-reads authoritative state before garbage-collecting unreferenced generation roots.
+5. Under the engine queue, the candidate's exact manifest path is strict-loaded, including disabled packages, before the service worker compare-and-set commits it. A replaced package is removed and the new generation added in place (`hdw_remove_dict`, `hdw_add_dict`, `hdw_set_dict_order`), so lookups wait for those few milliseconds rather than fail; the rest of the loaded set is untouched. A package already committed at its path that no longer loads does not block the candidate; see below.
+6. Only a confirmed commit publishes the new dictionary count and generation. A refused commit unloads the new generation again and keeps the committed one; a failed import discards its root without touching the engine.
+7. The engine re-reads authoritative state before garbage-collecting unreferenced generation roots. A root an isolated import is still writing is retained until that import settles.
 8. The settings page renders success only after that reply.
+
+The IDBFS runtimes (Electron's pthread engine and the single-thread engine
+Firefox uses) have no isolated importer: two instances cannot share one IDBFS
+store. There the archive is imported inside the live engine, whose loaded
+dictionaries are mapped into the same 32-bit address space the importer needs,
+so `runImportTransaction` unloads them first and reloads the committed set
+afterwards. Its `installing` progress event carries `fallback: "memory"`, and
+only then does the offscreen bridge refuse reads with `engine-mutating` until
+the import settles; the reader shows *Dictionary update in progress* for those
+lookups. `hd_status` from the bridge reports the import it is running as
+`updating: { id, phase, fallback }` (`id` is the replaced package's, or null
+for a new install; `phase` is `downloading` or `installing`), which the
+Settings row uses to say *Updating…*.
 
 Multiple selected local archives remain separate transactions. Settings runs
 them sequentially, keeps an outcome for each file, and continues after a failure.
@@ -169,7 +183,16 @@ module shared by the worker, engine, and Settings page.
 
 **Check now** fetches each candidate's index and records `up-to-date`,
 `update-available`, or `check-failed` against that package generation. It does
-not download archives. The global Off/hourly/daily/weekly/monthly setting is the
+not download archives or change installed revisions. The refresh button in a
+managed dictionary row's **Details** checks only that package and updates its
+status and the Updates panel's one-dictionary summary. Both checks use
+`hd_updates_check`; its optional `dictionaryIds` array selects packages, while
+omitting it checks all managed packages. An empty array checks none. The row's
+**Update** button installs that package; **Install updates** keeps the bulk flow.
+
+![A managed dictionary row after checking for an update, with the refresh button beside Update](assets/dictionary-update-check.png)
+
+The global Off/hourly/daily/weekly/monthly setting is the
 default; each managed package can inherit it or choose its own interval or Off.
 One nonperiodic Chrome alarm targets the earliest package due time and
 automatically installs available revisions, including those for disabled
@@ -704,15 +727,53 @@ off it collects `scanLength` as before, so the engine never sees a longer key.
 Scans shorter than eight code points never extend, so a clicked-kanji lookup
 stays one character.
 
+Google Docs paints its pages to `<canvas>`, so no caret API finds text there.
+While the experimental **Google Docs** flag (`options.experimental.googleDocs`)
+is on, the service worker registers `google-docs-flag.js` through
+`chrome.scripting` as a `document_start`, main-world content script on
+`*://docs.google.com/*` (and unregisters it when the flag goes off). The script
+sets `window._docs_annotate_canvas_by_ext` to the allow-listed ID Yomitan uses,
+which makes Docs also draw an SVG annotation layer: one
+`.kix-canvas-tile-content svg>g>rect` per run of text, carrying the run in
+`aria-label` with its `x`, `y`, `transform` and `data-font-css`. On
+`docs.google.com` the reader then tries that layer before the caret path: it
+enables a probe stylesheet that makes only those rects hit-testable for the
+duration of one `elementFromPoint`, lays an invisible SVG `<text>` imposter
+with the run's position, transform and font over the hovered rect, bisects the
+glyph offset from the imposter's client rects, and hands the imposter's text
+node to the ordinary scan and sentence pipeline with the imposter as the sole
+source. One imposter is kept per hovered rect so repeated moves share the
+pending lookup and the popup stays anchored; hovering another rect replaces it,
+and turning the flag off or tearing the reader down removes it and the probe
+stylesheet. The sentence is therefore the hovered run, the highlight is drawn
+on the invisible imposter, and Google may change the mechanism without notice,
+which is why the feature is experimental. With the flag off, or on any other
+host, nothing is injected and scanning is unchanged.
+
+Pointer scanning first requires the caret's complete Unicode character rectangle
+to contain the pointer, with two CSS pixels of tolerance. The hit-tested page
+element must contain that text node, so padded tiles and unrelated elements
+covering text cannot trigger distant lookups. This applies equally to horizontal
+and vertical text; exact selections and the reader's boxed-glyph drag keep their
+own selection rules.
+
 Automatic scanning reads page text in DOM order regardless of layout, as
 Yomitan's default layout-unaware scan does: it crosses inline and block elements
 alike, including glyphs boxed one per absolutely positioned span by an overlay,
-and stops only at `<br>`, editing controls or contenteditable text. The sentence
-is the run of neighbouring text nodes around the hovered glyph, up to 200
-characters each way, cut at a whitespace-only text node containing a line break
-(the separator between blocks in page source and in overlays). Those text nodes
-are the candidate's sources, so the highlight and the Anki sentence use the same
-text. A focused page editor keeps printable
+and stops only at `<br>`, editing controls or contenteditable text. The
+candidate's sources are the run of neighbouring text nodes around the hovered
+glyph, up to 200 characters each way, cut at a whitespace-only text node
+containing a line break (the separator between blocks in page source and in
+overlays) and at the edge of the paragraph, list item or table cell the glyph
+is laid out in; flex, grid and positioned boxes, which overlays use for every
+glyph, are crossed. The highlight is drawn in that source text. The Anki
+sentence, the Note prefill and a custom link's `%s` are Yomitan's sentence cut
+out of it by `sentence.js`: outward from the matched word to a terminator
+(`。．.！!？?…` and their vertical forms, kept at the end) or a rendered line
+break, leaving out a quote or bracket pair that encloses the word and keeping a
+pair inside the sentence whole, capped at the 200-character extent and trimmed.
+The sentence is cut around the hovered glyph first and again around the whole
+matched word once the engine has answered. A focused page editor keeps printable
 activation keys available for typing. Pointer lookups and modifier activation
 still work over separate page text, including example links beside an
 autofocused search field. The live `onlyScanJapaneseText`
@@ -728,9 +789,10 @@ only their host through browser focus/event APIs; their private editors cannot
 be inspected. The reader does not intercept shadow creation or block every
 focused component to guess at those internals.
 
-An automatic page selection takes priority over pointer scanning and bypasses
-the language gate, but follows the same lookup mode and activation key as a
-pointer lookup. Hover mode accepts an ordinary selection. Activation and sticky
+An automatic page selection takes priority over pointer scanning and follows
+the same lookup mode, activation key and `onlyScanJapaneseText` gate as a
+pointer lookup, so with that default a selected English word or URL neither
+looks up nor opens the popup. Hover mode accepts an ordinary selection. Activation and sticky
 activation accept it only while the configured activation key is held. Plain
 selection or other modifiers alone do not look up, paint a source highlight or
 expose the personal-definition pencil. As with pointer lookup, another modifier
@@ -738,7 +800,8 @@ held alongside the configured one does not disable it. Lookup waits until the
 mouse drag ends. Once an activation-qualified selection is accepted, key release
 does not discard it, so the popup and pencil workflow remain usable. Explicit
 selected-text commands from keybinds and startup practice bypass this automatic
-gate, while reader disablement and editing exclusions still apply.
+activation gate, while reader disablement, the Japanese-only gate and editing
+exclusions still apply.
 
 The lookup sends the complete visible selected string without trimming or
 truncation and accepts only results whose `matched` text equals that string.
@@ -747,7 +810,12 @@ engine scan window; a prefix-only result is not an exact match. A miss retains
 selection ownership until the selection changes or is dismissed, so pointer
 movement cannot silently replace it with a prefix. Its notice exposes the same
 personal-dictionary pencil as term and kanji results, prefilled with the
-selected word even when no dictionaries are installed. Saving uses the managed
+selected word even when no dictionaries are installed. Reading → Personal
+dictionary → **Show a popup when a selection has no definition**
+(`showNoResultNotice`, default on) owns that notice: switched off, a miss with
+loaded dictionaries hides the popup and still retains the selection, while the
+no-dictionaries notice stays because it reports that nothing is installed.
+Saving uses the managed
 Note append transaction and replays that exact request to show the new
 definition; publisher dictionaries remain unchanged.
 
@@ -1042,8 +1110,8 @@ No dictionary frame, fetch, new permission or configurable action is introduced.
 
 ### Definition popup chains
 
-Hovering ordinary text inside a rendered glossary opens a child beside its
-parent. The closed shadow root is resolved with the native shadow-aware caret
+Hovering ordinary text inside a rendered glossary opens a child beside that
+word. The closed shadow root is resolved with the native shadow-aware caret
 API, then the ordinary page scanner's inline, ruby, whitespace, Japanese-only
 and scan-length rules build the child query. The complete glossary remains the
 sentence and offset coordinate space for mining. Headwords, metadata, compact
@@ -1073,12 +1141,20 @@ connected source link when one initiated the lookup.
 Keyboard link activation focuses the child's Back control; mouse activation
 does not invent keyboard focus that would block pointer-return pruning. Returning
 to an ancestor prunes descendants after the normal hide delay, unless a draft,
-pending Note append, or deliberate keyboard focus still protects them. Pointer
+pending Note append, or deliberate keyboard focus still protects them. A primary
+press in an ancestor pane retires its descendants at once, focused or not, and
+drops a pending definition scan; only an open draft or pending append keeps
+them, and Escape still closes that form first. A press on an internal link keeps
+the link's own child for its click to reuse or replace and retires only the
+branch below it. Pointer
 transfer uses actual pane rectangles and narrow connecting gaps, with 80 ms grace
 before resuming the current page scan. No layout is read in raw mousemove before
-the existing throttle. Children prefer available space beside their parent and
-clamp to the viewport; narrow screens may overlap panes. Layout callbacks start
-at their owning level and reposition descendants without redoing ancestor layout.
+the existing throttle. Like Yomitan, each child is placed from its own source
+rectangle: below the word when that fits, otherwise above, aligned with the
+word's left edge and clamped to the viewport, so it overlaps its parent rather
+than sitting beside it. Layout callbacks start
+at their owning level and reposition descendants without redoing ancestor
+layout; no ancestor pane is measured for any descendant.
 Dirty panes share one animation-frame batch: each runs its own masonry before
 one linear placement pass from the shallowest live owner in that same frame.
 Width changes can queue a following ResizeObserver batch without losing work
@@ -1225,9 +1301,12 @@ space child, then the original Japanese; the summary keeps the English half when
 the text after that space opens with Japanese. Senses holding only a ⇨ reference
 and index entries that are bare sub-headword links contribute nothing, so the
 summary moves on as it does for Jitendex redirects.
-Existing display/traversal bounds
-apply only to this preview; native results and complete glossary bytes remain
-unchanged. Default-off rendering does not run summary extraction.
+The preview's discovery, text collection and leading-image walkers use explicit
+frames like the glossary renderer, so a deeply nested entry (大辞泉 nests の
+more than 25 values deep) still yields its text; each walk inspects at most 512
+values, and that budget is the preview's only traversal bound. Existing display
+bounds apply only to this preview; native results and complete glossary bytes
+remain unchanged. Default-off rendering does not run summary extraction.
 
 A 36px thumbnail uses the existing safe image renderer and generation/dictionary
 media resolver. Summary and full-card consumers share one in-flight request and
@@ -1428,7 +1507,9 @@ the palette without being clipped by the glossary card or popup scrollport.
 The preview copies the original image's exact current source and alt text; it
 does not resolve media again or change inline dimensions. The shared positioning
 function clamps it to the viewport with an 8-pixel margin. Pixelated and
-monochrome presentation are retained, and reduced motion disables the animation.
+monochrome presentation are retained: a monochrome image is drawn in the palette
+text colour by a layer masked with the image, in the card and in the preview.
+Reduced motion disables the animation.
 
 Each popup owns one requested preview image, including a still-loading image.
 A load may resume only that current intent: it cannot replace a newer
@@ -1451,16 +1532,37 @@ verify exact bytes, MIME types, decoded dimensions and preview source reuse.
 
 ## Clicked-kanji navigation and Back
 
-Design's clicked-kanji selector chooses a source and capability. An explicit
+Design's clicked-kanji selector chooses a source and capability: one dictionary,
+or a dictionary group by its stable ID like the Image source chooser. An explicit
 term source is restricted before native ranking and result limits.
 A selected term lookup filters the engine's already-loaded query by its exact
 dictionary path instead of reopening term and metadata dictionaries per click.
+The engine resolves that path from its own loaded set, so a disabled, missing or
+unloaded package answers nothing without a storage round trip per request.
 Frequency and pitch metadata still come from every loaded metadata dictionary.
 A missing, disabled or empty selected source falls back to native kanji. For an
 enabled native source with no matching entry, the already returned automatic
 entries supply that fallback without another request. A terminal native miss
 retires that popup level; a protected same-view Note refresh retains its draft.
 Obsolete replies cannot dismiss or replace a newer view.
+
+A group resolves to its enabled, installed members in group order, each with its
+own capability (native kanji entries when the package has them, otherwise its
+term entries); members with neither are skipped. A click asks every member at
+once: one `hd_kanji` when any member is native and one `hd_lookup_dictionary`
+per term member. The replies merge in group order, entries sharing an expression
+and reading combining their cards as an ordinary lookup does, and each native
+entry becomes one structured card (tags, On/Kun readings, ordered meanings and a
+Details table) through the renderer's `kanjiEntryGlossary`. The term view then
+shows the members as tabs: All first, then every member with an entry, in group
+order, in place of the reader's group and favourite tabs; live presentation
+updates keep that scope. A group whose members all miss falls back to the
+automatic native entries already returned, and a term-only group asks for them
+only after every member misses. Removing the group resets the option to
+Automatic in the same dictionary-state commit, as a removed dictionary does;
+renames and membership edits keep the reference.
+
+![A clicked-kanji group with one tab per member](assets/kanji-group-popup.png)
 
 Back stores the exact term request and its current tab, expanded-results flag,
 scroll position and disclosure states as data, not detached DOM or renderer
@@ -1830,10 +1932,11 @@ content and the Note form scroll within their own bounds. Nested popup anchors
 and Back restoration follow the content scrollport.
 
 The shared `resolveToolbarPosition` follows the pinned GSM PR #549 rule:
-Automatic places a horizontal root toolbar at the bottom of an above-word popup,
-or the top of a below-word popup. Vertical roots and side-by-side child panes
-retain their edge; new Automatic panes and a change back to Automatic start at
-Top. An explicit edge overrides placement, including after resize or media load.
+Automatic places a horizontal toolbar at the bottom of an above-word popup, or
+the top of a below-word popup, for roots and nested panes alike. Vertical roots
+and a pane being resized retain their edge; new Automatic panes and a change
+back to Automatic start at Top. An explicit edge overrides placement, including
+after resize or media load.
 The final edge is resolved once, avoiding an intermediate Top move before an
 Automatic root's actual placement is known.
 
@@ -1900,7 +2003,11 @@ upload. Pronunciation enrichment compares its complete desired values
 against the applied text-only write and the current note.
 A lost write acknowledgement is not retried; confirmed note IDs stay successful
 even if readback, enrichment, or subsequent reader refresh fails, including
-across a settings change.
+across a settings change. A saved field that differs from the submitted value
+(for example one an Anki add-on fills on add) is reported as a warning and does
+not skip deferred pronunciation; only a failed readback or a first field Anki
+did not save as submitted does, and enrichment still refuses to update a
+pronunciation field whose current value changed.
 
 Only requested glossary variants are exported through the shared structured
 renderer into inert HTML. Dictionary CSS remains scoped, and image filenames
@@ -2346,7 +2453,8 @@ Unlinking restores the kept values with `max(kept, mirrored) + 1` revisions and
 removes the host's `lookupStats:` rows. The local-only `sharing` key holds
 `{ host: { enabled, port, network } | null, client: { address } | null }` and
 neither it nor `sharingLocalState` is part of backups. For an overlay client,
-activation/scanning, source highlighting and popup geometry are composed from
+Anki configuration, pronunciation sources, custom buttons and their legacy links, activation/scanning,
+source highlighting and popup geometry are composed from
 the kept local options. Its private `sharingOptionsVersion` stores the host
 revision and an offset for one increasing live revision; it is also excluded
 from backups. Local-only writes commit the live and kept options together,
@@ -2363,7 +2471,9 @@ welcome view probes this computer once and, when a shared Hachidori answers,
 offers to use it; that link then advances setup to `complete`. See
 [sharing](sharing.md) for use.
 
-Linked Anki mining is split at the browser boundary. The reading browser keeps
+Overlay clients keep Anki discovery, mining and the duplicate index local while
+linked; the host supplies dictionary data. For ordinary linked browsers,
+Anki mining is split at the browser boundary. The reading browser keeps
 `hd_anki_screenshot`/discard and its capture session local, while
 Settings discovery and existing-setup detection, `hd_anki_status`, preflight,
 submit, browse and maturity go to the host. Status, View, preflight, submit and
@@ -2417,6 +2527,8 @@ Template/custom-button settings writes unavailable before a request is sent.
 | Capture tab/document routing identities | service worker; recovered by validating the surviving offscreen host and reader | transient memory only |
 | Watched DOM nodes/ranges, cue/DOM observers, and collector epochs | linked content script | transient memory only |
 
+The engine holds every loaded dictionary's generated files in WebAssembly linear memory (Emscripten emulates `mmap` by copying), and that memory never shrinks. On direct OPFS an import's high-water mark belongs to the terminated `import-worker.js` instance and is returned to the browser; the engine's heap grows only by the new generation's mapped files. On IDBFS the import runs inside the engine, so its high-water mark stays for the life of the engine worker. `hd_memory` reports the heap and each loaded package's mapped bytes; Settings → Advanced → Memory shows them, and its **Low memory mode** switch (`options.lowMemoryMode`) makes `offscreen.js` recycle the engine worker once idle after a dictionary change and start it with a two-thread pool that imports single-threaded (`engine-recycler.js`, `engine-worker-runtime.js`, `hd_engine_config`). [memory.md](memory.md) explains the model, the readout, the mode's costs and the two failure regimes.
+
 The offscreen document deliberately has no direct `chrome.storage` access. It asks the service worker to read or compare-and-set dictionary metadata. Those writes are serialized so a settings-page edit cannot be silently overwritten by a stale engine write. Dictionary-state commits prune removed package IDs from global groups and invalid selectors in the same storage transaction, and every Settings option write is revalidated there so a stale page cannot restore them.
 
 `reader-options.js` supplies one synchronous stored-value view to Settings, the
@@ -2464,16 +2576,29 @@ consistency improvement over the pinned GSM reference's explicit name submits.
 
 ![A retained group-name draft after another Settings page renames the group](assets/settings-autosave-conflict.png)
 
+Dictionary arrow, drag and position moves update existing Library rows
+immediately. A 150 ms trailing debounce sends the burst's final order through
+the same serialized dictionary CAS queue. An in-flight move remains visible
+when an earlier storage event or acknowledgement arrives. Each batch advances
+its revision only through this page's preceding successful commit; another
+Settings page's winning write causes a visible failure and restores its saved
+state, including metadata and membership changes. Pending order drafts are
+discarded on failure, while deliberate focus, selection and open Details survive
+successful moves. The existing unsaved-work warning also covers the debounce
+and in-flight dictionary commits when leaving Settings.
+
 ## Runtime messages
 
 | Message | Purpose |
 | --- | --- |
 | `hd_import` | Import one Yomitan ZIP and return an exact report; optionally validate a built-in catalogue source in the same transaction |
-| `hd_apply_state` | Load an engine-affecting package change (in place when every package already loaded this session, otherwise a full rebuild), then compare-and-set it atomically |
+| `hd_apply_state` | Apply a package change, then compare-and-set it atomically. An unchanged manifest set uses native order only, retaining failed-package diagnostics and skipping load/warmup; other changes load incrementally when verified, otherwise rebuild. The reply's `loadPath` and `hd_status.lastLoadPath` report `order-only`, `incremental`, or `full`. |
 | `hd_lookup` | Run a bounded scan/deinflection lookup |
 | `hd_anki_maturity` | Read whether the first term's expression has a mature card in the selected duplicate-index scope; independent of engine and mutation queues |
 | `hd_open_external` | Validate and open a user-activated HTTP(S) dictionary link in a browser tab, outside storage and engine queues |
-| `hd_status` | Report readiness, loading state, dictionary count, generation, storage backend, and threading mode |
+| `hd_status` | Report readiness, loading state, dictionary count, generation, storage backend, and threading mode; while the offscreen bridge runs an import, `updating: { id, phase, fallback }` names the replaced package and phase |
+| `hd_memory` | Report the engine heap size and each loaded package's resident bytes (its mapped files, once per native kind); see [memory.md](memory.md) |
+| `hd_engine_config` | Read `options.lowMemoryMode` for the offscreen document (its sender only) before it creates the engine worker; the service worker pushes the same message to the document when the stored option changes |
 | `hd_reload` | Reload enabled dictionaries from persisted metadata |
 | `hd_remove` | Stage a package's files, commit its removal, then delete the staged copy |
 | `hd_state_read` | Read revisioned dictionary state through the service worker |
@@ -2486,7 +2611,7 @@ consistency improvement over the pinned GSM reference's explicit name submits.
 | `hd_backup_read`, `hd_backup_export`, `hd_backup_prepare`, `hd_backup_restore`, `hd_backup_cancel` | Read the complete manual payload, export it, stage and confirm a complete replacement, or discard staged roots |
 | `hd_backup_auto_list`, `hd_backup_auto_get`, `hd_backup_auto_roots`, `hd_backup_auto_prepare`, `hd_backup_auto_cleanup` | List independently valid retained records, fetch one for the engine, protect every retained record's immutable roots, validate one in place for restore, or reconcile deferred generation cleanup |
 | `hd_updates_schedule` | Save the one global update interval and reconcile its Chrome alarm |
-| `hd_updates_check` | Check every managed index and persist per-package availability without downloading |
+| `hd_updates_check` | Check the optional `dictionaryIds` array (all managed indexes when omitted) and persist per-package availability without downloading |
 | `hd_updates_install` | Recheck and install the requested available managed packages |
 | `hd_sharing_status`, `hd_sharing_host_enable`, `hd_sharing_host_disable` | Report the sharing state (connection, dictionaries, the network listener and its addresses, linked browsers), or start and stop this install's connection to Anki's relay with a port and the network preference |
 | `hd_sharing_client_probe`, `hd_sharing_client_link`, `hd_sharing_client_unlink` | Ask what shares itself at an address (empty: this computer), link this install to it (turning its own hosting off, keeping its own state aside and mirroring the host's), or unlink and restore |

@@ -639,7 +639,7 @@ async function checkOverlaySharing(hostPage) {
     check(CHECKS.at(-1),
       afterLink.lookupMode === "hover" && afterLink.sourceHighlightEnabled === false && afterLink.popupWidthPx === 440
         && afterLink.popupTheme === "dracula" && afterLink.mediaCapture.enabled
-        && afterLink.customButtons[0]?.id === "host-link" && afterLink.customLinks[0]?.label === "Host link"
+        && afterLink.customButtons[0]?.id === "local-link" && afterLink.customLinks[0]?.label === "Local link"
         && sharedLookup.ok && notice
         && afterLocal.popupWidthPx === 480 && hostAfterLocal.popupWidthPx === 1000
         && afterHost.popupWidthPx === 480 && mixed.options.popupWidthPx === 520

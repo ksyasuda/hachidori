@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Hachidori",
   "short_name": "Hachidori",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Study Japanese vocabulary: look up words on any page and build Anki cards, optionally capturing on-screen context.",
   "minimum_chrome_version": "128",
   "icons": {
@@ -15,6 +15,7 @@
     "alarms",
     "downloads",
     "offscreen",
+    "scripting",
     "storage",
     "unlimitedStorage",
     "userScripts"
@@ -91,6 +92,7 @@
         "reader-options.js",
         "dictionary-group-state.js",
         "lookup-stats-identity.js",
+        "sentence.js",
         "external-links.js",
         "external-link-host.js",
         "audio-content.js",
@@ -98,6 +100,7 @@
         "capture-content.js",
         "render/glossary.js",
         "render/popup.js",
+        "subminer-host.js",
         "content.js"
       ],
       "css": [

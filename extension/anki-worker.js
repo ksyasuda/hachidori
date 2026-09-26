@@ -266,6 +266,7 @@ export function createAnkiWorkerService({
         ...template,
         audioSources: options.audioSources.filter(source => source.enabled),
         mediaCapture: options.mediaCapture,
+        prepareAudioBeforeWrite: await gateway.isSubminerEndpoint?.(template.url) === true,
       };
     },
     buildFields: async (request, current, { preflight = false } = {}) => {
@@ -277,19 +278,30 @@ export function createAnkiWorkerService({
       const resources = { dictionaryPaths: Object.fromEntries(dictionaries.filter(item => item.enabled !== false)
         .map(item => [item.title, item.path])), audioPrepared: false, audio: null, deferDuplicateCheck: false };
       const first = current.resolved.templates[current.discovery.fields[0]];
-      if (ankiTemplateMarkerNames(first.value).includes("audio") && current.config.audioSources.length) {
+      const firstFieldAudio = ankiTemplateMarkerNames(first.value).includes("audio");
+      // SubMiner measures pronunciation as soon as the note is written. Include
+      // it in that write instead of racing its media enrichment with ours.
+      const prepareAudio = firstFieldAudio || (!preflight && current.config.prepareAudioBeforeWrite
+        && Object.values(current.resolved.templates).some(template => ankiTemplateMarkerNames(template.value).includes("audio")));
+      if (prepareAudio && current.config.audioSources.length) {
         // Audio in the first field is part of Anki's duplicate identity. A
         // failed/stale selection must not turn that identity into text-only.
         // Browser speech is audible work, so preflight verifies only that the
         // active capture can record it and defers the exact duplicate identity
         // until the user submits.
-        const prepared = await audio(request, current.config, { recordSpeech: !preflight });
+        let prepared;
+        try {
+          prepared = await audio(request, current.config, { recordSpeech: !preflight });
+        } catch (error) {
+          if (firstFieldAudio) throw error;
+          resources.pronunciationWarning = `Pronunciation: ${error.message}`;
+        }
         if (prepared?.recordingRequired === true) {
           if (!preflight) throw new Error("Browser text-to-speech was not recorded for this note.");
           if (prepared.clientSpeech) resources.clientSpeech = prepared.clientSpeech;
           resources.deferDuplicateCheck = true;
         }
-        else {
+        else if (prepared) {
           resources.audioPrepared = true;
           resources.audio = prepared;
         }

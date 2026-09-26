@@ -60,6 +60,22 @@ function fixture() {
     config: () => config, change(patch) { config = { ...config, ...patch }; } };
 }
 
+test("stats mining opts out of SubMiner enrichment without changing popup requests", async () => {
+  for (const metadata of [{ subminerEnrich: false }, {}]) {
+    const f = fixture();
+    const invoke = f.gateway.invoke;
+    let submitted;
+    f.gateway.invoke = async (action, params) => {
+      if (action === "addNote") submitted = params;
+      return invoke(action, params);
+    };
+    const { configKey } = await f.service.status();
+    assert.equal((await f.service.submit({ expression: "猫", configKey, ...metadata })).state, "added");
+    assert.equal(submitted.subminerEnrich, metadata.subminerEnrich);
+    assert.equal(submitted.note.tags.includes("SubMiner::Stats"), metadata.subminerEnrich === false);
+  }
+});
+
 test("mining readiness shares its short source-backed cache and skips Anki when no model is configured", async () => {
   const f = fixture();
   const [a, b] = await Promise.all([f.service.status(), f.service.status()]);
@@ -262,6 +278,29 @@ test("a committed note with failed readback skips enrichment and stale configura
   assert.match(result.warnings.join(" "), /readback offline/u);
   assert.equal(enrichments, 0, "do not enrich from fields whose committed values could not be verified");
   assert.equal(f.calls.filter(action => action === "addNote").length, 1);
+});
+
+test("a field rewritten during the add warns but only a rewritten first field skips pronunciation enrichment", async () => {
+  // AJT Japanese fills furigana on note_will_be_added, so the readback of an
+  // unrelated field differs while the note is exactly the one Hachidori added.
+  async function rewriteOnAdd(field) {
+    const f = fixture();
+    const invoke = f.gateway.invoke;
+    f.gateway.invoke = async (action, params) => {
+      if (action !== "addNote") return invoke(action, params);
+      return invoke(action, { note: { ...params.note, fields: { ...params.note.fields, [field]: "rewritten by add-on" } } });
+    };
+    let enrichments = 0;
+    const service = createAnkiMiningService({ ...f.dependencies, enrich: async () => { enrichments++; return []; } });
+    const { configKey } = await service.status();
+    const result = await service.submit({ expression: "猫", configKey });
+    assert.equal(result.state, "added");
+    assert.equal(result.noteId, 123);
+    assert.match(result.warnings.join(" "), new RegExp(`field “${field}” was saved with different content`, "u"));
+    return enrichments;
+  }
+  assert.equal(await rewriteOnAdd("Back"), 1, "an unrelated field an add-on rewrote must not withhold the pronunciation");
+  assert.equal(await rewriteOnAdd("Front"), 0, "a first field Anki did not save as submitted is not enriched");
 });
 
 test("enrichment failure cannot turn a verified textual add into a duplicate-inviting failed submission", async () => {

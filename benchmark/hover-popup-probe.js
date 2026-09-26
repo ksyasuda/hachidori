@@ -98,6 +98,43 @@
     read() { return { ...active, now: performance.now(), events: events.slice(active?.eventStart), longTasks }; },
     state,
     events: () => events,
+    hitTesting(points, iterations = 1000) {
+      hide();
+      return Object.entries(points).map(([name, { x, y }]) => {
+        for (let i = 0; i < 100; i++) resolveCandidate(x, y);
+        let hits = 0;
+        const start = performance.now();
+        for (let i = 0; i < iterations; i++) {
+          if (resolveCandidate(x, y)) hits++;
+        }
+        return { name, iterations, hits, totalMs: performance.now() - start };
+      });
+    },
+    // Sentence extraction alone, on the candidate at `point`: once per extent on
+    // the page's own text, and once per synthetic text length at the default
+    // extent. Null on a revision without extractSentence.
+    sentenceCost(point, iterations = 1000) {
+      if (typeof extractSentence !== 'function') return null;
+      hide();
+      const candidate = resolveCandidate(point.x, point.y);
+      if (!candidate) return null;
+      const time = (text, offset, extent) => {
+        for (let i = 0; i < 100; i++) extractSentence(text, offset, 3, extent);
+        const start = performance.now();
+        for (let i = 0; i < iterations; i++) extractSentence(text, offset, 3, extent);
+        return (performance.now() - start) * 1000 / iterations;
+      };
+      return {
+        iterations,
+        sentence: extractSentence(candidate.sentenceSource, candidate.sourceOffset, 3).sentence.length,
+        extents: [50, 100, 200, 400, 800].map(extent =>
+          ({ extent, perCallUs: time(candidate.sentenceSource, candidate.sourceOffset, extent) })),
+        lengths: [1000, 5000, 50000].map(length => {
+          const text = `${'あ'.repeat(length / 2)}食べる${'い'.repeat(length / 2)}`;
+          return { length: text.length, perCallUs: time(text, length / 2, SENTENCE_SCAN_EXTENT) };
+        }),
+      };
+    },
     point(query, depth = 0) {
       const popup = levels[depth].popup;
       const walker = document.createTreeWalker(popup.querySelector('.gsm-hoshidicts-definitions'), NodeFilter.SHOW_TEXT);

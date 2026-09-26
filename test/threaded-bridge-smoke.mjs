@@ -3,6 +3,7 @@
 
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
+import { mock } from "node:test";
 
 const runtimeListeners = [];
 const engineWorkers = [];
@@ -14,8 +15,9 @@ const ENGINE_WORKER_SCRIPT = /\/engine-worker(?:-idbfs)?\.js$/u;
 class FakeWorker {
   static creationError = null;
 
-  constructor(url) {
+  constructor(url, options) {
     this.url = String(url);
+    this.name = options?.name;
     if (ENGINE_WORKER_SCRIPT.test(this.url) && FakeWorker.creationError !== null) {
       throw FakeWorker.creationError;
     }
@@ -62,6 +64,7 @@ Object.defineProperty(globalThis, "navigator", {
   },
 });
 
+let configuredLowMemory = true;
 globalThis.chrome = {
   runtime: {
     onMessage: {
@@ -69,7 +72,8 @@ globalThis.chrome = {
         runtimeListeners.push(listener);
       },
     },
-    sendMessage: async () => ({}),
+    sendMessage: async (message) => message.type === "hd_engine_config"
+      ? { ok: true, lowMemoryMode: configuredLowMemory } : {},
   },
 };
 
@@ -84,6 +88,15 @@ function importedRuntime() {
   return (...args) => listeners.some(listener => listener(...args) === true);
 }
 let relay = importedRuntime();
+
+// The initial config read has finished, but the capability probe has not.
+// A newer option push must win when that probe finally selects a worker.
+configuredLowMemory = false;
+assert.equal(relay(
+  { target: "hoshidicts-offscreen", type: "hd_engine_config", relayed: true, lowMemoryMode: false },
+  { url: "background.js" },
+  () => {},
+), true);
 
 function request(type, requestId, fields = {}) {
   const responses = [];
@@ -118,6 +131,7 @@ assert.equal((await startupStatus.promise).storageBackend, undefined);
 capabilityWorkers[0].emit("message", { channel: "opfs-capability-result", ok: true });
 await tick();
 assert.equal(engineWorkers.length, 1);
+assert.equal(engineWorkers[0].name, "hoshidicts-engine", "a config push during selection supersedes the startup read");
 assert.match(engineWorkers[0].url, /\/engine-worker\.js$/u, "a passing OPFS probe selects the direct-OPFS worker");
 const engine = engineWorkers[0];
 const queued = startup.map((entry) => entry.promise);
@@ -185,7 +199,7 @@ for (const type of ["hd_backup_prepare", "hd_backup_auto_prepare", "hd_custom_sa
   await Promise.all(saturated.map(entry => entry.promise));
 }
 
-const stagedImport = request("hd_import", "staged-import");
+const stagedImport = request("hd_import", "staged-import", { managedFingerprint: { id: "managed-a" } });
 await tick();
 const stagedImportMessage = engine.messages.at(-1);
 assert.equal(stagedImportMessage.message.type, "hd_import");
@@ -193,6 +207,8 @@ const stagedStatus = await send("hd_status", "status-during-staging");
 assert.equal(stagedStatus.loading, true);
 assert.equal(stagedStatus.threaded, true);
 assert.equal(stagedStatus.storageBackend, "opfs");
+assert.deepEqual(stagedStatus.updating, { id: "managed-a", phase: "downloading", fallback: null },
+  "status names the package an admitted import replaces before the engine reports a phase");
 const stagedLookup = request("hd_lookup", "lookup-during-staging");
 await tick();
 const stagedLookupMessage = engine.messages.at(-1);
@@ -223,6 +239,8 @@ engine.emit("message", {
   response: { type: "hd_lookup_result", requestId: "second-lookup-during-staging", ok: true, results: [] },
 });
 assert.equal((await secondStagedLookup.promise).ok, true);
+// An isolated import (engine-service.js runIsolatedImportTransaction) leaves the
+// committed dictionaries loaded, so its installing phase takes no read lock.
 engine.emit("message", {
   channel: "engine-progress",
   id: 73,
@@ -239,13 +257,72 @@ assert.deepEqual(engine.messages.at(-1), {
   ok: true,
   error: null,
 });
-assert.match((await send("hd_lookup", "lookup-during-install")).error, /busy mutating/);
+const isolatedInstallStatus = await send("hd_status", "status-during-isolated-install");
+assert.equal(isolatedInstallStatus.loading, true);
+assert.deepEqual(isolatedInstallStatus.updating, { id: "managed-a", phase: "installing", fallback: null });
+const isolatedInstallLookup = request("hd_lookup", "lookup-during-isolated-install");
+await tick();
+const isolatedInstallLookupMessage = engine.messages.at(-1);
+assert.equal(isolatedInstallLookupMessage.message.type, "hd_lookup", "reads reach the engine while an isolated import installs");
+engine.emit("message", {
+  channel: "engine-response",
+  id: isolatedInstallLookupMessage.id,
+  response: { type: "hd_lookup_result", requestId: "lookup-during-isolated-install", ok: true, results: [] },
+});
+assert.equal((await isolatedInstallLookup.promise).ok, true);
+assert.match((await send("hd_remove", "remove-during-isolated-install")).error, /busy mutating/);
 engine.emit("message", {
   channel: "engine-response",
   id: stagedImportMessage.id,
   response: { type: "hd_import_result", requestId: "staged-import", ok: true },
 });
 assert.equal((await stagedImport.promise).ok, true);
+const idleStatus = request("hd_status", "status-after-import");
+await tick();
+const idleStatusMessage = engine.messages.at(-1);
+assert.equal(idleStatusMessage.message.type, "hd_status", "an idle bridge asks the engine for its own status");
+engine.emit("message", {
+  channel: "engine-response",
+  id: idleStatusMessage.id,
+  response: { type: "hd_status_result", requestId: "status-after-import", ok: true, ready: true, loading: false,
+    dictionaryCount: 1, generation: 2, storageBackend: "opfs", threaded: true },
+});
+assert.equal((await idleStatus.promise).updating, undefined, "only the bridge's snapshot reports an import");
+
+// An import inside the live engine (no isolated importer) unloads the committed
+// dictionaries first, so its installing phase still refuses reads.
+const memoryImport = request("hd_import", "memory-import", {
+  importDecision: { action: "replace", target: { id: "replaced-b" } },
+});
+await tick();
+const memoryImportMessage = engine.messages.at(-1);
+assert.equal(memoryImportMessage.message.type, "hd_import");
+engine.emit("message", {
+  channel: "engine-progress",
+  id: 74,
+  progress: {
+    requestId: "memory-import",
+    phase: "installing",
+    receivedBytes: 8,
+    totalBytes: 8,
+    fallback: "memory",
+  },
+});
+assert.deepEqual(engine.messages.at(-1), {
+  channel: "engine-progress-ack",
+  id: 74,
+  ok: true,
+  error: null,
+});
+assert.match((await send("hd_lookup", "lookup-during-install")).error, /busy mutating/);
+assert.deepEqual((await send("hd_status", "status-during-memory-install")).updating,
+  { id: "replaced-b", phase: "installing", fallback: "memory" });
+engine.emit("message", {
+  channel: "engine-response",
+  id: memoryImportMessage.id,
+  response: { type: "hd_import_result", requestId: "memory-import", ok: true },
+});
+assert.equal((await memoryImport.promise).ok, true);
 
 const mutationTypes = [
   "hd_apply_state",
@@ -391,6 +468,48 @@ idbfsEngine.emit("message", {
 assert.equal((await idbfsLookup.promise).ok, true);
 assert.deepEqual([(await idbfsStatus.promise).storageBackend, (await idbfsStatus.promise).threaded], ["idbfs", true]);
 
+// Exercise the actual offscreen settlement boundary, not just the scheduler:
+// an order-only reply must neither request a recycle nor cancel a pending one.
+mock.timers.enable({ apis: ["setTimeout"] });
+try {
+  configuredLowMemory = true;
+  await import(`../extension/offscreen.js?order-only-recycle=${Date.now()}`);
+  relay = importedRuntime();
+  capabilityWorkers.at(-1).emit("message", { channel: "opfs-capability-result", ok: true });
+  await tick();
+  const originalWorkerCount = engineWorkers.length;
+  assert.equal(engineWorkers.at(-1).name, "hoshidicts-engine:low-memory");
+  const settle = async (type, fields = {}) => {
+    const pending = request(type, `recycle-${type}`);
+    await tick();
+    const worker = engineWorkers.at(-1);
+    worker.emit("message", { channel: "engine-response", id: worker.messages.at(-1).id,
+      response: { type: `${type}_result`, ok: true, ...fields } });
+    assert.equal((await pending.promise).ok, true);
+  };
+  await settle("hd_apply_state", { loadPath: "order-only" });
+  mock.timers.tick(2500);
+  assert.equal(engineWorkers.length, originalWorkerCount, "pure order does not schedule a deferred rebuild");
+
+  await settle("hd_import");
+  mock.timers.tick(1900);
+  await settle("hd_apply_state", { loadPath: "order-only" });
+  mock.timers.tick(1900);
+  assert.equal(engineWorkers.length, originalWorkerCount, "order activity renews the pending import's idle window");
+  mock.timers.tick(100);
+  assert.equal(engineWorkers.length, originalWorkerCount + 1, "the pending import recycle still runs");
+
+  relay({ target: "hoshidicts-offscreen", type: "hd_engine_config", relayed: true, lowMemoryMode: false },
+    { url: "background.js" }, () => {});
+  await settle("hd_apply_state", { loadPath: "order-only" });
+  mock.timers.tick(2000);
+  assert.equal(engineWorkers.length, originalWorkerCount + 2, "order activity preserves a pending mode change");
+  assert.equal(engineWorkers.at(-1).name, "hoshidicts-engine");
+} finally {
+  configuredLowMemory = false;
+  mock.timers.reset();
+}
+
 // Hold only the fallback service module. The production bridge is really imported;
 // real IDBFS/WASM behavior is covered by extension-smoke and chrome-fallback.
 const serviceLoad = Promise.withResolvers();
@@ -499,8 +618,11 @@ try {
     phase: "installing",
     receivedBytes: 8,
     totalBytes: 8,
+    fallback: "memory",
   });
   assert.match((await send("hd_lookup", "local-lookup-during-install")).error, /busy mutating/);
+  assert.deepEqual((await send("hd_status", "local-status-during-install")).updating,
+    { id: null, phase: "installing", fallback: "memory" });
   localRequests.shift().resolve({
     type: "hd_import_result",
     requestId: "local-staged-import",
