@@ -3,9 +3,11 @@ import { reorderSettingsRows } from "./settings-dom.js";
 
 // Labels of the Settings controls that own each toggleable option.
 export const KEYBIND_OPTION_LABELS = {
-  hoverEnabled: "Enable hover lookups",
+  hoverEnabled: "Enable lookups",
   onlyScanJapaneseText: "Japanese text only",
+  personalDictionaryEnabled: "Use the personal dictionary",
   showNoResultNotice: "Show a popup when a selection has no definition",
+  hidePopupOnCursorExit: "Hide popup on cursor exit",
   audioAutoplay: "Automatically play the first lookup result",
   sourceHighlightEnabled: "Highlight the word on the page",
   showPopupAudioButton: "Show the audio button",
@@ -16,8 +18,13 @@ export const KEYBIND_OPTION_LABELS = {
   showCompactDefinitionSummary: "Show brief definitions beside the headword",
   averageFrequency: "Show frequency averages",
   showFrequencyDictionaryNames: "Show frequency dictionary names",
+  compactFrequencyNumbers: "Abbreviate large frequency numbers",
   showPitchAccentFurigana: "Show pitch in furigana",
   showPitchAccentBadge: "Show pitch badges",
+  showPitchAccentDictionaryNames: "Show pitch dictionary names",
+  showPitchAccentText: "Show pitch accent text",
+  showPitchAccentPosition: "Show pitch accent position",
+  showPitchAccentGraph: "Show pitch accent graph",
   hidePopupGrammarTags: "Hide grammar tags",
 };
 const MODIFIER_NAMES = { meta: "Meta", ctrl: "Ctrl", alt: "Alt", shift: "Shift" };

@@ -34,12 +34,10 @@ function fixture(t, { failedDictionaries = [] } = {}) {
   const dom = new JSDOM(extension("settings.html"), { runScripts: "outside-only", url: "https://settings.example/#dictionaries" });
   t.after(() => dom.window.close());
   const { window } = dom;
-  window.IS_FIREFOX = false;
-  window.HOST_BROWSER = "chrome";
   window.OVERLAY_MODE = false;
   window.HOST_CAPABILITIES = {
     browserShortcuts: true, linkButtons: true, externalLinkHost: false, customJavaScript: true,
-    localFileAccessPrompt: true, mediaCapture: true, lowMemoryMode: true,
+    localFileAccessPrompt: true, lowMemoryMode: true,
   };
   window.MINING_CAPABILITIES = { screenshot: true, browserSpeech: true };
   window.replies = {
@@ -61,6 +59,8 @@ function fixture(t, { failedDictionaries = [] } = {}) {
     ["settings-dom.js", ["applyPageTheme", "setStatusOutput"]],
     ["settings-search.js", ["createSettingsSearch"]],
     ["experimental-settings.js", ["createExperimentalSettings"]],
+    ["theme-store.js", ["createThemeStore"]],
+    ["activation-settings.js", ["createActivationSettings"]],
     ["dictionary-progress.js", ["formatBytes"]],
     ["memory-settings.js", ["createMemorySettings"]],
     ["dictionary-name-drafts.js", ["createDictionaryNameDrafts"]],

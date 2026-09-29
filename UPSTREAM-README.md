@@ -19,6 +19,7 @@
   <a href="benchmark/README.md">Benchmarks</a> ·
   <a href="docs/architecture.md">Architecture</a> ·
   <a href="extension/README.md">Extension</a> ·
+  <a href="docs/asbplayer.md">asbplayer</a> ·
   <a href="docs/sharing.md">Sharing</a> ·
   <a href="docs/memory.md">Memory</a> ·
   <a href="docs/chrome-web-store.md">Chrome Web Store guide</a> ·
@@ -31,11 +32,6 @@ Hachidori is a blazing fast Japanese Dictionary Chrome Extension that is feature
 ## Install in 15 seconds
 
 Click <a href="https://chromewebstore.google.com/detail/hachidori/mikpaebfdmidjnopgffchicnmoahhcbe">here to install from Chrome store.</a> (note: this will always lag behind the repo and may have bugs fixed in the repo)
-
-Every GitHub release also ships an unsigned Firefox 153+ desktop package
-(`*-firefox-unsigned.xpi`) for temporary installation; it is not on
-addons.mozilla.org yet. See [the Firefox guide](docs/firefox.md); media
-recording is not included in that edition.
 
 <p align="center">
   <img src="docs/assets/install-in-60-seconds.gif" alt="Animated walkthrough of Hachidori's first-run setup, dictionary installation, Anki detection, and Japanese lookup" width="720">
@@ -50,21 +46,14 @@ Hachidori is 83 times faster than the worlds most popular Japanese dictionary ap
 See [the measured results](docs/browser-performance.md).
 
 
-# Media mining
-
-<img width="917" height="362" alt="Screenshot 2026-09-09 at 11 26 31" src="https://github.com/user-attachments/assets/c0f6d1b5-187d-45b7-9bda-aadf32879586" />
-
-Hachidori can record your screen and capture sentence audio + a gif. Not just in Chrome but in all windows on your desktop.
-
-This feature is **experimental** and may not work very well. I may remove it or reduce it also.
-
-See [Media mining setup, limits, and verification](docs/media-capture.md).
-
 # Custom Dictionary
 
 Do you keep on seeing a name pop up over & over again in a book, but it's not in the dictionary? 
 
 With Hachidori, you can highlight the word and add it as a custom definition.
+
+Never add your own words? Turn off **Settings → Reading → Personal dictionary →
+Use the personal dictionary** and highlighting text no longer opens a popup.
 
 <p align="center">
   <img src="docs/assets/custom-dictionary.gif" alt="Animated demonstration of adding and viewing a custom dictionary definition in Hachidori" width="720">
@@ -98,7 +87,6 @@ from **Settings → Sharing → Download the Anki add-on**, then follow the
 **Settings → Advanced → Experimental features** switches on work that is still
 changing and may be removed:
 
-- **Media mining** — the screen and audio capture above.
 - **Long dictionary entries** — find entries longer than the scan length
   (proverbs, titles) without scanning further on every hover.
 - **MDX dictionaries** — import MDict `.mdx` dictionaries with their `.mdd`
@@ -107,6 +95,12 @@ changing and may be removed:
 - **Google Docs** — look up words while reading a Google Doc. Docs paints its
   text to a canvas; Hachidori asks it to expose the text as well, which Google
   may change or remove without notice. The sentence is the hovered run of text.
+- **Smaller Anki cards** — write compact definitions to new Anki notes. The
+  dictionary stylesheets, classes and wrappers are left out; the text, line
+  breaks, lists, tables, furigana, images and the markers note types such as
+  Lapis, Kiku and Senren rely on are kept. A Jitendex note shrinks to about a
+  quarter of its size. Notes already in Anki are not changed. The behaviour
+  follows the Compact HTML Cleanup Anki add-on.
 
 
 # Opinionated

@@ -81,6 +81,12 @@ HACHIDORI_CHROME=/path/to/chrome HACHIDORI_PUPPETEER=/path/to/puppeteer-core.js 
   node benchmark/hover-popup.mjs /tmp/hover-results /tmp/hover-fixture.zip
 ```
 
+Use `HACHIDORI_HOVER_OPTIONS='{"popupTheme":"nazeka"}'` to compare the bundled
+renderer with Default under identical options. Raw samples include synchronous
+renderer timings and cumulative counts of Default view construction, rich glossary
+calls and dictionary-style application. These are separate from input-to-frame
+and complete-result measurements; see [the theme report](../docs/themes/benchmark.md).
+
 Use `HACHIDORI_HOVER_SAMPLES` to change the profile count. Each profile also times
 1,000 production `resolveCandidate()` calls at a glyph, 1,000 at a point in
 the tile's padding, 20 CSS pixels left of the text, and 1,000 at a word 600
@@ -277,17 +283,20 @@ also run on macOS. This does not add non-Linux process metrics to the runner.
 ## Low memory mode
 
 `low-memory-mode.mjs` alternates fresh-profile samples with
-[Low memory mode](../docs/memory.md) off and on: one archive imported through
-Settings' real file input, the import wall time (file selection to ready
+[Low memory mode](../docs/memory.md) off and on: the archives imported together
+through Settings' real file input, the import wall time (file selection to ready
 status), the engine heap (`hd_memory.heapBytes`) and the summed Chrome
 process-tree RSS right after the import settles and, with the mode on, again
-after the worker has been recycled, then the median and p95 of repeated
-`hd_lookup` round trips. Peak import RSS is not sampled; the standard runner
-above does that.
+after the worker has been recycled, then `hd_lookup` round trips. Without
+`--words` one text is looked up repeatedly (median and p95); with `--words` a
+file of lookup texts, one per line, is looked up `--passes` times (default 2),
+recording each pass's distribution, the page cache and the heap after the last.
+Peak import RSS is not sampled; the standard runner above does that.
 
 ```sh
-node benchmark/low-memory-mode.mjs --archive /path/to/jitendex.zip --samples 3 \
-  --output benchmark/results/low-memory-mode.json
+node benchmark/low-memory-mode.mjs --archive /path/to/jitendex.zip \
+  [--archive /path/to/jmnedict.zip ...] [--words hovers.txt --passes 5] \
+  --samples 3 --output benchmark/results/low-memory-mode.json
 ```
 
 ## Dictionary update availability

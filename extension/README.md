@@ -10,14 +10,6 @@ from a checkout, open `chrome://extensions`, turn on **Developer mode**, choose
 **Load unpacked** and select this folder. `scripts/package-store.py` zips this
 same folder, with the licence files, for the Chrome Web Store.
 
-`manifest.firefox.json` is the reviewed Firefox MV2 manifest. The same
-packager writes the Firefox XPI from these sources minus the Chrome-only files
-listed in `scripts/firefox-package.json`, with that manifest in place of
-`manifest.json`; `scripts/prepare-firefox.mjs` stages the same layout in an
-ignored directory for lint and the Firefox smoke test. See the
-[Firefox guide](../docs/firefox.md) to build and temporarily install the
-unsigned XPI.
-
 [The architecture guide](../docs/architecture.md) explains how the pieces
 work together and lists every runtime message and stored key. This page says
 where things are.
@@ -26,7 +18,9 @@ where things are.
 
 Drag a lookup popup's bottom-right corner to resize it. The size is shared by
 subsequent and nested lookups in that page, including after closing and reopening
-the popup. Reloading or navigating the page (or restarting the browser) starts a
+the popup. Like the saved Design size, it is a maximum: a popup that fits on
+neither side of its word is shortened to the room beside it. Reloading or
+navigating the page (or restarting the browser) starts a
 new reading session with the saved Design dimensions. Dragging does not change
 those saved settings or other tabs.
 
@@ -44,16 +38,14 @@ validated URL in the system browser.
 | File | Runs as | Role |
 | --- | --- | --- |
 | `background.js` | the service worker | Routes every runtime message and owns everything in `chrome.storage.local`: dictionary metadata, options, the personal dictionary, update schedules, lookup counts, automatic-backup metadata, first-run and sharing state. It also owns the alarms, the Anki gateway and the sharing host and client. It holds no engine state, so Chrome may stop it whenever it is idle. |
-| `firefox-background.html`, `firefox-background.js` | Firefox’s persistent MV2 background page | Loads the shared background module and hosts `offscreen.html` in one authenticated hidden iframe so the engine remains warm. |
-| `content.js`, with the classic scripts listed under `content_scripts` | every web page | Scans the Japanese text near the pointer, renders the popup in a closed shadow root through `render/popup.js` and `render/glossary.js`, and adds the popup's Anki and pronunciation controls (`anki-content.js`, `audio-content.js`). Chrome also injects `capture-content.js`; Firefox does not. `content.css` is the only style the page itself receives: the source highlight. |
-| `offscreen.html`, `offscreen.js` | Chrome’s offscreen document or Firefox’s hidden background iframe | Owns the dictionary engine. `engine-worker.js` runs the pthread build with direct OPFS once `opfs-capability-worker.js` has proved the browser can, and imports each archive in a short-lived second instance, `import-worker.js`, so lookups keep working; `engine-worker-idbfs.js` runs the pthread build on IDBFS when the browser has shared memory but no OPFS access handles (Electron), both through `engine-worker-runtime.js`; `engine-service.js` is also the single-thread IDBFS fallback. `engine-recycler.js` decides when Low memory mode replaces the worker ([docs/memory.md](../docs/memory.md)). Pronunciation, Anki and the first-run installer load here on demand. Chrome also hosts media capture here. |
-| `settings.html`, `settings.js` | the options page | Dictionaries, groups, updates, the personal dictionary, Reading, Design, pronunciation, Anki, keybinds, backup and sharing, with media capture where supported and global search. The larger sections have their own `*-settings.js` controller; `design-preview.html` is the live preview inside Design. |
+| `content.js`, with the classic scripts listed under `content_scripts` | every frame of a web page | Scans the Japanese text near the pointer and renders a popup in that frame, bounded by its viewport. The popup uses a shadow root through `theme-host.js` and the selected renderer (`render/popup.js` for Default), with Anki and pronunciation controls (`anki-content.js`, `audio-content.js`). `content.css` is the only style the page itself receives: the source highlight. |
+| `offscreen.html`, `offscreen.js` | Chrome’s offscreen document | Owns the dictionary engine. `engine-worker.js` runs the pthread build with direct OPFS once `opfs-capability-worker.js` has proved the browser can, and imports each archive in a short-lived second instance, `import-worker.js`, so lookups keep working; `engine-worker-idbfs.js` runs the pthread build on IDBFS when the browser has shared memory but no OPFS access handles (Electron), both through `engine-worker-runtime.js`; `engine-service.js` is also the single-thread IDBFS fallback. `engine-recycler.js` decides when Low memory mode replaces the worker ([docs/memory.md](../docs/memory.md)). Pronunciation, Anki and the first-run installer load here on demand. |
+| `settings.html`, `settings.js` | the options page | Dictionaries, groups, updates, the personal dictionary, Reading, Design, pronunciation, Anki, keybinds, backup and sharing, and global search. The larger sections have their own `*-settings.js` controller; `design-preview.html` is the live preview inside Design. |
 | `startup.html`, `startup.js` | a tab opened once after install | First-run setup: recommended dictionaries, Anki detection, a practice lookup, and the offer to use a Hachidori that another browser on this computer already shares. Overlay mode skips it. |
-| `toolbar.html`, `toolbar.js` | the toolbar button's popup | Turns lookups on and off, shows the sharing state and opens Settings. Chrome also exposes the recording action here. |
-| `capture.html`, `capture.js` | a Chrome-only tab opened from the toolbar or Settings | Controls media capture. The recorder itself, `capture-host.js`, runs in the offscreen document and keeps going when this tab closes. Firefox does not expose this entry point. |
+| `toolbar.html`, `toolbar.js` | the toolbar button's popup | Turns lookups on and off, shows the sharing state and opens Settings. |
 
 `overlay-mode.js`, its `browser-api.js` dependency, `render/reader.css` and
-`icons.css` are the only files web pages may fetch
+`icons.css` and bundled `vendor/themes/` assets are the files web pages may fetch
 (`web_accessible_resources`). The popup and its Anki controls load the two
 stylesheets; overlay hosts use the shared mode contract.
 
@@ -83,14 +75,18 @@ the service worker and both engine runtimes run the same code.
 - **Anki.** `anki.js` is the AnkiConnect gateway and `anki-setup.js`
   recognises an existing mining setup. `anki-templates.js`, `anki-values.js`,
   `anki-glossary.js`, `anki-pitch.js`, `anki-resources.js` and `anki-audio.js` build the note
-  fields and media. Stored Anki Templates group each destination, note type,
+  fields and media; the rich glossary fields carry Yomitan's structured-content
+  class rules inline. While the experimental Smaller Anki cards flag is on,
+  `anki-compact.js` rewrites the rich glossary fields as compact HTML.
+  Stored Anki Templates group each destination, note type,
   field mapping and duplicate policy; the first powers the built-in action and
   custom Anki buttons select the others by stable ID. Settings edits every
   field mapping through an accessible marker combobox while retaining the
-  mapping string exactly. `anki-duplicates.js` and
-  `anki-enrichment.js` handle a
+  mapping string exactly. `anki-duplicates.js` runs Anki's add checks and
+  names the cloze rule behind a refusal AnkiConnect reports only as an
+  unknown reason; it and `anki-enrichment.js` handle a
   note that already exists; `anki-digest.js` hashes media.
-  `anki-client-media.js` validates final screenshot, capture and browser-speech
+  `anki-client-media.js` validates final screenshot and browser-speech
   media crossing a linked-browser boundary. `anki-mining.js` and
   `anki-worker.js` are the mining service in the
   service worker. `anki-index.js` and `anki-index-cache.js` provide the shared
@@ -102,14 +98,6 @@ the service worker and both engine runtimes run the same code.
   `audio-cache.js` and `audio-player.js` fetch, keep and play audio in the
   offscreen document (`audio-offscreen.js`); `speech.js` wraps the browser's
   text-to-speech.
-- **Media capture.** `capture-host.js` is the offscreen recorder.
-  `capture-session.js`, `capture-buffer.js`, `capture-timeline.js` and
-  `capture-speech.js` are its bounded buffers, occurrence timeline and speech
-  detection. `capture-audio-worklet.js`, `capture-frame-client.js` with
-  `capture-frame-worker.js`, and `capture-encoder-client.js` with
-  `capture-encoder-worker.js` move audio sampling, frame grabbing and animated
-  AVIF encoding (`avif-sequence.js`) off the main thread.
-  `texthooker-protocol.js` parses the text a texthooker sends.
 - **Backup.** `backup-archive.js` is the manual ZIP format, `backup-state.js`
   the shared snapshot rules, `backup-automatic.js` the two-record daily
   retention, cadence and age rules, `backup-downloads.js` the pending downloads,
@@ -131,6 +119,8 @@ the service worker and both engine runtimes run the same code.
   `experimental-settings.js` renders the Advanced → Experimental features
   switches from the registry in `reader-options.js`; `memory-settings.js`
   the Advanced → Memory readout and each Library row's *In memory* line;
+  `activation-settings.js` the Reading → Activation key or button picker and
+  its *Press to set* recorder;
   `keybind-settings.js`, `custom-button-settings.js` and `external-links.js`
   the keybinds and custom buttons in the popup; `local-file-access.js` the
   notice about Chrome's *Allow access to file URLs* permission;
@@ -139,7 +129,10 @@ the service worker and both engine runtimes run the same code.
   the Design preview from the images in `assets/` (see
   `assets/ATTRIBUTION.md`); `design-preview.js` renders the preview from
   `sample-meal.svg` and local sample data.
-- **Renderer.** `render/` is the popup renderer ported from GameSentenceMiner,
+- **Theme Store.** `theme-store.js` renders the experimental Design carousel.
+  `theme-host.js` selects Default or the bundled Nazeka view before constructing
+  content and applies only its CSS. See the [renderer contract](../docs/themes/README.md).
+- **Renderer.** `render/` is the Default popup renderer ported from GameSentenceMiner,
   which adapts Hoshi Reader and Yomitan; `render/ATTRIBUTION.md` records what
   came from where.
 - **Overlay mode.** `overlay-mode.js` is the one switch a host such as the
@@ -150,8 +143,10 @@ the service worker and both engine runtimes run the same code.
 - **Vendored code.** `vendor/hoshidicts-threaded.{mjs,wasm}`,
   `vendor/hoshidicts-threaded-idbfs.{mjs,wasm}` and
   `vendor/hoshidicts.{mjs,wasm}` are the three builds of the hoshidicts engine
-  from `wasm/build.sh`, `vendor/avif-encoder.{mjs,wasm}` the AVIF encoder
-  from `wasm/avif/`, and `vendor/zip.js` the pinned zip.js runtime. They are
+  from `wasm/build.sh`, and `vendor/zip.js` the pinned zip.js runtime.
+  `vendor/yomitan/structured-content-style.js` is Yomitan's
+  `structured-content-style.json` as an ES module, its revision and checksum
+  in `vendor/yomitan/source.json`. They are
   committed build output: update them with their source change and otherwise
   leave them alone.
 - `icons/` holds the extension's icons.
@@ -190,7 +185,6 @@ Sharing changes have their own suites, listed in [sharing](../docs/sharing.md).
 
 - [Privacy](../docs/privacy.md): what leaves the browser, and when.
 - [Sharing](../docs/sharing.md), [overlay mode](../docs/overlay-mode.md),
-  [media capture](../docs/media-capture.md),
   [the backup format](../docs/backup-format.md),
   [update schedules](../docs/update-schedules.md) and
   [lookup statistics](../docs/lookup-statistics.md) describe those features.

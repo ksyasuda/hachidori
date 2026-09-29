@@ -1,9 +1,7 @@
 # Architecture
 
-Hachidori shares one WebAssembly dictionary engine and extension codebase across
-Chrome and Firefox desktop. Chrome uses a Manifest V3 service worker
-and offscreen document. Firefox uses a Manifest V2 persistent background page
-with the same offscreen page mounted as a hidden iframe.
+Hachidori uses a WebAssembly dictionary engine in a Chrome Manifest V3
+extension, with a service worker and offscreen document.
 
 ## Runtime layout
 
@@ -17,14 +15,12 @@ web page
 settings.html / content.js
   └─ extension runtime messaging
        └─ background.js
-            ├─ Chrome: MV3 service worker
-            ├─ Firefox: module loaded by persistent firefox-background.html
+            ├─ MV3 service worker
             ├─ owns chrome.storage.local dictionary metadata
             ├─ atomically owns the revisioned custom source document
             ├─ checks managed update indexes and owns one next-due alarm
             ├─ owns two retained daily snapshots and their next-due alarm
-            ├─ Chrome: creates or reconnects to offscreen.html
-            ├─ Firefox: waits for the authenticated persistent iframe
+            ├─ creates or reconnects to offscreen.html
             └─ relays requests without holding engine state
                  └─ offscreen.js
                       ├─ probes pthread, shared-memory, and direct-OPFS support
@@ -39,8 +35,7 @@ settings.html / content.js
 
 Chrome’s service worker can be terminated after an idle period without
 discarding loaded dictionaries. A later request recreates the routing context
-while the offscreen engine remains authoritative. Firefox keeps both the
-background page and its hidden engine iframe alive. Runtime requests carry
+while the offscreen engine remains authoritative. Runtime requests carry
 explicit IDs, generations, and result message types so stale or malformed
 replies fail closed.
 
@@ -93,8 +88,8 @@ Each dictionary import follows one logical transaction:
 7. The engine re-reads authoritative state before garbage-collecting unreferenced generation roots. A root an isolated import is still writing is retained until that import settles.
 8. The settings page renders success only after that reply.
 
-The IDBFS runtimes (Electron's pthread engine and the single-thread engine
-Firefox uses) have no isolated importer: two instances cannot share one IDBFS
+The IDBFS runtimes (Electron's pthread engine and the single-thread engine)
+have no isolated importer: two instances cannot share one IDBFS
 store. There the archive is imported inside the live engine, whose loaded
 dictionaries are mapped into the same 32-bit address space the importer needs,
 so `runImportTransaction` unloads them first and reloads the committed set
@@ -235,7 +230,8 @@ only when it created the setup record. Chrome reports `install` again on every
 launch for an unpacked extension loaded from the command line, so the absence
 of that record, not the reason alone, identifies a new installation.
 [Overlay mode](overlay-mode.md) skips this path and only seeds the initial
-options on worker start.
+options on worker start, when an unlinked profile that never chose a lookup mode
+also gets the overlay's hover default.
 
 - `setupState`: `{ schemaVersion: 1, revision, startedAt, stage, completedAt,
   dictionaries, anki }`, where `stage` is `welcome`, `dictionaries`, `anki`, `practice` or
@@ -268,7 +264,7 @@ options on worker start.
 
 New installations begin at `welcome`, which discloses local page processing,
 lookup statistics, publisher downloads, configured Anki metadata discovery, optional
-pronunciation sharing, mining and explicitly started capture. **Start setup**
+pronunciation sharing and mining. **Start setup**
 uses the ordinary revisioned stage write to enter `dictionaries`; automatic
 downloads and the later Anki check wait for that successful write. The worker
 also refuses startup's downloads and Anki checks while the stored stage is
@@ -492,7 +488,7 @@ The practice view loads the reader once after proving the exercise can be
 answered. `startup.js` takes the complete dependency order from the manifest's
 `content_scripts` entry through `chrome.runtime.getManifest()`, skipping only
 `reader-options.js`, which the startup module already loaded. This includes
-new reader dependencies such as the media-capture collector without maintaining
+new reader dependencies without maintaining
 a second static list. `content.css` comes with the page; no reader scripts load
 during the dictionary or Anki stages. Script loading also waits for the reader's
 `HDReaderReady` promise: its initial dictionary/options snapshot must be adopted
@@ -603,14 +599,59 @@ key is released. `activation` instead closes the popup on release, and `hover`
 scans without a key. `reader-options.js` translates legacy
 `modifier` values into the canonical mode/key on read and accepts old Settings
 patches through the same revision CAS. Explicit modern fields win, and selecting
-Hover does not erase the remembered key. Canonical writes contain no competing
+No key does not erase the remembered key. Canonical writes contain no competing
 modifier policy. Letters, digits, punctuation, named browser keys and F1–F24 are
 supported; browser/OS-reserved keys remain subject to their native behavior.
 
-The existing 0–2,000 ms open delay defaults to 50 ms and also applies to a key
-pressed over a stationary pointer. Hide/transfer delay defaults to the existing
-160 ms, with the pinned source's 0–5,000 ms range. These are one global setting
-pair, not per-dictionary policies. Zero hide delay dismisses immediately.
+Settings → Reading → Activation shows these stored fields the way Yomitan's
+Scanning settings do. **Enable lookups** is `hoverEnabled`, the same switch as
+the toolbar's Japanese lookups and the toggle shortcut. The **Activation key or
+button** picker lists **No key** first: it writes only `lookupMode: "hover"`,
+and a key writes `activationKey` with `activationSticky` or `activation` as
+**Keep the popup open after releasing the key or button** says. That switch is
+hidden for No key and on when a key is chosen again.
+
+The activation input can also be the middle, Back or Forward mouse button,
+stored as `MouseMiddle`, `MouseBack` or `MouseForward` in the same
+`activationKey` option; Yomitan's bit-index names such as `mouse2` are not
+accepted. The picker lists the buttons above the keys, and **Press to set**
+records the next key or supported button pressed anywhere on the page; the
+primary and secondary buttons and unlisted keys are reported by name and not
+saved. The reader derives a held button from `MouseEvent.buttons` on every
+mouse event, so a release the page never saw ends activation at the next move.
+A press scans at once, moving while the button is held keeps scanning, popup
+definition text opens nested lookups, and release follows the mode as a key's
+does. One fixed rule stands in for Yomitan's *Prevent secondary mouse button
+actions* switches: over content the reader scans (text a primary press could
+select, or popup definition text) the scan press is cancelled, so it starts no
+autoscroll, and a Back or Forward release is cancelled, so it does not
+navigate. Its `auxclick` is cancelled only when the press was on a word the
+reader looks up, so other links still open in new tabs. A press on a popup link
+is never a scan press. A scan button gates child popups exactly as a key does:
+with No key and Child popups set to hold it, only a press over a popup is a
+scan press, and page presses keep their ordinary meaning. Otherwise No key and
+keyboard keys are unchanged, including a middle press closing the popup.
+
+There is no open delay: `hoverDelayMs` always normalises to 0, so a scan runs
+on the next timer turn at the pointer's latest position, and a key pressed over
+a stationary pointer scans at once. The hide/transfer delay defaults to the
+existing 160 ms, with the pinned source's 0–5,000 ms range. It is one global
+setting, not a per-dictionary policy. Zero hide delay dismisses immediately.
+
+Words in a popup's definitions follow `lookupMode` by default
+(`definitionLookupMode: "inherit"`). Reading → Activation → Child popups can
+instead ask for the activation key (`activation`) or a click (`click`) there,
+whatever the page uses, so a No key reader can move over, rest on and scroll
+long definitions without opening children. The key choice names the remembered
+`activationKey`, which No key keeps. With the key, definition text is scanned
+only while it is held, a press over a resting pointer opens that word's child
+and release keeps the child. With Click, a primary click on a word opens its
+child after the press has retired the previous one; a press that travels 3 px
+or more, a selection in the popup, and clicks on links, buttons or disclosure
+summaries look nothing up. A click child loads like a link child, so pointer
+movement does not cancel it. Dictionary links, clicked kanji, the depth limit and
+protected Note drafts behave the same in every mode. The option is kept local to
+a linked overlay.
 
 Disabled readers do not create pointer scan timers. Activation-gated readers
 remember the pointer but do not scan or schedule until the key is held. Modifier
@@ -624,8 +665,11 @@ cancel delayed or unfinished pointer work immediately; the hide delay only
 retains an already-rendered popup for transfer. In `activationSticky` a rendered
 popup ignores key release, pointer movement without the key, an empty scan and
 window departure; outside click, Escape, blur, scrolling its source away, a
-failed lookup or a new lookup still close it. Same-candidate hover, popup entry,
-keyboard focus and Note editing preserve the current view. Dispatching a different
+failed lookup or a new lookup still close it. Its rendered children likewise
+outlive pointer movement through the chain (see
+[Definition popup chains](#definition-popup-chains)). Same-candidate hover,
+popup entry, keyboard focus and Note editing preserve the current view.
+Dispatching a different
 valid pointer candidate retires the previous popup, matching the pinned reader's
 `queueLookup` prune-before-send behavior: an obsolete view cannot accept a Note
 or resume expired glossary/media callbacks. Interaction-only settings changes do
@@ -633,12 +677,26 @@ not invalidate current rendered resources; result-affecting settings still do.
 Hidden retirement clears the DOM and owners immediately without a redundant
 scroll reset; every visible term, kanji or notice render still resets scrolling.
 
+**Hide popup on cursor exit** ports Yomitan's option of that name, off by
+default, with its own 0–5,000 ms delay (160 ms by default). It works in every
+lookup mode, including `activationSticky`. A pane's `mouseleave` for the page,
+an iframe or outside the window starts one exit timer, which is not restarted;
+moving between overlapping panes is not an exit, and a pointer resting in a
+connecting corridor stays inside until the transfer check finds it outside.
+Re-entering any pane, a new lookup, or scanning the popup's own word again
+cancels the timer. When it fires the whole chain hides unless a Note draft or
+pending append, an open audio menu or `:focus-visible` keyboard focus protects
+it; the focus Chrome leaves on a clicked button does not. A popup the pointer
+never entered and an exact-selection lookup stay as before.
+
 Disabling explicitly closes even a focused popup or Note draft, while an already
 dispatched Note append finishes its transaction without reopening or refreshing
 the disabled reader. Settings changes reach existing tabs and persist through a
 full browser restart without reloading the engine.
 
-![Lookup mode and activation key in Settings](assets/reader-activation-settings.png)
+![Enable lookups, the Activation key or button picker with Press to set, the keep-open switch and Child popups in Settings](assets/reader-activation-settings.png)
+
+![Hide popup on cursor exit and its Delay in Settings](assets/reader-cursor-exit-settings.png)
 
 ### Keybinds
 
@@ -677,7 +735,7 @@ and changes only through navigation or a click on an entry. Navigation reveals
 later entries through the existing Show more control. Dictionary navigation moves
 from the most visible glossary card to the nearest card from another dictionary.
 Add note, View notes and Back click the current entry's existing buttons, so
-duplicate, disabled and capture behaviour is unchanged. Audio replays without
+duplicate and disabled behavior is unchanged. Audio replays without
 the click toggle, or plays the first choice from the selected source. Toggle
 option writes one boolean through the revisioned options CAS.
 
@@ -698,13 +756,18 @@ Hachidori has:
 
 The worker toggles `hoverEnabled` inside its storage queue with the same
 revisioned options write as the toolbar switch. A popup-action command goes to
-the active tab as `hd_reader_command`. Every frame's reader runs the matching
-keybind action, with a count of one for entry moves. Only a frame with an open
-popup, or a selection for the scans, acts on it. Chrome alone can change these
-shortcuts, as with Yomitan on Chrome. The Keybinds section lists
+the active tab as `hd_reader_command`. The manifest starts a reader in every
+web page frame. Each frame scans and renders its own popup within that frame's
+viewport; [asbplayer](asbplayer.md) uses this for video subtitles. When a page
+wrapper enters fullscreen, its reader mounts the popup host inside that wrapper
+so the browser's fullscreen layer can paint it; on exit the host returns to the
+document body. Replaced elements and open shadow-root hosts use the body fallback,
+where the fullscreen layer may obscure the popup. Every frame's reader runs the
+matching keybind action, with a count of one for entry moves. Only a frame with
+an open popup, or a selection for the scans, acts on it. Chrome alone can change
+these shortcuts, as with Yomitan on Chrome. The Keybinds section lists
 `chrome.commands.getAll()`, refreshes the list when its window regains focus,
-and opens `chrome://extensions/shortcuts` (Firefox: `commands.openShortcutSettings()`,
-since `tabs.create` refuses `about:addons`).
+and opens `chrome://extensions/shortcuts`.
 
 ![Browser shortcuts listed in Keybinds](assets/settings-browser-shortcuts.png)
 
@@ -789,7 +852,8 @@ only their host through browser focus/event APIs; their private editors cannot
 be inspected. The reader does not intercept shadow creation or block every
 focused component to guess at those internals.
 
-An automatic page selection takes priority over pointer scanning and follows
+While the personal dictionary is on (below), an automatic page selection takes
+priority over pointer scanning and follows
 the same lookup mode, activation key and `onlyScanJapaneseText` gate as a
 pointer lookup, so with that default a selected English word or URL neither
 looks up nor opens the popup. Hover mode accepts an ordinary selection. Activation and sticky
@@ -818,6 +882,25 @@ no-dictionaries notice stays because it reports that nothing is installed.
 Saving uses the managed
 Note append transaction and replays that exact request to show the new
 definition; publisher dictionaries remain unchanged.
+
+Automatic selection lookups are the personal dictionary's entry point, so
+Reading → Personal dictionary → **Use the personal dictionary**
+(`personalDictionaryEnabled`, default on) owns them. Switched off, the reader
+behaves like Yomitan: a selection change or drag release never looks anything
+up, in any lookup mode, and a live selection no longer outranks the pointer, so
+hover and activation-key lookups over highlighted text use the configured scan
+length. A changed selection only releases a popup that Scan selected text or
+Scan text at selection opened; those keybinds still look up the selection, and
+their miss hides the popup like any other. The pencil is hidden with a host
+attribute, as the audio button is, so a live toggle keeps an open Note draft;
+the selection notice never appears and the no-dictionaries notice drops its
+pencil sentence. Every term lookup carries `options.personalDictionary`, and
+with `false` the engine service removes Hachidori Custom Dictionary glossaries
+from `hd_lookup` and `hd_lookup_dictionary` replies, dropping a result that had
+no others. It filters after the engine's `maxResults` cut, so a personal-only
+term can use up one result slot. The option is a reader preference: it never
+disables, reorders, recompiles or removes the managed package, and turning it
+back on shows the entries again without an engine reload.
 
 The visible query and raw DOM highlight span are stored separately: hidden text
 and block separators can make `Selection.toString()` differ from `Range.toString()`.
@@ -866,9 +949,13 @@ before the change event completes.
 
 ## Popup metadata controls
 
-Design has independent controls for frequency source names and averages, pitch
-contour and its preferred dictionary, pitch badges, and grammar tags. Frequency
-metadata defaults to compact numbers without dictionary names. The first
+Design has independent controls for frequency source names, number
+abbreviation and averages, pitch contour and its preferred dictionary, pitch
+badges and their dictionary names, and grammar tags. Frequency metadata defaults
+to Yomitan's values without dictionary names: each dictionary's own display
+value, such as `51,499` or `142位`, otherwise the plain number, and averages as
+plain numbers. **Abbreviate large numbers** opts into compact values such as
+`51.5k`. The first
 result's frequency tags are the same Yomitan-like two-tone tags as every later
 entry's metadata row; a filled source segment appears only when names or
 averages are shown. Kana-derived values retain the visible Yomitan/Jiten `㋕`
@@ -879,15 +966,25 @@ header or claiming a separate chrome row. The lower chrome row is reserved for
 dictionary tabs and is omitted when no tabs exist. Grammar tags default to
 hidden; opting in places them in the same result metadata group. Explicit saved
 display choices are preserved.
-Contour and pitch badges remain on, and averages remain off. IPA transcriptions
-and definition tags remain visible independently. Every pitch badge draws its
-dictionary's accent as the same mora contour the header furigana uses, followed
-by the `[n]` position, so several pitch dictionaries compare at a glance; a
-position outside the reading's morae keeps the plain `reading [n]` text, and the
-text stays in every badge's tooltip and accessibility label. Pitch and IPA show
-pronunciation data without source-name labels; tooltips and accessibility labels retain source
-attribution and follow dictionary aliases. Unfilled tags and lightly tinted pitch
-and frequency values use the theme's normal foreground, including light themes.
+Contour, pitch badges and pitch dictionary names remain on, and averages remain
+off. IPA transcriptions and definition tags remain visible independently. Pitch
+badges are Yomitan's pronunciation markup (#364): one `li.pronunciation-group` per
+pitch dictionary starts with its `pronunciation-dictionary` tag, followed by each
+of that dictionary's accents as an `li.pronunciation` drawn by a port of
+Yomitan's `PronunciationGenerator`: the overlined text with its downstep hook and
+nasal and devoice marks, the `[n]` notation and the SVG graph. Design's **Show
+pitch accent text**, **position** and **graph** switch those notations with
+Yomitan's defaults (text and position on, graph off); a hidden notation is not
+built. A string pattern such as `"LHL"`, which hoshidicts delivers beside a
+placeholder position of 0, is read with Yomitan's `isMoraPitchHigh` and
+`getDownstepPositions`, so it shows `[2]` like the integer form, in the badges,
+the furigana contour and the Anki pitch markers alike. `reading [n]` stays in
+every accent's tooltip and accessibility label. Turning dictionary names off
+removes the tags. IPA shows transcriptions without source-name labels. Tooltips and
+accessibility labels retain source attribution, and visible pitch names and
+labels follow dictionary aliases in place. Unfilled tags, pitch names, pitch
+notation and lightly tinted frequency values use the theme's normal foreground,
+including light themes.
 When IPA sources exceed the existing metadata display budget, a collapsed
 disclosure builds their tags on first expansion. Every ordered transcription
 remains available; this is lazy presentation, not a source or data limit.
@@ -897,9 +994,17 @@ the standalone contract: arithmetic uses the native positive numeric value, not
 its display label, and rank, occurrence and unspecified dictionaries aggregate
 separately. Each dictionary contributes its first usable value once. Type labels
 remain visible as concise `Avg rank`, `Avg count`, or `Avg frequency` text even
-with source names hidden; individual dictionary names are not shown for an
-aggregate. These display controls do not change native frequency sorting or
-lookup results.
+with source names hidden, and each aggregate carries `data-frequency-average`
+(`rank-based`, `occurrence-based` or `unspecified`). As in Yomitan, every tag
+that averages-off shows stays in the DOM after the aggregates, unchanged apart
+from the `hidden` attribute. Hidden tags take no layout or metadata display
+budget, stay out of the accessibility tree and still follow alias renames.
+Custom CSS can reveal them with
+`.gsm-hoshidicts-tag-frequency[hidden] { display: inline-flex; }`; a result with
+no value to average also hides its frequency group or row, which such a
+stylesheet must reveal too. Theme rules that want only the visible values can
+add `:not([hidden])`. These display controls do not change native frequency
+sorting or lookup results.
 
 The preferred pitch source is a soft canonical-title preference: unavailable or
 disabled sources fall back to another usable pitch source. A committed rename
@@ -1071,6 +1176,27 @@ rendered text and elements; ordinary unknown-wrapper child text and literal
 glossary fallback remain supported. A glossary that exceeds that work budget is
 omitted without clearing the surrounding entry or other dictionary cards.
 
+Inside each dictionary card the markup and CSS are Yomitan's (#364). Each
+term-bank row is an `li.definition-item[data-dictionary]` in the card's
+`ol.definition-list`, with its tags in `.definition-tag-list`. Its glossary
+array becomes `ul.gloss-list[data-count]` with one `li.gloss-item` per element
+Yomitan displays, each a hidden `.gloss-separator` and a `.gloss-content`: a
+string's newlines become `<br>`, an image glossary shows its description, and
+`.gloss-content { white-space: pre-line }` breaks lines inside structured
+content. Form-of `[term, rules]` elements are skipped as Yomitan's translator
+consumes them. As in Yomitan's `_appendStructuredContent`, a container of
+Japanese text gets `lang="ja"` unless a dictionary set a language above it;
+glossary strings use the same detection rather than Yomitan's fallback to its
+profile language, which would label English glosses as Japanese for assistive
+technology. The headword and kanji glyph are `lang="ja"`, so the page's language
+never picks their Han forms. The glossary rules in `reader.css` follow Yomitan's
+`display.css` and `structured-content.css` at their original specificity, so a
+dictionary's own styles still override them, with Yomitan's variable names mapped
+onto the popup palette. Hachidori keeps its per-dictionary cards, the monochrome
+image mask, table scrolling, failed-image labels and 1em-per-pixel image boxes at
+its 16px text. The Anki export keeps Yomitan's own Anki shape (one element bare,
+several as a list) through the renderer's `layout: "anki"` option.
+
 Each node-limit rejection reports its exact attempted value and configured
 limit. Structural paths remain exact for ordinary content and elide the middle
 of unusually deep paths, keeping diagnostics bounded without copying glossary
@@ -1111,7 +1237,9 @@ No dictionary frame, fetch, new permission or configurable action is introduced.
 ### Definition popup chains
 
 Hovering ordinary text inside a rendered glossary opens a child beside that
-word. The closed shadow root is resolved with the native shadow-aware caret
+word; Child popups can ask for the activation key or a click instead (see
+[Hover activation](#hover-activation-and-popup-ownership)). The closed shadow
+root is resolved with the native shadow-aware caret
 API, then the ordinary page scanner's inline, ruby, whitespace, Japanese-only
 and scan-length rules build the child query. The complete glossary remains the
 sentence and offset coordinate space for mining. Headwords, metadata, compact
@@ -1139,9 +1267,18 @@ that child's term request; its next Back closes the child and returns focus to a
 connected source link when one initiated the lookup.
 
 Keyboard link activation focuses the child's Back control; mouse activation
-does not invent keyboard focus that would block pointer-return pruning. Returning
-to an ancestor prunes descendants after the normal hide delay, unless a draft,
-pending Note append, or deliberate keyboard focus still protects them. A primary
+does not invent keyboard focus that would block pointer-return pruning. In
+`hover` and `activation`, which auto-hide the root, returning to an ancestor
+prunes descendants after the normal hide delay, unless a draft, pending Note
+append, or deliberate keyboard focus still protects them. In `activationSticky`
+pointer movement never prunes a rendered child: entering or resting in an
+ancestor, an empty scan there and hovering a non-dictionary link there all leave
+it open, as Yomitan's children stay open without "Hide popup on cursor exit". An
+unfinished hover child is still cancelled when the pointer leaves its word.
+While Hide popup on cursor exit is on, every mode, `activationSticky` included,
+prunes on that pointer movement after the cursor-exit delay instead of the hide
+delay, with the same protections. In
+every mode a primary
 press in an ancestor pane retires its descendants at once, focused or not, and
 drops a pending definition scan; only an open draft or pending append keeps
 them, and Escape still closes that form first. A press on an internal link keeps
@@ -1151,8 +1288,12 @@ transfer uses actual pane rectangles and narrow connecting gaps, with 80 ms grac
 before resuming the current page scan. No layout is read in raw mousemove before
 the existing throttle. Like Yomitan, each child is placed from its own source
 rectangle: below the word when that fits, otherwise above, aligned with the
-word's left edge and clamped to the viewport, so it overlaps its parent rather
-than sitting beside it. Layout callbacks start
+word's left edge and clamped horizontally to the viewport, so it overlaps its
+parent rather than sitting beside it. For horizontal text, a pane that fits on
+neither side takes the roomier one and is shortened to its room, keeping the
+gap and viewport padding, so it never covers the text that opened it; roots,
+which prefer the space above their page word, follow the same rule. The
+configured or session size is therefore a maximum. Layout callbacks start
 at their owning level and reposition descendants without redoing ancestor
 layout; no ancestor pane is measured for any descendant.
 Dirty panes share one animation-frame batch: each runs its own masonry before
@@ -1614,6 +1755,14 @@ inherit a value into one nor register an `@property` for it, and a reference the
 dictionary never declares falls back as in a theme without it. Dictionary media
 still uses the generation-owned `hd_media` path, not stylesheet URLs.
 
+Structured-content `style` objects are applied as Yomitan's
+`_setStructuredContentElementStyle` applies them: each schema key goes to CSSOM
+in Yomitan's order, shorthands before the longhands that refine them, numeric
+margin longhands become `em`, and CSSOM drops what it cannot parse. There are no
+unit, size or colour allowlists. The same resource and custom functions refused
+in stylesheets are refused inline, together with CSS escapes and `var()`, which
+would read custom properties the page sets on the popup host.
+
 The trusted glossary card sits outside the dictionary scope and establishes
 paint containment, so fixed descendants and oversized shadows cannot cover
 reader controls. Style installation replaces the previous generation's elements
@@ -1641,7 +1790,8 @@ keeps all fourteen task views available and groups those five Library choices.
 Global search matches settings across every section, includes the Library
 hierarchy in matching and result breadcrumbs, opens a result's enclosing
 disclosures and focuses its control without changing values or discarding drafts.
-The activation-key selector remains editable in either lookup mode.
+The Activation key or button picker stays editable in every lookup mode, and
+search finds it by "no key", "hover" or "mouse".
 All sections stay mounted, so navigation and browser history preserve reader
 and personal-dictionary drafts. Personal source loads on first entering its section.
 The rail becomes a compact section chooser in narrow windows. Settings applies
@@ -1659,12 +1809,8 @@ notices; there are no observers or additional polling loops.
 behind this section, unedited browser captures of each state and the targeted
 timings taken while it was reworked.
 
-The toolbar action opens a compact popup with a global lookup switch, recording
-shortcut and Settings. The switch uses the worker's existing revisioned option
-writes. The recording shortcut opens the existing capture controls, enabling
-captured-media mining if necessary; recording still requires Start capture and
-Chrome's source picker. The toolbar is a trusted capture-control sender and only
-polls capture status while open and captured-media mining is enabled.
+The toolbar action opens a compact popup with a global lookup switch and
+Settings. The switch uses the worker's revisioned option writes.
 
 Dictionary Details expansion is kept by stable package ID across focus-aware
 rerenders and search filtering. Direct enabled/order controls remain visible;
@@ -1788,13 +1934,13 @@ Fit/Actual transforms the outer stage, whose size follows the configured popup
 with room for the sample sentence; resizing does not rebuild the sample.
 
 `reader-options.js` owns AUTO plus the audited 42-palette grouped catalogue (18
-dark, 23 light, one high-contrast), strict option validation, and the 19 Design
+dark, 23 light, one high-contrast), strict option validation, and the 29 Design
 reset keys. Fresh installs use AUTO and follow the live browser colour scheme;
 sparse upgrade profiles and explicit Hachidori choices keep the Hachidori
 palette. Other defaults are 560 × 420 px, 85% background opacity,
-one column, Automatic toolbar placement, summary off with three snippets and automatic sources, frequency
-names/pitch contour/pitch badge/grammar/source highlighting on, and frequency
-averages off. Reset writes those keys through the existing sparse revision CAS;
+one column, Automatic toolbar placement, summary off with three snippets and automatic sources, pitch
+contour/pitch badges/pitch dictionary names/pitch text and position/source highlighting on, and frequency
+names/abbreviation/averages, the pitch graph and grammar tags off. Reset writes those keys through the existing sparse revision CAS;
 Reading preferences, dictionaries, groups, and update policy are untouched.
 The source-audited bounds are width 280–1,200 px, height 200–900 px, and opacity
 0–100%. Viewport clamping never changes the saved dimensions.
@@ -1987,7 +2133,7 @@ queued entries are rejected as never dispatched, active siblings are aborted as
 already dispatched, and the queue is removed so a later call can reconnect with
 a fresh generation. For note mutations this dispatch boundary is authoritative.
 A queued `addNote` or `updateNoteFields` rejection is a definitive no-write, so
-request-owned screenshot and capture media are released and the reader remains
+request-owned screenshot media is released and the reader remains
 retryable. Any active or otherwise dispatched mutation failure remains
 outcome-uncertain, retains its media for inspection or an explicit retry, and is
 never retried automatically.
@@ -2010,8 +2156,42 @@ did not save as submitted does, and enrichment still refuses to update a
 pronunciation field whose current value changed.
 
 Only requested glossary variants are exported through the shared structured
-renderer into inert HTML. Dictionary CSS remains scoped, and image filenames
-bind to committed generation paths. First-field audio is resolved before the
+renderer into inert HTML. As in Yomitan's default Anki field templates, each
+term-bank row becomes its own `li[data-dictionary]`, and every line break in
+dictionary text becomes a `<br>` because a note field has none of the popup's
+`.gloss-content { white-space: pre-line }`. For the same reason, as Yomitan's
+`AnkiTemplateRenderer` does with `structured-content-style.json`, the rich
+markers carry that file's class rules inline (`vendor/yomitan/structured-content-style.js`,
+unchanged from yomidevs/yomitan@67db60d): table borders, padding and header weight
+survive a note type that draws no grid, and the external-link icon is hidden.
+The rules come before an element's own dictionary style, so the dictionary's
+still wins. Yomitan then drops the classes; Hachidori keeps them, so dictionary
+CSS written against them applies on the card as in the popup. Dictionary CSS is
+filtered exactly as in the popup, then scoped by selector prefix,
+`.yomitan-glossary [data-dictionary=…] selector`, as Yomitan's
+`addScopeToCssLegacy` scopes it, because Anki still ships Chromium builds without
+`@scope`; a rule whose prefixed selector does not parse is dropped rather than
+left unscoped. Images keep Hachidori's sized `<img>` (#325), so the file's
+image-box rules have nothing to match. Image filenames
+bind to committed generation paths. While the experimental **Smaller Anki
+cards** flag (`options.experimental.smallerAnkiCards`) is on, the rich
+glossary markers are compacted instead, following the Compact HTML Cleanup
+Anki add-on. The flag is part of the checked Anki configuration, so toggling it
+between preflight and Add fails with the existing configuration-changed error.
+`anki-compact.js` mounts a source-less copy of the export in a hidden, closed
+shadow root of the offscreen document, where `getComputedStyle` resolves the
+scoped dictionary CSS exactly as the popup does, and builds new inert markup
+from it: generated `::before`/`::after` text becomes text, `display: none` and
+hidden content is left out, a positive inline margin becomes one space, a
+list marker is written only where it differs from HTML's default, style-only
+bold, italics, underline and strike-through become tags, newlines become `<br>`
+and block-level elements that directly hold content become `<div>`. Stylesheets,
+internal classes, `data-hoshidicts-*`, titles and link targets are dropped;
+`lang`, `rowspan`/`colspan`, `data-sc-content`, ruby, tables, image sizes and
+the outer Yomitan-compatible glossary structure are kept. Plain glossary
+markers and the relay's `ankiFields` API are unchanged.
+
+First-field audio is resolved before the
 duplicate check without playback or uploads. Inside the authoritative write
 queue, every dictionary image referenced by an applied field and any prepared
 first-field pronunciation is checked against Anki's live media inventory.
@@ -2022,15 +2202,8 @@ rejected write retains confirmed deterministic media because another note may
 share it; an explicit retry reuses it through the same live inventory check.
 Deferred non-first-field pronunciation remains post-write, but its media is
 confirmed before its field update. External edits are preserved. AnkiConnect
-has no cross-client CAS, so its final read/write interval is not atomic. Browser
-TTS can be attached while an active media-capture share supplies audio: the
-selected voice is spoken only after the mining action, read back from the
-transient PCM ring with short leading/trailing padding, encoded as WAV, and
-uploaded through the same pronunciation path.
-Silent preflight checks only recording availability and defers first-field
-duplicate identity until the authoritative submission. Missing, incomplete or
-effectively silent capture falls through to later URL sources; an explicit TTS
-choice reports the capture failure instead. Sentence-furigana markers use the
+has no cross-client CAS, so its final read/write interval is not atomic. Browser speech remains available for pronunciation playback; Anki mining uses
+configured downloadable audio sources. Sentence-furigana markers use the
 GSM fallback when its optional native tokenizer is unavailable.
 
 Single-glossary markers keep the historical current-title sanitizer for
@@ -2051,32 +2224,6 @@ storage.
 The double hyphen cannot be produced by title/display sanitization. Alias
 changes affect the readable marker, while the package-ID marker stays stable.
 Neither path edits a saved Anki field template.
-
-Capture markers are prepared through the same Anki queue rather than a second
-gateway. Before rendering either preflight or the authoritative submission,
-the existing Senren/Lapis/Kiku family recogniser selects the stock media fields
-and the worker clones every resolved template for that request. With a valid
-pin and media capture enabled, an enabled animation output replaces only
-`{screenshot}` inside Kiku/Lapis `Picture` or Senren `picture`, preserving the
-rest of the value and its overwrite mode. Enabled captured audio maps only a
-blank Kiku/Lapis `SentenceAudio` or Senren `sentenceAudio`; an explicit
-nonblank template is preserved. No pin or disabled capture leaves the static
-screenshot mapping intact. Custom model mappings, saved options and the cached
-resolved templates are never changed.
-
-This routing happens before duplicate and overwrite filtering. Preflight
-therefore reports only the outputs referenced by fields that will actually be
-applied, and a skipped, retained or unchanged field causes no encoding or
-upload. Submission waits for the capture job, refreshes
-configuration, generation, duplicate and overwrite decisions, uploads final
-assets one at a time, revalidates capture ownership immediately before the note
-mutation, then performs and verifies the existing write. Stop during the final
-upload or configuration read prevents a new add/update; a mutation already sent
-may still succeed. `{audio}` remains pronunciation audio;
-`{capture-animation}`/`{capture-audio}` are rejected in the first field. A
-confirmed note mutation releases its capture job even if field readback later
-warns. An uncertain note mutation retains the job for an explicit retry and is
-neither automatically retried nor followed by automatic media deletion.
 
 ### Page screenshot when mining
 
@@ -2154,152 +2301,8 @@ field to this marker, and a first installation has the switch on, so an
 unpinned recognised mining setup gets screenshots without further
 configuration. A note type without a picture field maps nothing and captures
 nothing, and `{screenshot}` is refused in the first Anki field for the same
-reason as the other captured media: a note's identity cannot be a fresh picture
+reason that a note's identity cannot be a fresh picture
 name.
-
-## Generic media capture
-
-Media capture is default-off and starts only through an explicit **Start
-capture** action in `capture.html`. It is also the first experimental feature:
-`options.experimental.mediaMining` reveals the Media capture section in
-Settings. Runtime code keeps gating on `mediaCapture.enabled`; when the
-Settings switch turns media mining off it also turns `mediaCapture.enabled`
-off in the same save, so no recorder stays active behind a hidden section,
-and the overlay only toggles the flag because it cannot edit the browser's
-recorder settings. A stored options record without `experimental` inherits
-`mediaMining` from `mediaCapture.enabled`, so a profile that enabled capture
-before the flag existed keeps its section. That page is a control surface;
-`capture-host.js` owns the stream in the shared `offscreen.html` document.
-Closing or reopening controls leaves recording running. The service worker
-creates the offscreen document with `DOM_SCRAPING`, `AUDIO_PLAYBACK`, and
-`DISPLAY_MEDIA` reasons, sharing it with the dictionary and pronunciation
-services. Capture has its own session and workers and does not enter the
-dictionary mutation queue.
-
-```text
-Settings / capture controls
-          |
-          v
-Service worker -- trusted sender validation and document routing
-          |
-          +--> linked content script: cue/DOM observations and root pins
-          |
-          +--> shared offscreen document: capture-host.js
-          |      MediaStream, WebSocket, rings, resolver, pins and export jobs
-          |          |
-          |          +--> dedicated JPEG frame worker
-          |          +--> dedicated AVIF export worker; local WAV encoder
-          |
-          +--> existing Anki queue and gateway: final assets and note mutation
-```
-
-The service worker accepts controls only from Settings or the capture-controls
-URL and observations only from the linked tab and document identity.
-`offscreen.js` lazily loads the recorder for relayed capture requests from the
-extension's background worker; other senders cannot dispatch Start there.
-Host registration is bound to the actual offscreen document returned by
-`chrome.runtime.getContexts()`. The configured texthooker URL is passed to the
-recorder and omitted from content-script options. Only loopback `ws://` or
-`wss://` endpoints are accepted.
-
-On service-worker restart, a control or reader request discovers the surviving
-offscreen host and validates its linked document through a content-script
-handshake. Recovery preserves the same session, observed timing, and pins;
-navigation or a missing collector cannot restore a stale binding. Losing the
-offscreen host, restarting the extension/browser, or changing capture settings
-requires an explicit new Start. No stored setting arms capture automatically.
-The picker allows one browser tab, application window, or monitor; actual audio
-availability comes from the tracks returned by the browser.
-
-The linked content script keeps DOM nodes and ranges locally. It observes one
-bounded ordinary text area plus an explicitly selected accessible video and
-sends only occurrence text, identities, normalized timestamps, and close
-events. Existing text is an unknown-onset baseline. Cue collection never
-enables a disabled track or changes subtitle language. Automatic area learning
-rejects editable roots, the document body, and Hachidori-owned UI; manual
-selection consumes pointer and keyboard input so it does not advance the
-reading surface.
-
-All providers enter one occurrence timeline. Per root lookup the resolver tries
-a usable matching live texthooker record, selected-video cue, watched page text,
-then recent history. NFC and whitespace normalization are allowed; word-only,
-ambiguous, wrong-session, wrong-document, cross-epoch, expired, or evicted
-matches fail closed. The admitted root pin freezes the source, options, and
-interval; nested lookups inherit it. A still-open matched line may receive only
-its bounded future tail. Submitting transfers ownership to one independent
-encoder job, while replacing or dismissing an unsubmitted root releases its
-pin. Stale or failed nested requests cannot release that borrowed root pin.
-Unlinking or navigating the reader drops its binding and unsubmitted pin while
-an already admitted export retains independent ownership. Closed texthooker
-occurrences remain eligible only in the current live feed epoch; a disconnect
-invalidates that epoch. DOM ranges associate a sentence lookup with its observed
-occurrence, with ambiguous ranges falling through to recent history.
-
-Video history contains timestamped JPEG bytes with the configured 30- or
-60-second age, 64 MiB live, 32 MiB extra pinned, and 256 KiB per-frame limits.
-`MediaStreamTrackProcessor` supplies raw video timestamps; the first frame maps
-that clock to `performance.timeOrigin + performance.now()`. Subsequent frames
-use that fixed origin and are sampled at up to 8 fps Standard or 6 fps Compact.
-The host transfers one cloned `VideoFrame` at a time to
-`capture-frame-worker.js`, which fits it into the initial canvas without
-upscaling, letterboxes changed aspect ratios, and JPEG-compresses it. Worker
-compression avoids the roughly one-second idle-encoding delay observed with a
-main-thread canvas in an offscreen document. The video-element compatibility
-sampler supplies an `ImageBitmap` to the same worker. Capture skips frame
-opportunities instead of building an unbounded queue.
-
-Audio is mixed to mono and retained as Float32 samples. Raw `AudioData` and
-`VideoFrame` timestamps shared a monotonic clock in the observed Chrome 150
-runtime, while Chrome 152 exposed page-relative audio timestamps with raw-clock
-video timestamps. At the first audio block, the recorder chooses between the
-video origin and `performance.timeOrigin` by proximity to the block's observed
-arrival time, then keeps that choice for the stream. This is a clock-domain
-comparison, not a browser-version branch or a mapping from preview playback
-`mediaTime`. Delivered sample counts determine subsequent block boundaries,
-tolerating timestamp rounding. Forward jumps remain explicit gaps; a backward
-clock or sample-rate change starts a new monotonic local epoch after a gap, so
-later audio remains usable. The AudioWorklet compatibility path establishes its
-origin only after `AudioContext.resume()` and maps `startFrame` to that origin.
-Interrupted input drops only its partial batch and resumes at the next absolute
-frame. Clips crossing either kind of gap fail continuous-audio validation while
-later clips can export normally. Retired stream/context callbacks cannot append
-to a new session.
-
-At a pin's selected end time, finalization waits up to 250 ms for outstanding
-JPEG and continuous audio delivery, finishing early if both cover the interval.
-The drain does not move the frozen interval. Frame selection keeps the last
-frame preceding the start and clips its presentation timestamp to that boundary.
-Stationary video may hold its last frame; audio still missing after the drain
-causes an export requiring it to fail. The AVIF encoder quantizes cumulative
-frame boundaries on a 48,000-tick timebase, with the final boundary rounded up
-to the same sample count as the 48 kHz WAV. Thus both serialized assets cover
-the same interval to sample precision without accumulating per-frame rounding
-drift. Content synchronization is independently checked by the flash/beep test.
-
-The AVIF worker incrementally decodes selected JPEGs into a looping sequence.
-A single retained frame is decoded once and encoded twice with split integer
-durations preserving the total sample count; otherwise libavif emits a still
-image without sequence timing. Fewer than two timebase ticks cannot represent
-that sequence and fail explicitly. WAV generation converts only selected PCM
-to 16-bit mono. One export job, a
-256 MiB encoder heap ceiling, 30-second watchdog, 4 MiB AVIF limit, 1 MiB WAV
-limit, and 6 MiB serialized asset-response limit bound export. Missing source
-audio permits a mapped animation with a warning, while an audio-only mapping
-fails explicitly. Microphone input and fabricated silence are never substituted;
-fully delivered source silence is valid.
-
-The offscreen recorder owns transient streams, rings, occurrence records,
-received texthooker text, pins, and export jobs. Its workers own frame canvases
-and encoding allocations. The linked content script owns local DOM nodes, ranges,
-observers, and collector epochs; the service worker owns validated routing
-identities. These are not persisted, logged as dialogue, sent to telemetry, or
-broadcast to unrelated tabs. Stop, relevant setting changes, source track
-`mute`/`ended`, or detected clock interruptions retire pending picker results,
-close tracks/sockets/workers, cancel drain/export work, clear history and pins,
-and unlink the collector. Dictionary state remains untouched. See
-[Media mining](media-capture.md) for setup and
-[the acceptance record](media-capture-review.md) for measured coverage and
-untested physical sleep/wake and additional-device sync behavior.
 
 ## Managed custom dictionary
 
@@ -2334,7 +2337,8 @@ state without merging a stale source revision. A lost reply is accepted only
 after an exact source/state-pair readback.
 
 The term, kanji and selected-word miss views share one fixed Note form, opened
-with the pencil and constructed only when opened. Its prefill comes from the
+with the pencil and constructed only when opened. The pencil is hidden while
+**Use the personal dictionary** is off. Its prefill comes from the
 currently projected primary result or the selected text, and a successful append refreshes only
 the exact still-current request descriptor and page anchor. Dictionary storage
 events adopt only newer revisions; editing defers popup invalidation until close
@@ -2373,9 +2377,7 @@ network listener is on, the addresses found from the routes to Tailscale's
 resolver and the default route, or the bind error), `client-open` (with the
 peer address), `client-close` and `client-text`; from the host it takes
 `send`, `broadcast`, `close` and `network`. Its rules: a handshake's `Origin`
-must start with `chrome-extension://` (or, from the relay release that follows
-[hachidori-anki#8](https://github.com/bee-san/hachidori-anki/pull/8),
-`moz-extension://`), `/host` is accepted from loopback peers
+must start with `chrome-extension://`, `/host` is accepted from loopback peers
 only, a client is refused (503) while no host is connected, and turning the
 network off closes the clients that came over it. There is no token. A linked
 browser speaks JSON text frames: `hello` (answered with the host's version,
@@ -2473,43 +2475,13 @@ offers to use it; that link then advances setup to `complete`. See
 
 Overlay clients keep Anki discovery, mining and the duplicate index local while
 linked; the host supplies dictionary data. For ordinary linked browsers,
-Anki mining is split at the browser boundary. The reading browser keeps
-`hd_anki_screenshot`/discard and its capture session local, while
-Settings discovery and existing-setup detection, `hd_anki_status`, preflight,
-submit, browse and maturity go to the host. Status, View, preflight, submit and
-browse carry the selected Template ID through the allowlist; screenshots use
-the same ID in the reading browser before their bytes cross the link. A
-browser-speech source is planned
-against the host's mirrored configuration but verified and recorded with the
-reading browser's selected voice and capture session. Just before submit, the
-reading browser's singleton Anki worker exports that final speech WAV, the
-pending screenshot and the ready capture job into an internal `clientMedia`
-envelope. The envelope carries the
-screenshot token/name/JPEG bytes; capture job ID, warnings and final AVIF/WAV
-assets; and the speech source identity, canonical filename, declared length and
-WAV bytes. Both ends validate the request-bound identities and names, base64,
-the 6 MiB JPEG, 4 MiB AVIF and 1 MiB WAV limits; the complete UTF-8 submit frame
-is limited to 16 MiB. The host passes the validated envelope to the same
-singleton Anki worker used by local pages, preserving its mutation queue,
-host-engine generation checks and host-only AnkiConnect configuration. URL
-pronunciation providers, dictionary media and AnkiConnect requests run from the
-host; `localhost` in those configured URLs therefore means the host machine.
-External media follows the ordinary upload/write/readback path, but the host
-does not consult or complete its own capture session. Status wraps the ordinary
-Anki configuration digest in a host-worker-specific key; preflight, submit and
-browse must return that exact wrapper before the host restores the internal digest.
-Consequently, a result from local Anki, another sharing host or an earlier host
-worker cannot pass through coincident generation numbers and identical Anki
-settings.
-
-A confirmed add/update makes the reading browser discard its screenshot and
-complete its capture job; a definitive duplicate, invalid or failed host reply
-discards/cancels them. A frame rejected before `WebSocket.send()` remains
-retryable. Once send succeeds, a closed connection or malformed reply is
-`uncertain`: neither side automatically retries it and client media stays
-available for the person to reconcile. Hosts without `linked-anki-v2` keep
-ordinary dictionary sharing but return Template-aware Anki operations and
-Template/custom-button settings writes unavailable before a request is sent.
+linked Anki mining keeps `hd_anki_screenshot`/discard local to the reading
+browser. Settings discovery, preflight, submit, browse and maturity go to the
+host. The reading browser transfers a request-owned JPEG through the validated
+`clientMedia` envelope when the user submits. The host uses its own AnkiConnect
+configuration and dictionary generation to validate and write the note. A
+confirmed or definitively refused write discards the pending screenshot; an
+uncertain write leaves it for inspection and an explicit retry.
 
 ## Storage ownership
 
@@ -2522,12 +2494,11 @@ Template/custom-button settings writes unavailable before a request is sent.
 | Newest `automaticBackupDays` automatic complete-state snapshots and lookup-statistics rows | service worker; the engine validates referenced immutable dictionary roots during restore and cleanup | `chrome.storage.local` key `automaticBackups`; dictionary blobs remain in shared OPFS or IDBFS generation roots |
 | Sharing configuration: whether this install shares, on which port and whether with other computers, or which host it is linked to | service worker | `chrome.storage.local` key `sharing` |
 | A linked install's own shared values, kept while the live keys mirror the host | service worker; the local engine reads and commits it through the worker | `chrome.storage.local` key `sharingLocalState` |
-| Hover enablement, activation mode/key, Japanese-only scanning, open/hide delays, child popup depth, scan/result limits, frequency ordering, dictionary selectors, ordered custom buttons, Anki Templates, and default-off media-capture configuration | service worker writes; extension pages read a projected subset | `chrome.storage.local` key `options` |
-| Media streams, compressed-frame/PCM history, occurrence timeline, pins, export jobs, and received texthooker text | offscreen capture host; dedicated workers own frame canvases and encoding allocations | transient memory only |
+| Hover enablement, activation mode/key, Japanese-only scanning, open/hide delays, cursor-exit hiding, child popup depth, scan/result limits, frequency ordering, dictionary selectors, ordered custom buttons, Anki Templates,  | service worker writes; extension pages read a projected subset | `chrome.storage.local` key `options` |
 | Capture tab/document routing identities | service worker; recovered by validating the surviving offscreen host and reader | transient memory only |
 | Watched DOM nodes/ranges, cue/DOM observers, and collector epochs | linked content script | transient memory only |
 
-The engine holds every loaded dictionary's generated files in WebAssembly linear memory (Emscripten emulates `mmap` by copying), and that memory never shrinks. On direct OPFS an import's high-water mark belongs to the terminated `import-worker.js` instance and is returned to the browser; the engine's heap grows only by the new generation's mapped files. On IDBFS the import runs inside the engine, so its high-water mark stays for the life of the engine worker. `hd_memory` reports the heap and each loaded package's mapped bytes; Settings → Advanced → Memory shows them, and its **Low memory mode** switch (`options.lowMemoryMode`) makes `offscreen.js` recycle the engine worker once idle after a dictionary change and start it with a two-thread pool that imports single-threaded (`engine-recycler.js`, `engine-worker-runtime.js`, `hd_engine_config`). [memory.md](memory.md) explains the model, the readout, the mode's costs and the two failure regimes.
+The engine holds each loaded dictionary's index and entry files (`blobs.bin`) in WebAssembly linear memory once, however many kinds it loads as (Emscripten emulates `mmap` by copying), and that memory never shrinks; media (`media.bin`) is read from the file when `hd_media` asks for it. On direct OPFS an import's high-water mark belongs to the terminated `import-worker.js` instance and is returned to the browser; the engine's heap grows only by the new generation's resident files. On IDBFS the import runs inside the engine, so its high-water mark stays for the life of the engine worker. `hd_memory` reports the heap and each loaded package's resident bytes; Settings → Advanced → Memory shows them, and its **Low memory mode** switch (`options.lowMemoryMode`) makes `offscreen.js` recycle the engine worker once idle after a dictionary change and start it with a two-thread pool that imports single-threaded and loads every package paged: only its index stays in the heap and `blobs.bin` is read through a bounded page cache (`engine-recycler.js`, `engine-worker-runtime.js`, `hd_engine_config`, `hdw_add_dict`'s `paged` argument). Any worker loads a package paged when it does not fit in the heap mapped. [memory.md](memory.md) explains the model, the readout, the mode's costs and the two failure regimes.
 
 The offscreen document deliberately has no direct `chrome.storage` access. It asks the service worker to read or compare-and-set dictionary metadata. Those writes are serialized so a settings-page edit cannot be silently overwritten by a stale engine write. Dictionary-state commits prune removed package IDs from global groups and invalid selectors in the same storage transaction, and every Settings option write is revalidated there so a stale page cannot restore them.
 
@@ -2596,8 +2567,8 @@ and in-flight dictionary commits when leaving Settings.
 | `hd_lookup` | Run a bounded scan/deinflection lookup |
 | `hd_anki_maturity` | Read whether the first term's expression has a mature card in the selected duplicate-index scope; independent of engine and mutation queues |
 | `hd_open_external` | Validate and open a user-activated HTTP(S) dictionary link in a browser tab, outside storage and engine queues |
-| `hd_status` | Report readiness, loading state, dictionary count, generation, storage backend, and threading mode; while the offscreen bridge runs an import, `updating: { id, phase, fallback }` names the replaced package and phase |
-| `hd_memory` | Report the engine heap size and each loaded package's resident bytes (its mapped files, once per native kind); see [memory.md](memory.md) |
+| `hd_status` | Report readiness, loading state, dictionary count, generation, storage backend, threading mode, and whether the worker is the low-memory one (`lowMemory`) that reads every package's entries from disk (`pagedDictionaries`); while the offscreen bridge runs an import, `updating: { id, phase, fallback }` names the replaced package and phase |
+| `hd_memory` | Report the engine heap size, the paged entries' cache (`pageCacheBytes`), and each loaded package's resident bytes (its index files and, unless it is `paged`, its entries, once however many native kinds it loads as); see [memory.md](memory.md) |
 | `hd_engine_config` | Read `options.lowMemoryMode` for the offscreen document (its sender only) before it creates the engine worker; the service worker pushes the same message to the document when the stored option changes |
 | `hd_reload` | Reload enabled dictionaries from persisted metadata |
 | `hd_remove` | Stage a package's files, commit its removal, then delete the staged copy |
@@ -2615,11 +2586,6 @@ and in-flight dictionary commits when leaving Settings.
 | `hd_updates_install` | Recheck and install the requested available managed packages |
 | `hd_sharing_status`, `hd_sharing_host_enable`, `hd_sharing_host_disable` | Report the sharing state (connection, dictionaries, the network listener and its addresses, linked browsers), or start and stop this install's connection to Anki's relay with a port and the network preference |
 | `hd_sharing_client_probe`, `hd_sharing_client_link`, `hd_sharing_client_unlink` | Ask what shares itself at an address (empty: this computer), link this install to it (turning its own hosting off, keeping its own state aside and mirroring the host's), or unlink and restore |
-| `hd_capture_open`, `hd_capture_tabs`, `hd_capture_link`, `hd_capture_unlink` | Open the explicit capture surface, enumerate candidate reading tabs, and bind or release one trusted page/document |
-| `hd_capture_video_select`, `hd_capture_track_area`, `hd_capture_clear_area` | Control the linked page's session-only cue and DOM collectors |
-| `hd_capture_text_begin`, `hd_capture_text_close`, `hd_capture_text_source_close` | Forward bounded occurrence lifecycle records from the linked content script to the registered capture session |
-| `hd_capture_pin`, `hd_capture_release` | Freeze or release one root-lookup interval through the shared source-priority resolver |
-| `hd_capture_export`, `hd_capture_job_status`, `hd_capture_asset`, `hd_capture_complete`, `hd_capture_cancel` | Transfer pin ownership to one bounded encoder job and commit its final assets through Anki |
 
 ## Build outputs
 
@@ -2636,13 +2602,9 @@ and in-flight dictionary commits when leaving Settings.
 The zero-dependency Node suite checks imports, custom parsing and deterministic
 ZIP compilation, deinflection, normalized kana lookup, media extraction,
 malformed input, fallback persistence, thread-bridge transfer behavior,
-extension packaging, generated runtime assets, capture settings and timing,
-bounded media rings, encoding, and Anki preparation/commit behavior. Chrome E2E tests exercise
+extension packaging, generated runtime assets, and Anki preparation/commit behavior. Chrome E2E tests exercise
 both the threaded direct-OPFS path and the forced compatibility path, including
 custom source compilation and restart durability, service-worker idling,
-bounded concurrency, and transactional replacement recovery. The separate
-real-capture suite drives display permission, captured tab audio, loopback
-WebSocket lifecycle, animated-AVIF decode/playback, non-silent WAV output,
-sustained retention, dictionary-latency comparison, and storage privacy.
+bounded concurrency, and transactional replacement recovery.
 
 The browser benchmark records import-to-first-valid-lookup, steady lookup, full-process restoration, process-tree resources, exact storage manifests, and input/runtime hashes. The cross-engine benchmark adds production-path adapters for Yomitan and JL under one rotating schedule; see [Benchmarks](../benchmark/README.md).

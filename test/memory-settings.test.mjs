@@ -23,19 +23,17 @@ const MEMORY = { ok: true, heapBytes: 3 * 1_073_741_824, dictionaries: [
 ] };
 
 // Settings as a user opens it on Advanced with two installed dictionaries.
-function fixture(t, { hash = "#advanced", stored = {}, firefox = false, threaded = true, memory = MEMORY } = {}) {
+function fixture(t, { hash = "#advanced", stored = {}, threaded = true, memory = MEMORY } = {}) {
   const dom = new JSDOM(extension("settings.html"), { runScripts: "outside-only", url: `https://settings.example/${hash}` });
   t.after(() => dom.window.close());
   const { window } = dom;
   const requests = [];
-  window.IS_FIREFOX = firefox;
-  window.HOST_BROWSER = firefox ? "firefox" : "chrome";
   window.OVERLAY_MODE = false;
   window.HOST_CAPABILITIES = {
-    browserShortcuts: true, linkButtons: true, externalLinkHost: false, customJavaScript: !firefox,
-    localFileAccessPrompt: true, mediaCapture: !firefox, lowMemoryMode: !firefox,
+    browserShortcuts: true, linkButtons: true, externalLinkHost: false, customJavaScript: true,
+    localFileAccessPrompt: true, lowMemoryMode: true,
   };
-  window.MINING_CAPABILITIES = { screenshot: true, browserSpeech: !firefox };
+  window.MINING_CAPABILITIES = { screenshot: true, browserSpeech: true };
   window.replies = {
     hd_memory: memory,
     hd_status: { ok: true, ready: true, loading: false, dictionaryCount: 2, failedDictionaries: [], generation: 1,
@@ -57,6 +55,8 @@ function fixture(t, { hash = "#advanced", stored = {}, firefox = false, threaded
     ["settings-dom.js", ["applyPageTheme", "setStatusOutput"]],
     ["settings-search.js", ["createSettingsSearch"]],
     ["experimental-settings.js", ["createExperimentalSettings"]],
+    ["theme-store.js", ["createThemeStore"]],
+    ["activation-settings.js", ["createActivationSettings"]],
     ["dictionary-progress.js", ["formatBytes"]],
     ["memory-settings.js", ["createMemorySettings"]],
     ["dictionary-name-drafts.js", ["createDictionaryNameDrafts"]],
@@ -98,6 +98,17 @@ test("Advanced shows the engine total and each Library row shows its share", asy
   assert.equal(rowMemory(DICTIONARIES[0].id), "In memory: \u2248 512.0 MB");
   assert.equal(rowMemory(DICTIONARIES[1].id), "In memory: \u2248 1.40 GB");
   assert.equal(requests.filter(message => message.type === "hd_memory").length, 1, "one read for the Advanced visit, not a poll");
+});
+
+test("a row whose entries are read from disk says so", async t => {
+  const paged = { ...MEMORY, pageCacheBytes: 4 * 1_048_576, dictionaries: [
+    { ...MEMORY.dictionaries[0], bytes: 13 * 1_048_576, paged: true },
+    { ...MEMORY.dictionaries[1], paged: false },
+  ] };
+  const { rowMemory } = fixture(t, { memory: paged });
+  await settle();
+  assert.equal(rowMemory(DICTIONARIES[0].id), "In memory: \u2248 13.0 MB (entries read from disk)");
+  assert.equal(rowMemory(DICTIONARIES[1].id), "In memory: \u2248 1.40 GB");
 });
 
 test("the Library asks only when a reader opens a row's Details", async t => {
@@ -171,14 +182,7 @@ test("the low memory switch saves through the ordinary options queue and reflect
   assert.equal(stored.el("opt-low-memory-mode").checked, true);
 });
 
-test("the switch is unavailable on Firefox and with the single-thread engine, while the readout stays", async t => {
-  const firefox = fixture(t, { firefox: true });
-  await settle();
-  assert.equal(firefox.el("low-memory-mode").hidden, true);
-  assert.equal(firefox.el("opt-low-memory-mode-help").hidden, true);
-  assert.equal(firefox.el("low-memory-mode-unavailable").hidden, false);
-  assert.equal(firefox.el("memory-total").textContent, "Engine memory: 3.00 GB across 2 dictionaries");
-
+test("the switch is unavailable with the single-thread engine while the readout stays", async t => {
   const local = fixture(t, { threaded: false });
   await local.window.pollStatus();
   await settle();

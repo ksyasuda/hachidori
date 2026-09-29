@@ -1,20 +1,18 @@
 {
   "repository": "https://github.com/bee-san/hachidori",
-  "revision": "1a12326aaa1b3f4a791e1934f02539956fe8292d",
+  "revision": "6faca95c151eb05ba843ac626cba5d14535f4c04",
   "hoshidicts": {
     "repository": "https://github.com/bee-san/hoshidicts",
-    "revision": "3066e606a75e2d79c2d2c1bc89d6c5bd2587f284"
+    "revision": "94080cc25fdebad0d17e0cf295fff234e2839df1"
   },
   "license": "GPL-3.0-or-later",
   "artifacts": {
-    "extension/vendor/avif-encoder.mjs": "442a13571f3e8ee8117bc886e06ab52b4c5ebde7cb1659071fb498bfc0bea434",
-    "extension/vendor/avif-encoder.wasm": "384b6299418d989cde5fd7660caf167aa8d4cfcedca53b2e73ddd086fc047797",
-    "extension/vendor/hoshidicts-threaded-idbfs.mjs": "e3a3e527a77cbeaafaab49d1da9cb855e0f6a91811fdaa9d2e4216022c002f63",
-    "extension/vendor/hoshidicts-threaded-idbfs.wasm": "5c84b4b066059d03a309fc329edf76ceb587189a7d1483b93c0194d6158810d4",
-    "extension/vendor/hoshidicts-threaded.mjs": "dba8c6c229ff221bcca4c5501d62b1a184c44d5c43a5556fb615d16aa608d5b4",
-    "extension/vendor/hoshidicts-threaded.wasm": "0a7c7caeb1e5288f762208abf340ac9aa8c8768f7643a4b77d495244296da3cf",
-    "extension/vendor/hoshidicts.mjs": "0e6c572fb5fbcd1964ee69d09eb5e41af4befe0f7cdedd5c0273a39b315b0697",
-    "extension/vendor/hoshidicts.wasm": "016756ede5b57284a34a7bd47ecfbbe1c90ea726310d96b770547de6265a6211"
+    "extension/vendor/hoshidicts-threaded-idbfs.mjs": "8a1d44222e72348130242deb89558c29b470b85f16253c2bc06bd3d6a7659029",
+    "extension/vendor/hoshidicts-threaded-idbfs.wasm": "da2646351c14892c3b953635f1f82f2c0d8f930d76aacec1d6c14ccb475924bc",
+    "extension/vendor/hoshidicts-threaded.mjs": "6f4d5231b7357fa9ee55347b6d8f60e4aa2dbfe5bb5af7b7cf0450cbb1bcfac3",
+    "extension/vendor/hoshidicts-threaded.wasm": "72694a2aaa7bea9f00fb9d813b919714dc9b78f602e0b6e9c1839099eab9f8ba",
+    "extension/vendor/hoshidicts.mjs": "eccea902ea71a656875a298d47539870f7276612a9c04117f5665f4d9046aa10",
+    "extension/vendor/hoshidicts.wasm": "106d0199f8010a087525654f2270fb3a4ee647949f0c99d4ba93dcd6215a225d"
   },
   "localChanges": [
     "Expose popup host attributes, successful lookups, mouse events and host commands to SubMiner; visibility uses native Hachidori events.",

@@ -11,7 +11,6 @@
 
 import { extensionApi as chrome, expectedBackgroundUrl } from "./browser-api.js";
 import { ENGINE_WORKER_NAME, LOW_MEMORY_WORKER_NAME, createEngineRecycler } from "./engine-recycler.js";
-import { announceFirefoxOffscreen } from "./firefox-host.js";
 import { boundResponseFailure } from "./response-limits.js";
 
 const TARGET = "hoshidicts-offscreen";
@@ -20,20 +19,6 @@ const AUDIO_TARGET = "hachidori-audio";
 const ANKI_TARGET = "hachidori-anki-render";
 const SETUP_TARGET = "hachidori-setup";
 let audioService, ankiService, audioRepository, setupInstaller;
-let captureService;
-
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message?.target !== "hachidori-capture-page" || message.relayed !== true
-      || sender.id !== chrome.runtime.id || sender.url !== expectedBackgroundUrl(chrome)
-      || sender.tab !== undefined) return false;
-  captureService ??= import("./capture-host.js");
-  captureService.then(module => module.handleCaptureMessage(message)).then(
-    result => sendResponse({ type: `${message.type}_result`, requestId: message.requestId, ok: true, ...result }),
-    error => sendResponse(failedResponse(message, describe(error))),
-  );
-  return true;
-});
-
 function getAudioRepository() {
   audioRepository ??= import("./audio-repository.js").then(module => module.createAudioRepository({
     window: globalThis, fetch: globalThis.fetch.bind(globalThis), now: () => performance.now(),
@@ -508,9 +493,3 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   );
   return true;
 });
-
-try {
-  await announceFirefoxOffscreen();
-} catch (error) {
-  failEngine(error);
-}

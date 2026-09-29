@@ -23,7 +23,6 @@
   const WORKER_TARGET = "hoshidicts-worker";
   const READER_TARGET = "hachidori-reader";
   const HIGHLIGHT_NAME = "gsm-hoshidicts-match";
-  const READER_STYLESHEET = "render/reader.css";
   const HOST_TAG = "hachidori-host";
   const POPUP_SHOWN_EVENT = "hachidori-popup-shown";
   const POPUP_HIDDEN_EVENT = "hachidori-popup-hidden";
@@ -36,6 +35,7 @@
   })();
 
   const {
+    ACTIVATION_BUTTONS,
     DEFAULT_OPTIONS,
     KEYBIND_MODIFIERS,
     KEYBIND_MODIFIER_CODES,
@@ -55,6 +55,10 @@
     ["Alt", "altKey"],
     ["Meta", "metaKey"],
   ]);
+  // MouseEvent.button values of Back and Forward, which navigate on release.
+  const NAVIGATION_BUTTONS = new Set([3, 4]);
+  // Popup text that looks up child popups.
+  const DEFINITION_TEXT_SELECTOR = ".gsm-hoshidicts-glossary-content, .gsm-hoshidicts-compact-definition-summary";
 
   const POPUP_GAP_PX = 4;
   const POPUP_PADDING_PX = 6;
@@ -145,6 +149,14 @@
   const rootLevel = createLevelState(0);
   const levels = [rootLevel];
   let nextLevelId = 0;
+  const themeHost = window.HDThemeHost.createThemeHost({
+    getOptions: () => options,
+    onReady() {
+      styleGeneration = -1;
+      appearance?.refreshHighlight();
+      if (shadow) ensureDictionaryStyles(currentGeneration);
+    },
+  });
 
   function createLevelState(depth) {
     return {
@@ -157,8 +169,6 @@
       retainedView: false,
       pendingViewReplay: null,
       blurTimer: null,
-      capturePin: null,
-      capturePinPromise: null,
     };
   }
 
@@ -188,17 +198,20 @@
   let hideTimer = null;
   let transferTimer = null;
   let descendantTimer = null;
+  let cursorExitTimer = null;
   let pointerLevel = null;
   let pointerInPopup = false;
   let activationPressed = false;
   let activationCode = null;
+  // The scan button's last press and the native actions it cancels.
+  let scanPress = null;
   let pendingCandidateLookup = null;
   let selectionDragActive = false;
   let activeSelectionCandidate = null;
   // A drag the reader selects itself, glyph by glyph, in an overlay host.
   let dragSelection = null;
   let overlayMode = false;
-  let hostCapabilities = { linkButtons: true, externalLinkHost: false, mediaCapture: true };
+  let hostCapabilities = { linkButtons: true, externalLinkHost: false };
   let hostAttentionPublished = false;
   let hostAttentionHold = 0;
 
@@ -225,10 +238,13 @@
   // is selecting text: the host answers a mousedown by turning click-through on,
   // which would lose the drag before release could look anything up. The claim
   // carries over to the selection's pending lookup, so the host never sees a
-  // gap between the drag and the popup it produces.
+  // gap between the drag and the popup it produces. A held scan button claims
+  // the window the same way, or the host would stop reporting it mid-hold.
+  // Child popups that wait for it are in a popup, which holds the claim already.
   function syncHostAttention() {
     const wanted = Boolean(rootLevel.popup && !rootLevel.popup.hidden) || selectionDragActive
-      || hostAttentionHold > 0 || pendingCandidateLookup?.candidate?.exactSelection === true;
+      || hostAttentionHold > 0 || pendingCandidateLookup?.candidate?.exactSelection === true
+      || (activationPressed && options.lookupMode !== "hover" && activationButton() !== null);
     if (wanted === hostAttentionPublished) return;
     hostAttentionPublished = wanted;
     globalThis.SubMinerHachidori?.markHost(host, wanted);
@@ -255,8 +271,7 @@
       }
       const next = applyHostCapabilities(options);
       const customButtonsChanged = JSON.stringify(next.customButtons) !== JSON.stringify(options.customButtons);
-      const miningChanged = customButtonsChanged
-        || JSON.stringify(next.mediaCapture) !== JSON.stringify(options.mediaCapture);
+      const miningChanged = customButtonsChanged;
       options = next;
       if (customButtonsChanged) {
         for (const level of levels) level.view?.setCustomButtons(options.customButtons);
@@ -268,9 +283,6 @@
   }
 
   function applyHostCapabilities(projected) {
-    if (!hostCapabilities.mediaCapture) {
-      projected = { ...projected, mediaCapture: { ...projected.mediaCapture, enabled: false } };
-    }
     if (!hostCapabilities.linkButtons) projected = {
       ...projected,
       customLinks: [],
@@ -1088,9 +1100,7 @@
     if (startOffset < 0) {
       return null;
     }
-    const lookupText = startNode.parentElement?.closest(
-      ".gsm-hoshidicts-glossary-content, .gsm-hoshidicts-compact-definition-summary"
-    );
+    const lookupText = startNode.parentElement?.closest(DEFINITION_TEXT_SELECTOR);
     if (
       !lookupText ||
       !level.popup.contains(lookupText) ||
@@ -1323,50 +1333,32 @@
     return matched;
   }
 
-  function releaseCapture(value) {
-    if (!value) return;
-    void Promise.resolve(value).then(pin => window.HDCapture?.release(pin)).catch(() => {});
-  }
-
-  function releaseProvisionalCapture(value, level) {
-    // Child requests borrow the root pin. A root replay also borrows the pin
-    // already adopted by the visible popup, even if that replay becomes stale.
-    if (level !== rootLevel) return;
-    void Promise.resolve(value).then(pin => {
-      if (pin !== rootLevel.capturePin) releaseCapture(pin);
-    }).catch(() => {});
-  }
-
-  function releaseRootCapture() {
-    const capture = rootLevel.capturePinPromise ?? rootLevel.capturePin;
-    rootLevel.capturePin = null;
-    rootLevel.capturePinPromise = null;
-    releaseCapture(capture);
-  }
-
   function teardown(reason) {
     if (disposed) {
       return;
     }
-    releaseRootCapture();
     audio?.dispose();
     mining?.retire();
     disposed = true;
     disconnectSubminer?.();
     selectionDragActive = false;
     dragSelection = null;
+    activationPressed = false;
     cancelPopupLayout();
     clearDictionaryResources();
     window.clearTimeout(scanTimer);
     window.clearTimeout(hideTimer);
     clearTransferTimer();
     clearDescendantTimer();
+    clearCursorExitTimer();
     scanTimer = null;
     hideTimer = null;
     document.removeEventListener("mousemove", onMouseMove, true);
     document.removeEventListener("mousedown", onMouseDown, true);
     document.removeEventListener("mouseup", onMouseUp, true);
+    document.removeEventListener("auxclick", onAuxClick, true);
     document.removeEventListener("selectionchange", onSelectionChange);
+    document.removeEventListener("fullscreenchange", onFullscreenChange);
     document.removeEventListener("focusin", onPageFocusIn, true);
     document.removeEventListener("keydown", onKeyDown, true);
     document.removeEventListener("keyup", onKeyUp, true);
@@ -1408,7 +1400,6 @@
   }
 
   function discardUi() {
-    releaseRootCapture();
     audio?.retire();
     mining?.retire();
     cancelPopupLayout();
@@ -1652,14 +1643,14 @@
   }
 
   function ensureDictionaryStyles(generation) {
-    if (!shadow || generation === styleGeneration) {
+    if (!shadow || !themeHost.dictionaryStyles || generation === styleGeneration) {
       return;
     }
     styleGeneration = generation;
     const request = {};
     styleRequest = request;
     sendRequest("hd_styles", {}).then((reply) => {
-      if (disposed || !shadow || styleRequest !== request) {
+      if (disposed || !shadow || !themeHost.dictionaryStyles || styleRequest !== request) {
         return;
       }
       if (reply.generation !== generation) throw new Error("obsolete dictionary styles");
@@ -1930,9 +1921,10 @@
       return;
     }
     // Like Yomitan, a child opens beside the text that opened it: below that
-    // word when it fits, otherwise above, aligned with its left edge and
-    // clamped to the viewport. Only each pane's own source is measured, so no
-    // ancestor box is read for any descendant.
+    // word when it fits, otherwise above, aligned with its left edge, and
+    // shortened on the roomier side rather than covering the word when it fits
+    // on neither. Only each pane's own source is measured, so no ancestor box
+    // is read for any descendant.
     for (const level of levels.slice(Math.max(1, fromLevel.depth))) {
       if (level.popup.hidden) break;
       if (!anchorConnected(level.activeCandidate)) {
@@ -2063,26 +2055,26 @@
     }
   }
 
-  async function readerStyleSheet() {
-    const response = await fetch(chrome.runtime.getURL(READER_STYLESHEET));
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
-    }
-    const iconResponse = await fetch(chrome.runtime.getURL("icons.css"));
-    if (!iconResponse.ok) throw new Error(`HTTP ${iconResponse.status}`);
-    const text = `${await response.text()}\n${await iconResponse.text()}`;
-    try {
-      const sheet = new CSSStyleSheet();
-      sheet.replaceSync(text);
-      return { sheet, text };
-    } catch {
-      // A constructed sheet is preferred (one parse shared by every frame), but
-      // a plain <style> in the shadow root renders the same rules.
-      return { sheet: null, text };
-    }
+  function hostParent() {
+    const fullscreen = document.fullscreenElement;
+    if (!fullscreen || fullscreen === document.documentElement || fullscreen === document.body
+        || fullscreen.shadowRoot
+        || ["iframe", "frame", "video", "canvas", "img", "object", "embed", "svg"]
+          .includes(fullscreen.localName)) return document.body;
+    return fullscreen;
   }
 
-  function buildUi(styles) {
+  function mountHost() {
+    const parent = hostParent();
+    if (host && parent && host.parentNode !== parent) parent.appendChild(host);
+  }
+
+  function onFullscreenChange() {
+    mountHost();
+    positionPopup();
+  }
+
+  function buildUi() {
     host = document.createElement(HOST_TAG);
     globalThis.SubMinerHachidori?.markHost(host, hostAttentionPublished);
     // Inline !important is the only declaration a page cannot override, and the
@@ -2101,19 +2093,13 @@
     ].join("; ");
     applyPageZoom();
     shadow = host.attachShadow({ mode: "open" });
-    if (styles.sheet) {
-      shadow.adoptedStyleSheets = [styles.sheet];
-    } else {
-      const fallback = document.createElement("style");
-      fallback.textContent = styles.text;
-      shadow.appendChild(fallback);
-    }
 
-    document.body.appendChild(host);
+    mountHost();
     appearance = window.HDPopup.createPopupAppearance(host);
     appearance.update(options);
     customStyle = window.HDPopup.createCustomPopupStyle(shadow);
     customStyle.update(options.customPopupCss);
+    themeHost.attach(shadow);
 
     highlighter = window.HDPopup.createSourceHighlighter(
       window,
@@ -2127,7 +2113,6 @@
   function buildLevelUi(level) {
     mining ??= window.HDAnki.createAnkiController({
       send: (type, fields) => sendRequest(type, fields, "hachidori-anki"),
-      capture: (type, fields) => sendRequest(type, fields, "hachidori-capture"),
       onChange: owner => positionPopup(owner),
       conceal: concealReader,
     });
@@ -2157,19 +2142,37 @@
     }, { capture: true, passive: true });
     popup.addEventListener("wheel", onPopupWheel, { passive: false });
     popup.addEventListener("mouseenter", () => onPopupEnter(level));
+    popup.addEventListener("mouseleave", (event) => onPopupLeave(event, level));
     // Yomitan dismisses a nested popup when its parent is pressed. A primary
     // press here retires this pane's descendants at once, focused or not, and
     // drops a pending definition scan so an older lookup cannot reopen one.
     // A draft or pending append protects them as on every other hide path. A
     // press on an internal link keeps that link's own child for its click to
     // reuse or replace, retiring only the branch below it.
+    let press = null;
     popup.addEventListener("mousedown", (event) => {
+      press = event.button === 0 ? { x: event.clientX, y: event.clientY } : null;
       if (event.button !== 0 || level.retired) return;
       const link = popupLinkAt(event.target, level)?.hasAttribute("data-hoshidicts-query") === true;
       const depth = level.depth + (link ? 2 : 1);
       if (levels.length <= depth || hasProtectedNote(depth)) return;
       clearScanTimer();
       dismissLevels(depth, false);
+    });
+    // Reading → Activation → Child popups → Click: a primary click on a word in
+    // the definitions opens its child once the press above has retired the
+    // previous one. A press that travels or leaves a selection is a copy, and
+    // links, images, buttons and disclosures keep their own click.
+    popup.addEventListener("click", (event) => {
+      const start = press;
+      press = null;
+      if (options.definitionLookupMode !== "click" || !start || event.defaultPrevented || hasProtectedNote()
+          || Math.hypot(event.clientX - start.x, event.clientY - start.y) >= GLYPH_DRAG_START_PX
+          || event.target.closest("a, button, summary")) return;
+      const selection = shadow.getSelection?.() ?? window.getSelection();
+      if (selection && !selection.isCollapsed && popup.contains(selection.anchorNode)) return;
+      const candidate = resolveDefinitionCandidate(event.clientX, event.clientY, level);
+      if (candidate) void openChildLookup(candidate, level, { source: "click" });
     });
     popup.addEventListener(
       "mousemove",
@@ -2186,9 +2189,10 @@
     shadow.appendChild(popup);
     level.popup = popup;
     level.highlighter = highlighter.scope(level);
-    level.view = window.HDPopup.createPopupView({
+    level.view = themeHost.createView({
+      onRendererRetired() { audio.retire(level); mining.retire(level); level.noteEditing = false; },
       appendExpressionRuby: window.HDGlossary.appendExpressionRuby,
-      buildPitchAccentMorae: window.HDGlossary.buildPitchAccentMorae,
+      createPronunciationPitchAccent: window.HDGlossary.createPronunciationPitchAccent,
       appendTextOnlyGlossary: window.HDGlossary.appendTextOnlyGlossary,
       appendStructuredImage: window.HDGlossary.appendStructuredImage,
       document,
@@ -2268,7 +2272,6 @@
         searchQuery: request?.payload?.text ?? request?.kanjiPayload?.character ?? candidate.query,
         popupSelectionText: selection?.anchorNode && level.popup.contains(selection.anchorNode) ? selection.toString() : "",
         documentTitle: document.title, audioSelection: audio.selectionFor(result) ?? undefined,
-        capturePin: rootLevel.capturePin ?? undefined,
         dictionaryAliases: Object.fromEntries(dictionaries.filter(item => item.displayName).map(item => [item.title, item.displayName])),
         dictionaryIds: Object.fromEntries(dictionaries.map(item => [item.title, item.id])),
         frequencyDictionaries: dictionaries.filter(item => item.enabled && item.frequencyCount > 0).map(item => item.title),
@@ -2531,16 +2534,11 @@
         if (!document.body || !window.HDPopup || !window.HDGlossary) {
           throw new Error("render modules or document body unavailable");
         }
-        let styles;
-        try {
-          styles = await readerStyleSheet();
-        } catch (error) {
-          throw new Error(`could not load ${READER_STYLESHEET}: ${error.message}`);
-        }
+        await themeHost.sync();
         if (disposed) {
           throw new Error("torn down");
         }
-        buildUi(styles);
+        buildUi();
       })().catch((error) => {
         console.warn("hachidori: popup unavailable", error);
         // The next hover retries, so a half-built host must not stay in the page
@@ -2556,10 +2554,8 @@
   function show(candidate, level = rootLevel) {
     level.activeCandidate = candidate;
     level.activeSignature = candidateSignature(candidate);
-    if (!host.isConnected && document.body) {
-      // A single-page app that swapped out document.body took the host with it.
-      document.body.appendChild(host);
-    }
+    // The body may have been replaced, or the player may have entered fullscreen.
+    mountHost();
     level.popup.hidden = false;
     level.popup.inert = false;
     level.view.scrollElement.scrollTop = 0;
@@ -2617,9 +2613,9 @@
     pendingCandidateLookup = null;
     clearHideTimer();
     clearTransferTimer();
+    clearCursorExitTimer();
     pointerLevel = null;
     pruneLevels(1, false);
-    releaseRootCapture();
     rootLevel.activeCandidate = null;
     rootLevel.activeSignature = null;
     rootLevel.activeHighlightText = "";
@@ -2659,7 +2655,11 @@
           || pointInsidePopup(lastPointer.clientX, lastPointer.clientY))) {
         pointerInPopup = true;
         clearHideTimer();
-      } else if (lastPointer) scanPointer(lastPointer);
+        return;
+      }
+      // Leaving the chain from a corridor between panes fires no mouseleave.
+      scheduleCursorExitHide();
+      if (lastPointer) scanPointer(lastPointer);
       else scheduleHide();
     }, 80);
   }
@@ -2675,13 +2675,62 @@
     pointerInPopup = true;
     clearTransferTimer();
     clearHideTimer();
+    clearCursorExitTimer();
     scheduleDescendantPrune(level);
   }
 
+  function clearCursorExitTimer() {
+    if (cursorExitTimer !== null) window.clearTimeout(cursorExitTimer);
+    cursorExitTimer = null;
+  }
+
+  // Yomitan's frontend.js _onPopupFramePointerOut: with "Hide popup on cursor
+  // exit" on, leaving the chain for the page, an iframe or outside the window
+  // hides it, in every lookup mode. Only the pane the pointer was last seen in
+  // can be left, so a popup it never entered stays. Pane to pane is no exit:
+  // a child overlaps its parent, and onPopupEnter owns that transfer.
+  function onPopupLeave(event, level) {
+    if (!options.hidePopupOnCursorExit || level !== pointerLevel || popupResize) return;
+    const next = event.relatedTarget;
+    if (next && levels.some((other) => other.popup?.contains(next))) return;
+    scheduleCursorExitHide();
+  }
+
+  // Like Yomitan, a running timer is not restarted, and even 0 ms waits for
+  // the mousemove that follows the boundary events. Exact-selection lookups
+  // stay, as retainSelectedLookup() keeps them on every pointer path.
+  function scheduleCursorExitHide() {
+    if (!options.hidePopupOnCursorExit || cursorExitTimer !== null || activeSelectionCandidate
+        || !rootLevel.popup || rootLevel.popup.hidden) return;
+    cursorExitTimer = window.setTimeout(() => {
+      cursorExitTimer = null;
+      // A page move may have stopped in a corridor between panes; leaving it
+      // for the page reaches here again through the transfer check. A last
+      // position seen in a pane means the pointer went on into an iframe.
+      if (levels.length > 1 && lastPointer && !lastPointer.level
+          && pointInsidePopup(lastPointer.clientX, lastPointer.clientY)) {
+        pointerInPopup = true;
+        return;
+      }
+      pointerInPopup = false;
+      pointerLevel = null;
+      if (!hasProtectedNote() && !audio?.hasMenu() && !keyboardFocusInPopup()) hide();
+    }, options.hidePopupOnCursorExitDelayMs);
+  }
+
+  // Every caller is pointer movement in an ancestor. Like the root's
+  // schedulePointerHide(), activationSticky keeps a rendered child through it,
+  // as Yomitan does unless "Hide popup on cursor exit" is on. An ancestor
+  // press, Escape, Close/Back and a replacement still dismiss the child, and
+  // cancelPendingHover() still drops one that has not rendered. With the
+  // option on, every mode prunes after its delay, as Yomitan's popup.js
+  // _onFrameMouseOver does.
   function scheduleDescendantPrune(level) {
     clearDescendantTimer();
     const depth = level.depth + 1;
-    if (depth >= levels.length) return;
+    const cursorExit = options.hidePopupOnCursorExit;
+    if (depth >= levels.length || (!cursorExit && options.lookupMode === "activationSticky")) return;
+    const delay = cursorExit ? options.hidePopupOnCursorExitDelayMs : options.popupHideDelayMs;
     const prune = () => {
       descendantTimer = null;
       if (!hasProtectedNote(depth) && (!pointerLevel || pointerLevel.depth < depth)
@@ -2689,12 +2738,18 @@
         dismissLevels(depth);
       }
     };
-    if (options.popupHideDelayMs === 0) prune();
-    else descendantTimer = window.setTimeout(prune, options.popupHideDelayMs);
+    if (delay === 0) prune();
+    else descendantTimer = window.setTimeout(prune, delay);
   }
 
   function popupHasFocus() {
     return levels.some((level) => level.popup && !level.popup.hidden && level.popup.contains(shadow?.activeElement));
+  }
+
+  // Keyboard focus keeps a popup the pointer left, but not the focus Chrome
+  // leaves on a clicked button: Yomitan hides regardless of focus.
+  function keyboardFocusInPopup() {
+    return popupHasFocus() && shadow.activeElement.matches(":focus-visible");
   }
 
   function hasProtectedNote(fromDepth = 0) {
@@ -2931,7 +2986,8 @@
 
   function handleTermMiss(request, dictionaryCount, token, level, replayOptions) {
     if (retainProtectedReplay(request, token, level, replayOptions)) return false;
-    if (dictionaryCount === 0 || (request.exactSelection && options.showNoResultNotice)) {
+    const pencil = options.personalDictionaryEnabled;
+    if (dictionaryCount === 0 || (request.exactSelection && pencil && options.showNoResultNotice)) {
       show(request.candidate, level);
       level.activeHighlightText = "";
       level.activeTermRender = null;
@@ -2941,7 +2997,8 @@
       level.currentViewRequest = request;
       level.view.renderNotice(
         dictionaryCount === 0
-          ? "No dictionaries loaded. Import a Yomitan .zip in Settings, or add your own definition with the pencil."
+          ? `No dictionaries loaded. Import a Yomitan .zip in Settings${pencil
+            ? ", or add your own definition with the pencil" : ""}.`
           : "No definition found. Add your own with the pencil.",
         request.candidate,
         { isCurrentRequest: () => !disposed && !level.retired && token === level.lookupToken },
@@ -2952,7 +3009,9 @@
     hide(level);
     // A hidden miss keeps the selection like a rendered notice does, so pointer
     // movement cannot repeat its lookup until the selection changes or Escape.
-    if (request.exactSelection) activeSelectionCandidate = request.candidate;
+    // Without the personal dictionary the pointer ignores selections, so a
+    // retained miss would only block hover lookups over the highlighted text.
+    if (request.exactSelection && pencil) activeSelectionCandidate = request.candidate;
     return false;
   }
 
@@ -2972,28 +3031,22 @@
       level.noteEditing = false;
     }
     level.view?.hideImagePreview();
-    let reply, capturePin;
-    const capturePinPromise = request.capturePinPromise ?? Promise.resolve(rootLevel.capturePin);
+    let reply;
     try {
       // The first hover pays for the popup host and the stylesheet fetch; run
       // them alongside the lookup instead of ahead of it.
-      [, reply, capturePin] = await Promise.all([
+      [, reply] = await Promise.all([
         ensureUi(),
         sendRequest("hd_lookup", request.payload),
-        capturePinPromise,
       ]);
     } catch (error) {
-      releaseProvisionalCapture(capturePinPromise, level);
       return handleRequestFailure(request, token, error, level, replayOptions);
     }
-    request.capturePin = capturePin;
     // Hover fires far faster than lookups return; anything but the newest reply
     // would repaint a word the pointer already left.
     if (!requestCanRender(token, request.candidate, level)) {
-      releaseProvisionalCapture(capturePin, level);
       return;
     }
-    if (level === rootLevel) rootLevel.capturePin = capturePin;
     noteGeneration(reply.generation, level);
     let results = (Array.isArray(reply.results) ? reply.results : [])
       .filter((result) => result && result.term
@@ -3036,6 +3089,7 @@
         options: {
           frequencyDictionary: options.frequencyDictionary,
           frequencyOrder: options.frequencyOrder,
+          personalDictionary: options.personalDictionaryEnabled,
           primaryReading: typeof overrides.primaryReading === "string"
             ? overrides.primaryReading
             : "",
@@ -3046,7 +3100,6 @@
       previous: overrides.previous ?? null,
       returnFocus: overrides.returnFocus ?? null,
       selectedDictionaryTab: normalizedDictionaryTab(overrides.selectedDictionaryTab),
-      capturePinPromise: level === rootLevel ? level.capturePinPromise : rootLevel.capturePinPromise,
     }, level);
   }
 
@@ -3077,7 +3130,9 @@
     clearTransferTimer();
     clearDescendantTimer();
     const existing = levels[level.depth + 1];
-    const pendingKey = source === "link" ? "pendingLink" : "pendingHover";
+    // Only a hover child is cancelled when the pointer leaves its word; link
+    // and click children load independently of pointer movement.
+    const pendingKey = source === "hover" ? "pendingHover" : "pendingLink";
     const pending = existing?.[pendingKey];
     if (
       sameChildLookup(existing, candidate, primaryReading) &&
@@ -3273,6 +3328,7 @@
         options: {
           frequencyDictionary: options.frequencyDictionary,
           frequencyOrder: options.frequencyOrder,
+          personalDictionary: options.personalDictionaryEnabled,
           primaryReading: "",
         },
         scanLength: 1,
@@ -3387,8 +3443,7 @@
   }
 
   function lookupCandidate(candidate, signature = candidateSignature(candidate)) {
-    rootLevel.capturePin = null;
-    rootLevel.capturePinPromise = Promise.resolve(window.HDCapture?.rootLookup(candidate) ?? null);
+    clearCursorExitTimer();
     const lookup = runLookup(candidate);
     const pending = { token: rootLevel.lookupToken, candidate, signature };
     pendingCandidateLookup = pending;
@@ -3402,6 +3457,25 @@
     return options.lookupMode === "hover" || activationPressed;
   }
 
+  // Words in a popup's definitions follow lookupMode unless Reading →
+  // Activation → Child popups asks for the key or a click instead.
+  function definitionKeyGated() {
+    return options.definitionLookupMode === "activation"
+      || (options.definitionLookupMode === "inherit" && options.lookupMode !== "hover");
+  }
+
+  function definitionHoverAllowed() {
+    return options.definitionLookupMode !== "click" && (!definitionKeyGated() || activationPressed);
+  }
+
+  // The configured activation input when it is a mouse button that something
+  // waits for: page lookups outside Hover mode, or child popups set to hold it.
+  // Otherwise a press keeps its ordinary meaning.
+  function activationButton() {
+    if (options.lookupMode === "hover" && !definitionKeyGated()) return null;
+    return ACTIVATION_BUTTONS.get(options.activationKey) ?? null;
+  }
+
   // Yomitan's default: once shown, the popup outlives the activation key and
   // the pointer's wanderings; only an explicit dismissal or a new lookup ends it.
   function schedulePointerHide() {
@@ -3411,6 +3485,37 @@
   function updateModifierState(event) {
     const property = MODIFIER_PROPERTIES.get(options.activationKey);
     if (property) activationPressed = event[property] === true;
+    // Every mouse event reports the held buttons, so a release the page never
+    // saw ends a button's activation at the next move.
+    const button = ACTIVATION_BUTTONS.get(options.activationKey);
+    if (button && typeof event.buttons === "number") {
+      const held = (event.buttons & button.flag) !== 0;
+      if (held !== activationPressed) {
+        activationPressed = held;
+        syncHostAttention();
+      }
+    }
+  }
+
+  // Pressing the activation input while the pointer is stationary reveals the
+  // word under it without asking the reader to jiggle the mouse.
+  function scanActivatedPointer() {
+    const popupLevel = activePointerLevel(lastPointer);
+    const keyGated = popupLevel ? definitionKeyGated() : options.lookupMode !== "hover";
+    if (keyGated && lastPointer && !hasProtectedNote() && !popupHasFocus()
+        && (!pointerInPopup || popupLevel)
+        && !selectionDragActive
+        && (popupLevel || !retainSelectedLookup())) {
+      scheduleScan();
+    }
+  }
+
+  // Releasing it closes an `activation` popup after the hide delay;
+  // `activationSticky` keeps the popup.
+  function releaseActivation() {
+    if (options.lookupMode !== "activation" || activationPressed || selectionIsUnchanged()) return;
+    cancelCandidateScan();
+    scheduleHide();
   }
 
   function pointInsidePopup(clientX, clientY) {
@@ -3462,7 +3567,7 @@
       else scheduleDescendantPrune(level);
       return;
     }
-    if (!activationAllowed() || level.depth >= options.popupNestingMaxDepth) {
+    if (!definitionHoverAllowed() || level.depth >= options.popupNestingMaxDepth) {
       cancelPendingHover(level);
       scheduleDescendantPrune(level);
       return;
@@ -3507,7 +3612,9 @@
       clearHideTimer();
       return;
     }
-    const selection = window.getSelection();
+    // A live selection outranks the pointer only while the personal dictionary
+    // owns automatic selection lookups.
+    const selection = options.personalDictionaryEnabled ? window.getSelection() : null;
     if (selection && !selection.isCollapsed) {
       if (!activationAllowed()) {
         cancelCandidateScan();
@@ -3534,10 +3641,13 @@
       return;
     }
     const signature = candidateSignature(candidate);
+    // Scanning the popup's own word again, pending or shown, keeps the popup
+    // and cancels its cursor-exit hide.
     if (pendingCandidateLookup?.token === rootLevel.lookupToken
         && pendingCandidateLookup.signature === signature
         && sameAnchorNode(candidate, pendingCandidateLookup.candidate)) {
       clearHideTimer();
+      clearCursorExitTimer();
       return;
     }
     if (
@@ -3546,6 +3656,7 @@
       sameAnchorNode(candidate, rootLevel.activeCandidate)
     ) {
       clearHideTimer();
+      clearCursorExitTimer();
       return;
     }
     clearHideTimer();
@@ -3581,7 +3692,7 @@
       else scheduleDescendantPrune(level);
       return;
     }
-    if (selectionDragActive || !activationAllowed()) {
+    if (selectionDragActive || !definitionHoverAllowed()) {
       cancelPendingHover(level);
       clearScanTimer();
       return;
@@ -3694,6 +3805,10 @@
     if (disposed) {
       return;
     }
+    // A press decides afresh what its own release and click may do.
+    if (scanPress?.button === event.button) scanPress = null;
+    const button = activationButton();
+    if (button && options.hoverEnabled && event.button === button.button && startButtonScan(event)) return;
     if (isOurNode(event.target) || pointInsidePopup(event.clientX, event.clientY)) return;
     updateModifierState(event);
     if (event.button === 0 && options.hoverEnabled
@@ -3708,6 +3823,38 @@
       return;
     }
     hide();
+  }
+
+  // The scan button works like the activation key: pressing it looks up the
+  // word under the pointer, and moving while it is held keeps scanning. Its
+  // capture-phase press claims an overlay host's window before the host's own
+  // listener can turn click-through back on. Over content the reader scans, the
+  // press starts no autoscroll and Back or Forward does not navigate; the click
+  // opens no new tab only when the press was on a word the reader looks up. A
+  // popup link's press is the link's, so its middle click keeps opening it.
+  function startButtonScan(event) {
+    const { clientX, clientY } = event;
+    const inPopup = isOurNode(event.target) || pointInsidePopup(clientX, clientY);
+    // Hover mode's page lookups wait for nothing; only child popups can.
+    if (!inPopup && options.lookupMode === "hover") return false;
+    // The popup is a closed shadow root: its own mousemove recorded the real
+    // target and level under the pointer.
+    if (!inPopup) lastPointer = { clientX, clientY, target: event.target };
+    const level = inPopup ? activePointerLevel(lastPointer) : null;
+    // Child popups set to Click wait for no button.
+    if (level && (popupLinkAt(lastPointer.target, level) || !definitionKeyGated())) return false;
+    const scannable = level
+      ? Boolean(selectionBoundaryElement(lastPointer.target)?.closest(DEFINITION_TEXT_SELECTOR))
+      : !inPopup && isScannableElement(selectionBoundaryElement(event.target), new Map());
+    if (scannable) event.preventDefault();
+    const candidate = scannable
+      && (level ? resolveDefinitionCandidate(clientX, clientY, level) : resolveCandidate(clientX, clientY));
+    scanPress = { button: event.button, cancelRelease: scannable && NAVIGATION_BUTTONS.has(event.button),
+      cancelClick: Boolean(candidate) };
+    activationPressed = true;
+    syncHostAttention();
+    scanActivatedPointer();
+    return true;
   }
 
   // Release decides what the press was: a selection looks up that text, a
@@ -3763,6 +3910,12 @@
     const selection = window.getSelection();
     if ([selection?.anchorNode, selection?.focusNode].some((node) =>
       node && (node === host || node.getRootNode() === shadow))) return;
+    // Automatic selection lookups are the personal dictionary's entry point.
+    // Off, as in Yomitan, a changed selection only releases one a keybind scanned.
+    if (!options.personalDictionaryEnabled) {
+      if (activeSelectionCandidate) hide();
+      return;
+    }
     const candidate = resolveSelectedLookupCandidate(selection);
     if (!candidate && !activeSelectionCandidate) return;
     if (candidate && !activationAllowed()) hide();
@@ -3771,9 +3924,24 @@
   }
 
   function onMouseUp(event) {
-    if (disposed || event.button !== 0 || !selectionDragActive) return;
+    if (disposed) return;
+    const button = activationButton();
+    if (button && event.button === button.button) {
+      if (scanPress?.button === event.button && scanPress.cancelRelease) event.preventDefault();
+      updateModifierState(event);
+      releaseActivation();
+      return;
+    }
+    if (event.button !== 0 || !selectionDragActive) return;
     updateModifierState(event);
     finishSelectionDrag({ dismissClick: true });
+  }
+
+  // A middle click on a word the scan press looked up opens no new tab.
+  function onAuxClick(event) {
+    if (scanPress?.button !== event.button) return;
+    if (scanPress.cancelClick) event.preventDefault();
+    scanPress = null;
   }
 
   function onPageFocusIn() {
@@ -3781,6 +3949,7 @@
       cancelCandidateScan();
       activationPressed = false;
       activationCode = null;
+      syncHostAttention();
     }
   }
 
@@ -3921,22 +4090,13 @@
     // the rest of the page. Modifier activation leaves native typing intact;
     // printable/editor keys stay reserved for the focused field.
     if (pageEditorFocused() && !MODIFIER_PROPERTIES.has(options.activationKey)) return;
-    // Pressing the gate key while the pointer is stationary should reveal the
-    // word under it without asking the reader to jiggle the mouse.
     const wasPressed = activationPressed;
     updateModifierState(event);
     if (normaliseActivationKey(event.key, null) === options.activationKey) {
       activationPressed = true;
       activationCode = event.code;
     }
-    const popupLevel = activePointerLevel(lastPointer);
-    if (!wasPressed && activationPressed && options.lookupMode !== "hover"
-        && lastPointer && !hasProtectedNote() && !popupHasFocus()
-        && (!pointerInPopup || popupLevel)
-        && !selectionDragActive
-        && (popupLevel || !retainSelectedLookup())) {
-      scheduleScan();
-    }
+    if (!wasPressed && activationPressed) scanActivatedPointer();
   }
 
   function onKeyUp(event) {
@@ -3947,11 +4107,7 @@
       activationPressed = false;
     }
     if (!activationPressed) activationCode = null;
-    if (options.lookupMode === "activation" && !activationPressed) {
-      if (selectionIsUnchanged()) return;
-      cancelCandidateScan();
-      scheduleHide();
-    }
+    releaseActivation();
   }
 
   function onMouseOut(event) {
@@ -3970,10 +4126,11 @@
   function onWindowBlur() {
     stopPopupResize();
     if (!disposed) {
-      setSelectionDrag(false);
-      lastPointer = null;
+      // Cleared first, so the drag's sync also releases a held scan button's claim.
       activationPressed = false;
       activationCode = null;
+      setSelectionDrag(false);
+      lastPointer = null;
       pointerInPopup = false;
       const interaction = levels.find((level) => !level.popup?.hidden
         && level.pendingPopupInteraction === level.lookupToken);
@@ -4127,14 +4284,19 @@
     const revision = Number.isInteger(stored?.revision) && stored.revision >= 0 ? stored.revision : 0;
     if (revision <= optionsStorageRevision) return { lookupChanged: false, presentationChanged: false };
     const next = projectHostOptions(stored);
+    const personalChanged = next.personalDictionaryEnabled !== options.personalDictionaryEnabled;
     const lookupChanged = next.scanLength !== options.scanLength || next.maxResults !== options.maxResults
       || next.frequencyDictionary !== options.frequencyDictionary || next.frequencyOrder !== options.frequencyOrder
+      || personalChanged
       || JSON.stringify(next.kanjiClickDictionary) !== JSON.stringify(options.kanjiClickDictionary);
-    const activationChanged = next.lookupMode !== options.lookupMode || next.activationKey !== options.activationKey;
+    const activationChanged = next.lookupMode !== options.lookupMode || next.activationKey !== options.activationKey
+      || next.definitionLookupMode !== options.definitionLookupMode;
     const interactionChanged = activationChanged || next.hoverEnabled !== options.hoverEnabled
-      || next.onlyScanJapaneseText !== options.onlyScanJapaneseText;
+      || next.onlyScanJapaneseText !== options.onlyScanJapaneseText || personalChanged;
     const scanDelayChanged = next.hoverDelayMs !== options.hoverDelayMs && scanTimer !== null;
     const hideDelayChanged = next.popupHideDelayMs !== options.popupHideDelayMs && hideTimer !== null;
+    const cursorExitChanged = next.hidePopupOnCursorExit !== options.hidePopupOnCursorExit
+      || next.hidePopupOnCursorExitDelayMs !== options.hidePopupOnCursorExitDelayMs;
     const columnsChanged = next.popupColumns !== options.popupColumns;
     const sizeChanged = next.popupWidthPx !== options.popupWidthPx || next.popupHeightPx !== options.popupHeightPx
       || next.popupScalePercent !== options.popupScalePercent;
@@ -4162,6 +4324,7 @@
     }
     optionsStorageRevision = revision;
     options = next;
+    if (activationChanged) syncHostAttention();
     if (docsProbeStyle && !docsEnabled()) releaseDocsProbe();
     if (customButtonsChanged) {
       for (const level of levels) level.view?.setCustomButtons(options.customButtons);
@@ -4199,6 +4362,7 @@
     audio?.update(options);
     mining?.update(options);
     appearance?.update(options);
+    void themeHost.sync();
     if (sizeChanged) for (const level of levels) level.view?.hideImagePreview();
     const cssChanged = customStyle?.update(options.customPopupCss);
     if (highlightChanged) {
@@ -4210,6 +4374,16 @@
       }
     }
     if (levels.length > options.popupNestingMaxDepth + 1) pruneLevels(options.popupNestingMaxDepth + 1);
+    // Either edit applies at once: a pending exit restarts under the new
+    // setting, and a pending descendant prune waits for the pointer to
+    // schedule the next one.
+    if (cursorExitChanged) {
+      clearDescendantTimer();
+      if (cursorExitTimer !== null) {
+        clearCursorExitTimer();
+        scheduleCursorExitHide();
+      }
+    }
     // Masonry must measure the new inline width, not lay out the old width and
     // wait for ResizeObserver to correct every card in a second frame.
     if ((sizeChanged || toolbarChanged) && options.hoverEnabled && rootLevel.popup && !rootLevel.popup.hidden) {
@@ -4237,7 +4411,7 @@
       clearHideTimer();
       const popupLevel = activePointerLevel(lastPointer);
       if (!hasProtectedNote() && !popupHasFocus() && (!pointerInPopup || popupLevel)) {
-        if (!activationAllowed()) {
+        if (!(popupLevel ? definitionHoverAllowed() : activationAllowed())) {
           if (popupLevel) cancelPendingHover(popupLevel);
           else schedulePointerHide();
         }
@@ -4281,13 +4455,16 @@
     }
     // Capture so a page that stops propagation on its own text still gets
     // scanned; passive so the hot pointer and scroll paths can never delay the
-    // page's own scrolling. A press stays cancelable: an overlay drag is the
-    // reader's, not the browser's.
+    // page's own scrolling. A press, its release and its click stay cancelable:
+    // an overlay drag and a scan button's press are the reader's, not the
+    // browser's.
     const observe = { capture: true, passive: true };
     document.addEventListener("mousemove", onMouseMove, observe);
     document.addEventListener("mousedown", onMouseDown, { capture: true });
-    document.addEventListener("mouseup", onMouseUp, observe);
+    document.addEventListener("mouseup", onMouseUp, { capture: true });
+    document.addEventListener("auxclick", onAuxClick, { capture: true });
     document.addEventListener("selectionchange", onSelectionChange);
+    document.addEventListener("fullscreenchange", onFullscreenChange);
     document.addEventListener("focusin", onPageFocusIn, observe);
     document.addEventListener("mouseout", onMouseOut, observe);
     document.addEventListener("keydown", onKeyDown, true);
