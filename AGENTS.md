@@ -21,6 +21,12 @@ These instructions apply to the entire repository.
 - Do not add broad or extensive test coverage by default. Add a focused regression test when behavior changes or a bug needs to stay fixed; do not duplicate coverage already provided by a suitable suite.
 - Avoid adding test-only dependencies or expanding fixtures unless the changed behavior genuinely needs them.
 
+## Accessibility
+
+- Changes to colour, contrast, dictionary-image colouring, focus or keyboard navigation, screen-reader semantics, motion, or font sizing affect accessibility.
+- Open an accessibility-affecting change with the `accessibility` label and screenshots of the affected palettes.
+- Under Windows contrast themes, masked image layers need `forced-color-adjust: none` and a `CanvasText` background in `@media (forced-colors: active)` so the glyph remains visible.
+
 ## Issue #9 scope and phases
 
 - D1-D9 and E1-E27 are delivered. The user's subsequent request, "work on l2 to l5", authorizes L2 backup/restore, L3 per-dictionary update schedules, L4 lookup/corpus-seen statistics, and L5 definition blur as the current phase. Deliver them in focused pull requests preserving the completed dictionary and reader behavior, using GSM PR #549 as the reference.
@@ -98,6 +104,7 @@ Run the narrowest existing checks that exercise the change:
 - Documentation-only changes: inspect the rendered Markdown, links, and final diff; code tests are not required.
 - Fixture, C ABI, or WebAssembly changes: rebuild when needed, then run `node test/make-fixture.mjs` and `node test/node-smoke.mjs`.
 - Extension runtime or renderer changes: run `node test/make-fixture.mjs` and `node test/extension-smoke.mjs`.
+- Palette, theme, popup-styling or dictionary-image styling changes: also run `node test/chrome-theme-contrast.mjs` and attach its `test/tmp/ci/theme-contrast.png` filmstrip.
 - Relay source, packaging, socket and installed-Anki checks live in [hachidori-anki](https://github.com/bee-san/hachidori-anki). Run that repository's checks for relay changes.
 - Sharing protocol, host, client, Settings, startup-page or pinned add-on version changes: also run `node --test test/sharing-protocol.test.mjs test/sharing-settings.test.mjs test/anki-addon.test.mjs` and `node test/chrome-sharing.mjs`. The browser suite needs `python3`, a network address beyond loopback, and access to the pinned GitHub release; `HACHIDORI_ANKI_ADDON=/path/to/hachidori-relay.ankiaddon` supplies a local artifact for offline or coordinated changes.
 - Manifest, service worker, offscreen lifecycle, IndexedDB persistence, content-script, or visible popup changes: also run `node test/chrome-e2e.mjs`.

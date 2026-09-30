@@ -307,6 +307,10 @@ fails if `git status` in the submodule comes back dirty.
 
 Run `node --test test/issue-template.test.mjs` for changes to issue templates or their enforcement workflow. This dependency-free suite uses the production validator and mocked GitHub issue calls to check completed and incomplete submissions, Markdown comments and code fences, the acknowledgement, closure feedback, and stale issue events. It never closes real issues. The Issue template workflow runs this check on relevant pull requests and pushes to `main`; its separate issue-event job enforces the template on opened, edited, and reopened issues.
 
+## `accessibility-review.test.mjs`
+
+Run `node --test test/accessibility-review.test.mjs` for changes to the accessibility review gate. It checks affected-file detection, exact-head owner approval, and the label/check decision using mocked GitHub calls. The workflow tests pull-request code with a read-only token; its review gate executes the default-branch script and posts the result to the pull request's head commit.
+
 ---
 
 ## `submodule-identity.mjs`
@@ -1072,6 +1076,10 @@ from the options page to the offscreen document. That is what `chrome-e2e.mjs` i
 for.
 
 ---
+
+## `chrome-theme-contrast.mjs`
+
+Run `node test/chrome-theme-contrast.mjs` after installing the pinned test tooling and Chrome. The suite imports a tagged monochrome and an untagged SVG through the real extension, then samples the card and enlarged preview in every palette from `POPUP_THEME_GROUPS`, including AUTO, plus dark and light emulated forced-colors modes. It requires 3:1 glyph contrast in normal palettes and 20:1 in both forced-colors modes. Its fixed denominator follows the palette registry; each row reports separately. `test/tmp/ci/theme-contrast.png` is a labelled card/preview filmstrip, uploaded by CI with the JSON pixel results. Chrome emulation does not replace a check on a real Windows contrast theme.
 
 ## `chrome-e2e.mjs`
 
