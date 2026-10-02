@@ -544,18 +544,19 @@
    * The glyph under the pointer as a text range, for a drag the reader selects
    * itself. An overlay boxes each glyph in a span wider than the glyph, and from
    * the box's trailing margin the caret APIs report the boundary after its text;
-   * the box still belongs to its last glyph.
+   * the box still belongs to its last glyph. The caret APIs snap to the nearest
+   * text from anywhere on the page, so a point outside the text's box is no glyph.
    */
   function glyphAtPoint(clientX, clientY) {
     const range = caretRangeAt(clientX, clientY);
     const node = range?.startContainer;
     if (!node || !isScannableTextNode(node, new Map())) return null;
     const text = node.nodeValue || "";
+    const box = node.parentElement.getBoundingClientRect();
+    if (text.length === 0 || clientX < box.left || clientX > box.right
+        || clientY < box.top || clientY > box.bottom) return null;
     let offset = range.startOffset;
     if (offset >= text.length) {
-      const box = node.parentElement.getBoundingClientRect();
-      if (text.length === 0 || clientX < box.left || clientX > box.right
-          || clientY < box.top || clientY > box.bottom) return null;
       offset = text.length - 1;
       if (offset > 0 && (text.charCodeAt(offset) & 0xfc00) === 0xdc00) offset -= 1;
     }
