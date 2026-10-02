@@ -252,7 +252,8 @@ const lastError = () => call('hdw_last_error', 'string', [], []);
 const initStorage = (persistent = 0) => call('hdw_init_storage', 'number', ['number'], [persistent]);
 const hdwImport = (zip, out, lowRam = 0) =>
   JSON.parse(call('hdw_import', 'string', ['string', 'string', 'number'], [zip, out, lowRam]));
-const addDict = (path, kind) => call('hdw_add_dict', 'number', ['string', 'number'], [path, kind]);
+const addDict = (path, kind, paged = 0) =>
+  call('hdw_add_dict', 'number', ['string', 'number', 'number'], [path, kind, paged]);
 const lookupRaw = (text, maxResults = 32, scanLength = 16, options = '') =>
   call('hdw_lookup', 'string', ['string', 'number', 'number', 'string'], [text, maxResults, scanLength, options]);
 const lookup = (...args) => JSON.parse(lookupRaw(...args));
@@ -391,6 +392,117 @@ for (const [name, kind] of Object.entries(KINDS)) {
 }
 
 const DICTIONARY_COUNT = Object.keys(KINDS).length;
+
+// ---------------------------------------------------------------------------
+
+G('memory (one heap copy per package; media, and paged entries, read from disk)');
+
+// Emscripten's mmap copies a mapped file into linear memory. A package added
+// as several kinds shares the kind added first (query.cpp add_dict_), media.bin
+// is read from disk when a file is asked for, and a paged package keeps
+// blobs.bin on disk as well and reads its pages through a bounded cache.
+// engine-service.js's hd_memory counts the same files.
+const INDEX_FILES = ['hash.table', 'bloom.filter', 'media.idx', 'scan.idx', 'dict.zstd'];
+const fileBytes = (module, dir, names) => names.reduce((sum, name) => {
+  try {
+    return sum + module.FS.stat(`${dir}/${name}`).size;
+  } catch {
+    return sum;
+  }
+}, 0);
+// Touch the heap through glue first: a pthread that grew the memory leaves
+// this thread's view stale until then.
+const heapOf = (module) => {
+  module.FS.stat('/dicts');
+  return module.HEAPU8.byteLength;
+};
+const heapBytes = () => heapOf(M);
+const heapAfterImport = heapBytes();
+console.log(`  heap after import + ${DICTIONARY_COUNT} adds: ${heapAfterImport}`);
+check('the fixture carries every file the loader reads', () => {
+  for (const name of ['hash.table', 'bloom.filter', 'blobs.bin', 'media.bin', 'media.idx']) {
+    ok(M.FS.stat(`${DICT_DIR}/${name}`).size > 0, `${name} is empty or missing`);
+  }
+});
+
+// Each measurement loads a copy of the fixture into a fresh module, with one
+// file padded so that it dominates everything the loader could hold: the
+// heap's growth over the adds then shows whether that file was copied in, and
+// how often. Padding past the records changes no lookup.
+const PAD_BYTES = 16 * 1024 * 1024;
+const PARITY_WORDS = ['食べる', '食べたかった', '漢字', 'ありがとう', '読む', '食', 'みつからない'];
+async function loadPaddedCopy({ padded, kinds, paged }) {
+  const F = await createHoshidicts();
+  const fcall = (name, ret, types, args) => F.ccall(name, ret, types, args);
+  eq(fcall('hdw_init_storage', 'number', ['number'], [0]), 1, 'fresh module storage');
+  F.FS.mkdir(DICT_DIR);
+  for (const name of entriesOf(DICT_DIR)) {
+    let bytes = M.FS.readFile(`${DICT_DIR}/${name}`);
+    if (name === padded) {
+      const grown = new Uint8Array(bytes.length + PAD_BYTES);
+      grown.set(bytes);
+      bytes = grown;
+    }
+    F.FS.writeFile(`${DICT_DIR}/${name}`, bytes);
+  }
+  const before = heapOf(F);
+  for (const kind of kinds) {
+    eq(fcall('hdw_add_dict', 'number', ['string', 'number', 'number'], [DICT_DIR, kind, paged]), 1,
+      `add kind ${kind}: ${fcall('hdw_last_error', 'string', [], [])}`);
+  }
+  const growth = heapOf(F) - before;
+  const lookups = PARITY_WORDS.map((word) =>
+    fcall('hdw_lookup', 'string', ['string', 'number', 'number', 'string'], [word, 32, 16, '']));
+  const kanjiJson = fcall('hdw_kanji', 'string', ['string'], ['食']);
+  const mediaLength = fcall('hdw_media', 'number', ['string', 'string'], [TITLE, MEDIA_PATH]);
+  const mediaPtr = fcall('hdw_media_data', 'pointer', [], []);
+  const mediaCopy = Uint8Array.from(F.HEAPU8.subarray(mediaPtr, mediaPtr + mediaLength));
+  const pageCacheBytes = fcall('hdw_page_cache_bytes', 'number', [], []);
+  return { F, growth, lookups, kanjiJson, mediaCopy, pageCacheBytes };
+}
+
+const ALL_KINDS = Object.values(KINDS);
+const sharedCopy = await loadPaddedCopy({ padded: 'blobs.bin', kinds: ALL_KINDS, paged: 0 });
+const sharedResident = fileBytes(sharedCopy.F, DICT_DIR, [...INDEX_FILES, 'blobs.bin']);
+console.log(`  four kinds, blobs.bin padded: resident ${sharedResident}, heap growth ${sharedCopy.growth}`);
+check('four kinds of one package hold one copy of its files', () => {
+  ok(sharedCopy.growth >= PAD_BYTES / 2, `heap grew ${sharedCopy.growth}; was the padded blobs.bin copied in at all?`);
+  ok(sharedCopy.growth < 2 * sharedResident, `heap grew ${sharedCopy.growth} for ${sharedResident} resident bytes`);
+});
+
+const mediaCopy = await loadPaddedCopy({ padded: 'media.bin', kinds: [KINDS.term], paged: 0 });
+const mediaFileBytes = fileBytes(mediaCopy.F, DICT_DIR, ['media.bin']);
+console.log(`  media.bin padded to ${mediaFileBytes}: heap growth ${mediaCopy.growth}`);
+check('media.bin stays on disk', () => {
+  ok(mediaCopy.growth < mediaFileBytes / 4, `heap grew ${mediaCopy.growth} for a ${mediaFileBytes}-byte media.bin`);
+  ok(Buffer.from(mediaCopy.mediaCopy).equals(makePng()), 'media read from disk differs from the archived bytes');
+});
+
+const pagedCopy = await loadPaddedCopy({ padded: 'blobs.bin', kinds: ALL_KINDS, paged: 1 });
+const pagedBlobs = fileBytes(pagedCopy.F, DICT_DIR, ['blobs.bin']);
+console.log(`  paged, blobs.bin padded to ${pagedBlobs}: heap growth ${pagedCopy.growth}, `
+  + `page cache after lookups ${pagedCopy.pageCacheBytes}`);
+check('a paged package keeps blobs.bin on disk', () => {
+  ok(pagedCopy.growth < pagedBlobs / 4, `heap grew ${pagedCopy.growth} for a ${pagedBlobs}-byte blobs.bin`);
+  ok(pagedCopy.pageCacheBytes > 0 && pagedCopy.pageCacheBytes < pagedBlobs,
+    `page cache holds ${pagedCopy.pageCacheBytes} of ${pagedBlobs} bytes`);
+});
+check('paged and mapped entries answer with byte-identical JSON', () => {
+  PARITY_WORDS.forEach((word, index) => {
+    eq(pagedCopy.lookups[index], sharedCopy.lookups[index], `hdw_lookup(${word})`);
+    eq(pagedCopy.lookups[index], lookupRaw(word, 32, 16, ''), `hdw_lookup(${word}) against the unpadded package`);
+  });
+  const withTerms = sharedCopy.lookups.map((json) => JSON.parse(json).results[0]?.term).filter(Boolean);
+  ok(withTerms.some((term) => term.frequencies.length > 0) && withTerms.some((term) => term.pitches.length > 0),
+    'the parity words cover frequency and pitch data');
+  eq(pagedCopy.kanjiJson, sharedCopy.kanjiJson, 'hdw_kanji(食)');
+  ok(JSON.parse(pagedCopy.kanjiJson).entries.length > 0, 'the parity kanji has an entry');
+  ok(Buffer.from(pagedCopy.mediaCopy).equals(Buffer.from(sharedCopy.mediaCopy)), 'hdw_media bytes');
+});
+check('a mapped engine reports no page cache', () => {
+  eq(sharedCopy.pageCacheBytes, 0, 'mapped page cache bytes');
+  eq(call('hdw_page_cache_bytes', 'number', [], []), 0, 'main module page cache bytes');
+});
 
 // ---------------------------------------------------------------------------
 
@@ -828,6 +940,14 @@ check('dictionaries can be reloaded from the same MEMFS directory', () => {
   eq(lookup('食べたかった').results[0].term.expression, '食べる', 'expression');
 });
 
+// Linear memory never shrinks: the import high-water mark stays for the life
+// of the module, which is what the extension's engine recycling reclaims.
+const heapAfterReload = heapBytes();
+console.log(`  heap after reset + 1 add: ${heapAfterReload} (after import: ${heapAfterImport})`);
+check('the heap keeps the import high-water mark after a reset', () => {
+  ok(heapAfterReload >= heapAfterImport, `heap shrank from ${heapAfterImport} to ${heapAfterReload}`);
+});
+
 // ---------------------------------------------------------------------------
 
 G('hdw_import staging');
@@ -1135,10 +1255,10 @@ const recoveryInit = recoveryCall('hdw_init_storage', 'number', ['number'], [0])
 check('storage initialization recovers interrupted installs', () =>
   eq(recoveryInit, 1, recoveryCall('hdw_last_error', 'string', [], [])));
 check('a partially moved backup is merged back without deleting the files left in place', () =>
-  eq(recoveryCall('hdw_add_dict', 'number', ['string', 'number'], ['/dicts/partial-backup', 0]), 1,
+  eq(recoveryCall('hdw_add_dict', 'number', ['string', 'number', 'number'], ['/dicts/partial-backup', 0, 0]), 1,
     recoveryCall('hdw_last_error', 'string', [], [])));
 check('a committed backup replaces a partial new destination', () =>
-  eq(recoveryCall('hdw_add_dict', 'number', ['string', 'number'], ['/dicts/committed-backup', 0]), 1,
+  eq(recoveryCall('hdw_add_dict', 'number', ['string', 'number', 'number'], ['/dicts/committed-backup', 0, 0]), 1,
     recoveryCall('hdw_last_error', 'string', [], [])));
 check('a complete but uncommitted new destination is rolled back', () => {
   eq(recoveryFs.analyzePath('/dicts/uncommitted-new/old-only').exists, true, 'old backup sentinel');
@@ -1150,7 +1270,7 @@ check('a committed new destination wins over a partially deleted backup', () => 
 });
 check('a corrupt destination cannot displace the last valid backup', () => {
   recoveryCall('hdw_reset', null, [], []);
-  eq(recoveryCall('hdw_add_dict', 'number', ['string', 'number'], ['/dicts/corrupt-new', 0]), 1,
+  eq(recoveryCall('hdw_add_dict', 'number', ['string', 'number', 'number'], ['/dicts/corrupt-new', 0, 0]), 1,
     recoveryCall('hdw_last_error', 'string', [], []));
   const result = recoveryCall('hdw_lookup', 'string', ['string', 'number', 'number', 'string'],
     ['食べる', 8, 16, '{}']);
@@ -1565,6 +1685,48 @@ check('large media imports and loads but only fetches up to 4 MiB', () => {
   eq(lastError(), '', 'healthy media error');
   ok(lookup('食べる').results.length > 0, 'dictionary remains usable');
 });
+
+// ---------------------------------------------------------------------------
+
+G('low-memory pool (HACHIDORI_PTHREAD_POOL_SIZE = 2)');
+
+// engine-worker-runtime.js sets this before createHoshidicts for the
+// low-memory worker: one importer thread plus the OPFS proxy. The built glue
+// must read the override, and the low-RAM importer must complete in it. Node
+// grows an exhausted pool on demand (PThread.getNewWorker), so the strict pool
+// (PTHREAD_POOL_SIZE_STRICT=2) is only exercised by the real-Chrome suite.
+if (VARIANT === 'hoshidicts') {
+  console.log('  single-thread runtime has no pool; the low-RAM import path is covered above');
+} else {
+  check('the built glue sizes its pool from the runtime override', () => {
+    ok(readFileSync(MODULE_PATH, 'utf8').includes('globalThis.HACHIDORI_PTHREAD_POOL_SIZE??'), 'override expression missing from the glue');
+  });
+  globalThis.HACHIDORI_PTHREAD_POOL_SIZE = 2;
+  const L = await createHoshidicts();
+  delete globalThis.HACHIDORI_PTHREAD_POOL_SIZE;
+  const lcall = (name, ret, types, args) => L.ccall(name, ret, types, args);
+  L.FS.mkdir('/work');
+  L.FS.writeFile('/work/fixture.zip', buildFixtureZip());
+  L.FS.writeFile('/work/many-banks.zip', buildManyBankZip());
+  check('storage initializes in the small pool', () => {
+    eq(lcall('hdw_init_storage', 'number', ['number'], [0]), 1, lcall('hdw_last_error', 'string', [], []));
+  });
+  const lowReport = JSON.parse(lcall('hdw_import', 'string', ['string', 'string', 'number'], ['/work/fixture.zip', '/dicts', 1]));
+  check('a low-RAM import completes with two pool threads', () => {
+    eq(lowReport.success, true, lowReport.error);
+    eq(lowReport.termCount, EXPECTED.termCount, 'termCount');
+  });
+  const lowManyReport = JSON.parse(lcall('hdw_import', 'string', ['string', 'string', 'number'], ['/work/many-banks.zip', '/dicts', 1]));
+  check('twenty term banks import single-threaded in the small pool', () => {
+    eq(lowManyReport.success, true, lowManyReport.error);
+    eq(lowManyReport.termCount, MANY_BANK_COUNT, 'term count');
+  });
+  check('the small-pool module loads and answers lookups', () => {
+    eq(lcall('hdw_add_dict', 'number', ['string', 'number', 'number'], [DICT_DIR, 0, 0]), 1, lcall('hdw_last_error', 'string', [], []));
+    const result = JSON.parse(lcall('hdw_lookup', 'string', ['string', 'number', 'number', 'string'], ['食べたかった', 32, 16, '']));
+    eq(result.results[0]?.term.expression, '食べる', 'expression');
+  });
+}
 
 console.log(`\n${passed} passed, ${failures.length} failed`);
 if (failures.length) {

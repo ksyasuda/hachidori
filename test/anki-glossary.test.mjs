@@ -56,6 +56,47 @@ test("Anki first/brief/plain/dictionary variants keep their distinct source mean
   assert.match(await render({ dictionary: "A", plain: true }), /\(Alias &lt;A&gt;\)/u);
 });
 
+test("rich Anki glossaries turn dictionary line breaks into <br> as Yomitan does, and plain glossaries keep their lines", async t => {
+  const { document, request } = fixture(t);
+  // A note field has none of the popup's white-space: pre-wrap, so a raw newline renders as a space (#359).
+  request.term.glossaries = [
+    { dictionary: "A", glossary: JSON.stringify([{ type: "structured-content", content: [
+      "ぜっ-たい【絶対】\n㊀〘名〙", { tag: "span", content: "\n① 他に比較するものがないこと。\n「一の真理」" },
+    ] }]) },
+    { dictionary: "B", glossary: JSON.stringify(["first line\r\nsecond line", { type: "text", text: "third\nfourth" }]) },
+  ];
+  const render = createAnkiDefinitionRenderer(document, request);
+  const html = await render({});
+  assert.doesNotMatch(html, /[\r\n]/u);
+  const holder = document.createElement("div");
+  holder.innerHTML = html;
+  assert.equal(holder.querySelectorAll(".gsm-hoshidicts-glossary-content br").length, 5);
+  assert.equal(holder.querySelector(".gloss-sc-span").innerHTML, "<br>① 他に比較するものがないこと。<br>「一の真理」");
+  assert.equal(await render({ plain: true, noDictionary: true }), "ぜっ-たい【絶対】<br>㊀〘名〙<br>"
+    + "① 他に比較するものがないこと。<br>「一の真理」<br>first line<br>second line<br>third<br>fourth");
+});
+
+test("each Anki glossary row is its own li[data-dictionary] with no nested list, as in Yomitan's glossary template", async t => {
+  const { document, request } = fixture(t);
+  request.term.glossaries = [
+    { dictionary: "A", definitionTags: "", termTags: "", glossary: '["main entry"]' },
+    { dictionary: "A", definitionTags: "子", termTags: "", glossary: '["compound list"]' },
+    { dictionary: "B", definitionTags: "", termTags: "", glossary: '["other entry"]' },
+  ];
+  const render = createAnkiDefinitionRenderer(document, request);
+  const holder = document.createElement("div");
+  const items = async options => {
+    holder.innerHTML = await render(options);
+    return [...holder.querySelectorAll(".yomitan-glossary > ol > li")];
+  };
+  const all = await items({});
+  assert.deepEqual(all.map(item => item.dataset.dictionary), ["A", "A", "B"]);
+  // Note types page by li[data-dictionary] and pad any other list, so the entry sits directly in its item.
+  assert.deepEqual(all.map(item => item.querySelector(":scope > div > .yomitan-glossary-meta")?.textContent),
+    ["(Alias <A>)", "(子, Alias <A>)", "(B)"]);
+  assert.deepEqual((await items({ dictionary: "A" })).map(item => item.dataset.dictionary), ["A", "A"]);
+});
+
 test("plain Anki definitions omit decorative link icons and preferred image sizes retain the intrinsic ratio", async t => {
   const { document, request } = fixture(t);
   request.term.glossaries = [{ dictionary: "B", glossary: JSON.stringify([{ type: "structured-content", content: [
@@ -72,6 +113,35 @@ test("plain Anki definitions omit decorative link icons and preferred image size
   assert.equal(wide.style.height, "auto");
   assert.equal(tall.style.height, "200px");
   assert.equal(tall.style.width, "auto");
+});
+
+test("Anki export sizes em images with CSS in em while pixel and unitless images keep their width/height attributes", async t => {
+  const { document, request } = fixture(t);
+  request.term.glossaries = [{ dictionary: "B", glossary: JSON.stringify([{ type: "structured-content", content: [
+    // sankoku8's pitch-accent mark: HTML width/height attributes are CSS pixels, so
+    // "0.5" × "1" would be a sub-pixel image on the Anki note.
+    { tag: "img", path: "image.png", width: 0.5, height: 1, sizeUnits: "em" },
+    { tag: "img", path: "image.png", width: 200, height: 100, preferredWidth: 2, sizeUnits: "em" },
+    { tag: "img", path: "image.png", width: 200, height: 100, sizeUnits: "px" },
+    { tag: "img", path: "image.png", width: 200, height: 100 },
+  ] }]) }];
+  const holder = document.createElement("div");
+  holder.innerHTML = await createAnkiDefinitionRenderer(document, request)({});
+  const [accent, preferred, pixels, unitless] = holder.querySelectorAll("img");
+  assert.equal(accent.style.width, "0.5em");
+  assert.equal(accent.style.height, "1em");
+  assert.equal(accent.getAttribute("width"), null);
+  assert.equal(accent.getAttribute("height"), null);
+  assert.equal(preferred.style.width, "2em");
+  assert.equal(preferred.style.height, "auto");
+  assert.equal(preferred.getAttribute("width"), null);
+  assert.equal(preferred.getAttribute("height"), null);
+  for (const image of [pixels, unitless]) {
+    assert.equal(image.getAttribute("width"), "200");
+    assert.equal(image.getAttribute("height"), "100");
+    assert.equal(image.style.width, "");
+    assert.equal(image.style.height, "");
+  }
 });
 
 test("serialized dictionary CSS cannot close its HTML style element and existing CSS escapes stay intact", async t => {
@@ -91,4 +161,52 @@ test("serialized dictionary CSS cannot close its HTML style element and existing
   assert.equal(holder.querySelector("img"), null);
   assert.match(holder.querySelector("style").textContent, /\.x\\<y/u);
   assert.match(holder.querySelector("style").textContent, /<\\\/StYlE>/u);
+});
+
+test("rich glossary markers carry Yomitan's structured-content inline styles", async t => {
+  const { document, request } = fixture(t);
+  request.term.glossaries = [{ dictionary: "B", definitionTags: "", termTags: "", glossary: JSON.stringify([{ type: "structured-content", content: [
+    { tag: "table", content: [{ tag: "tr", content: [{ tag: "th", content: "表記" }, { tag: "td", style: { textAlign: "center" }, content: "絶対" }] }] },
+    { tag: "span", style: { fontSize: "130%" }, content: "⟶" },
+    { tag: "a", href: "https://example.com/", content: "example" },
+  ] }]) }];
+  const holder = document.createElement("div");
+  holder.innerHTML = await createAnkiDefinitionRenderer(document, request)({});
+  const style = selector => holder.querySelector(selector).getAttribute("style");
+  // What Yomitan's AnkiTemplateRenderer writes for the same content at 67db60d
+  // (CssStyleApplier.applyClassStyles with structured-content-style.json): the
+  // class rules first, then the element's own inline style.
+  assert.equal(style(".gloss-sc-table-container"), "display:block;");
+  assert.equal(style(".gloss-sc-table"), "table-layout:auto;border-collapse:collapse;");
+  assert.equal(style(".gloss-sc-th"),
+    "font-weight:bold;border-style:solid;padding:0.25em;vertical-align:top;border-width:1px;border-color:currentColor;");
+  assert.equal(style(".gloss-sc-td"),
+    "border-style:solid;padding:0.25em;vertical-align:top;border-width:1px;border-color:currentColor;text-align: center;");
+  assert.equal(style(".gloss-sc-span"), "font-size: 130%;");
+  assert.equal(style(".gloss-link-external-icon"), "display:none;");
+  const plain = await createAnkiDefinitionRenderer(document, request)({ plain: true, noDictionary: true });
+  assert.doesNotMatch(plain, /style=/u, "plain markers stay unstyled");
+});
+
+test("Anki dictionary styles are scoped by selector prefix rather than @scope", async t => {
+  const { document, request } = fixture(t);
+  request.dictionaryStyles = [{ dictionary: "A \"quoted\"", styles: [
+    ".gloss-sc-strong, [data-sc-content=\"a,b\"] :is(.x, .y)::before { color: red }",
+    "@media (min-width: 1px) { .gloss-sc-span { color: blue } }",
+    "@font-face { font-family: page }",
+  ].join("\n") }];
+  request.term.glossaries = [{ dictionary: "A \"quoted\"", definitionTags: "", termTags: "", glossary: '["first"]' }];
+  const holder = document.createElement("div");
+  holder.innerHTML = await createAnkiDefinitionRenderer(document, request)({});
+  const css = holder.querySelector("style").textContent;
+  const scope = `.yomitan-glossary [data-dictionary=${document.defaultView.CSS.escape("A \"quoted\"")}]`;
+  assert.doesNotMatch(css, /@scope|@font-face/u);
+  const sheet = new document.defaultView.CSSStyleSheet();
+  sheet.replaceSync(css);
+  const selectors = [...sheet.cssRules].flatMap(rule => rule.selectorText ?? [...rule.cssRules].map(inner => inner.selectorText));
+  assert.deepEqual(selectors.map(selector => selector.replaceAll(scope, "SCOPE")), [
+    "SCOPE .gloss-sc-strong, SCOPE [data-sc-content=\"a,b\"] :is(.x, .y)::before",
+    "SCOPE .gloss-sc-span",
+  ]);
+  assert.ok(holder.querySelector("li[data-dictionary]").matches(scope), "the scope selects the dictionary's own list item");
 });

@@ -57,6 +57,13 @@
     "ゃゅょぁぃぅぇぉゎャュョァィゥェォヮ"
   ));
   const COMBINING_MARK_PATTERN = /\p{Mark}/u;
+  // Yomitan's getLanguageFromText (text-utilities.js, with ja/japanese.js and
+  // zh/chinese.js ranges) for text with no inherited language: any Japanese
+  // character makes it "ja"; otherwise a Chinese-only character (bopomofo,
+  // small and vertical forms, ideographic symbols) makes it "zh".
+  const JAPANESE_TEXT_PATTERN =
+    /[\u3000-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff01-\uff1f\uff21-\uff3f\uff41-\uff9f\uffe0-\uffee\u{20000}-\u{2a6df}\u{2a700}-\u{2ee5f}\u{2f800}-\u{2fa1f}\u{30000}-\u{323af}]/u;
+  const CHINESE_TEXT_PATTERN = /[\u3100-\u312f\u31a0-\u31bf\ufe10-\ufe1f\ufe50-\ufe6f\u{16fe0}-\u{16fff}]/u;
 
   const ALLOWED_STRUCTURED_TAGS = new Set([
     "a",
@@ -100,40 +107,50 @@
     "video",
   ]);
   const STRUCTURED_TAGS_WITHOUT_CONTENT = new Set(["br", "img"]);
-  const STRUCTURED_STYLE_PROPERTIES = new Map([
-    ["background", ["background", "color"]],
-    ["backgroundColor", ["background-color", "color"]],
-    ["borderColor", ["border-color", "color"]],
-    ["borderRadius", ["border-radius", "length-sequence"]],
-    ["borderStyle", ["border-style", "border-style"]],
-    ["borderWidth", ["border-width", "length-sequence"]],
-    ["clipPath", ["clip-path", "clip-path"]],
-    ["color", ["color", "color"]],
-    ["cursor", ["cursor", "cursor"]],
-    ["fontSize", ["font-size", "length"]],
-    ["fontStyle", ["font-style", "font-style"]],
-    ["fontWeight", ["font-weight", "font-weight"]],
-    ["listStyleType", ["list-style-type", "list-style-type"]],
-    ["margin", ["margin", "signed-length-sequence"]],
-    ["marginBottom", ["margin-bottom", "signed-length"]],
-    ["marginLeft", ["margin-left", "signed-length"]],
-    ["marginRight", ["margin-right", "signed-length"]],
-    ["marginTop", ["margin-top", "signed-length"]],
-    ["padding", ["padding", "length-sequence"]],
-    ["paddingBottom", ["padding-bottom", "length"]],
-    ["paddingLeft", ["padding-left", "length"]],
-    ["paddingRight", ["padding-right", "length"]],
-    ["paddingTop", ["padding-top", "length"]],
-    ["textAlign", ["text-align", "text-align"]],
-    ["textDecorationColor", ["text-decoration-color", "color"]],
-    ["textDecorationLine", ["text-decoration-line", "text-decoration-line"]],
-    ["textDecorationStyle", ["text-decoration-style", "text-decoration-style"]],
-    ["textEmphasis", ["text-emphasis", "safe-css-token"]],
-    ["textShadow", ["text-shadow", "safe-css-token"]],
-    ["verticalAlign", ["vertical-align", "vertical-align"]],
-    ["whiteSpace", ["white-space", "white-space"]],
-    ["wordBreak", ["word-break", "word-break"]],
-  ]);
+  // Yomitan's _setStructuredContentElementStyle (structured-content-generator.js
+  // at 67db60d), in its order: each shorthand is set before the longhands that
+  // refine it. textDecorationLine sets the text-decoration shorthand there too.
+  const STRUCTURED_STYLE_PROPERTIES = [
+    ["fontStyle", "font-style"],
+    ["fontWeight", "font-weight"],
+    ["fontSize", "font-size"],
+    ["color", "color"],
+    ["background", "background"],
+    ["backgroundColor", "background-color"],
+    ["verticalAlign", "vertical-align"],
+    ["textAlign", "text-align"],
+    ["textEmphasis", "text-emphasis"],
+    ["textShadow", "text-shadow"],
+    ["textDecorationLine", "text-decoration"],
+    ["textDecorationStyle", "text-decoration-style"],
+    ["textDecorationColor", "text-decoration-color"],
+    ["borderColor", "border-color"],
+    ["borderStyle", "border-style"],
+    ["borderRadius", "border-radius"],
+    ["borderWidth", "border-width"],
+    ["clipPath", "clip-path"],
+    ["margin", "margin"],
+    ["marginTop", "margin-top"],
+    ["marginLeft", "margin-left"],
+    ["marginRight", "margin-right"],
+    ["marginBottom", "margin-bottom"],
+    ["padding", "padding"],
+    ["paddingTop", "padding-top"],
+    ["paddingLeft", "padding-left"],
+    ["paddingRight", "padding-right"],
+    ["paddingBottom", "padding-bottom"],
+    ["wordBreak", "word-break"],
+    ["whiteSpace", "white-space"],
+    ["cursor", "cursor"],
+    ["listStyleType", "list-style-type"],
+  ];
+  // Functions that could fetch a resource or reach past the dictionary's own
+  // declarations (attributes, page-registered worklets and custom functions).
+  // The popup is a shadow root in the page's origin, so dictionary stylesheets
+  // and inline styles both refuse them; CSSOM judges everything else, as the
+  // browser does for Yomitan.
+  const UNSAFE_STYLE_FUNCTION =
+    /\b(?:url|src|image-set|paint|attr)\s*\(|(?<![\w\P{ASCII}-])--[\w\P{ASCII}-]+\(/iu;
 
   function isRecord(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -175,6 +192,13 @@
     return error;
   }
 
+  function countStructuredNode(state, path) {
+    if (state.nodes >= MAX_STRUCTURED_NODES) {
+      throw structuredContentLimitError("node count", state.nodes + 1, MAX_STRUCTURED_NODES, path);
+    }
+    state.nodes += 1;
+  }
+
   function toHiragana(text) {
     return String(text || "").replace(
       /[\u30a1-\u30f6]/gu,
@@ -198,27 +222,24 @@
     return morae;
   }
 
-  function buildPitchAccentMorae(reading, position) {
+  // A downstep within the word, or a pattern giving each mora's level and
+  // optionally the following particle's. moraCount null accepts any length.
+  function isPitchForMorae(positions, moraCount) {
+    if (typeof positions === "string") {
+      return /^[HL]+$/u.test(positions)
+        && (moraCount === null || (positions.length >= moraCount && positions.length <= moraCount + 1));
+    }
+    return Number.isInteger(positions) && positions >= 0 && (moraCount === null || positions <= moraCount);
+  }
+
+  function buildPitchAccentMorae(reading, positions) {
     const morae = splitPitchAccentMorae(reading);
-    if (
-      morae.length === 0 ||
-      !Number.isInteger(position) ||
-      position < 0 ||
-      position > morae.length
-    ) {
+    if (morae.length === 0 || !isPitchForMorae(positions, morae.length)) {
       return null;
     }
 
-    const levels = morae.map((_, index) => {
-      if (position === 0) {
-        return index === 0 ? "low" : "high";
-      }
-      if (position === 1) {
-        return index === 0 ? "high" : "low";
-      }
-      return index === 0 || index >= position ? "low" : "high";
-    });
-    const levelAfterWord = position === 0 ? "high" : "low";
+    const levels = morae.map((_, index) => isMoraPitchHigh(index, positions) ? "high" : "low");
+    const levelAfterWord = isMoraPitchHigh(morae.length, positions) ? "high" : "low";
     return morae.map((text, index) => {
       const level = levels[index];
       const nextLevel = levels[index + 1] || levelAfterWord;
@@ -230,6 +251,225 @@
           : level === "low" ? "rise" : "drop",
       };
     });
+  }
+
+  // Yomitan's japanese.js at 67db60d. A pitch is a downstep position or a
+  // string of H/L levels, one per mora and optionally the particle's.
+  function isMoraPitchHigh(moraIndex, pitchPositions) {
+    if (typeof pitchPositions === "string") {
+      return pitchPositions[moraIndex] === "H";
+    }
+    switch (pitchPositions) {
+      case 0: return moraIndex > 0;
+      case 1: return moraIndex < 1;
+      default: return moraIndex > 0 && moraIndex < pitchPositions;
+    }
+  }
+
+  function getDownstepPositions(pitchString) {
+    const downsteps = [];
+    for (let index = 1; index < pitchString.length; index += 1) {
+      if (pitchString[index - 1] === "H" && pitchString[index] === "L") {
+        downsteps.push(index);
+      }
+    }
+    if (downsteps.length === 0) {
+      downsteps.push(pitchString.startsWith("L") ? 0 : -1);
+    }
+    return downsteps;
+  }
+
+  // hoshidicts keeps Yomitan's string form in `pattern` beside a placeholder
+  // numeric position of 0, so any pattern is the pitch: an unsupported one is
+  // refused where it is drawn, never read as heiban.
+  function pitchAccentPositions(pitch) {
+    return typeof pitch?.pattern === "string" && pitch.pattern !== "" ? pitch.pattern : pitch?.position;
+  }
+
+  // The [n] a pitch shows: the downstep mora, or each one for a pattern.
+  function pitchAccentDownstep(pitch) {
+    const positions = pitchAccentPositions(pitch);
+    return String(typeof positions === "string" ? getDownstepPositions(positions) : positions);
+  }
+
+  // japanese.js DIACRITIC_MAPPING: the character a dakuten form is built on.
+  const DAKUTEN_BASES = new Map();
+  {
+    const kana = "うゔ-かが-きぎ-くぐ-けげ-こご-さざ-しじ-すず-せぜ-そぞ-ただ-ちぢ-つづ-てで-とど-はばぱひびぴふぶぷへべぺほぼぽワヷ-ヰヸ-ウヴ-ヱヹ-ヲヺ-カガ-キギ-クグ-ケゲ-コゴ-サザ-シジ-スズ-セゼ-ソゾ-タダ-チヂ-ツヅ-テデ-トド-ハバパヒビピフブプヘベペホボポ";
+    for (let index = 0; index < kana.length; index += 3) {
+      DAKUTEN_BASES.set(kana[index + 1], kana[index]);
+      if (kana[index + 2] !== "-") DAKUTEN_BASES.set(kana[index + 2], kana[index]);
+    }
+  }
+
+  // Yomitan's PronunciationGenerator (ext/js/display/pronunciation-generator.js
+  // at 67db60d): the overlined text with its downstep hook and nasal and
+  // devoice marks, the [n] notation and the SVG graph.
+  function createPronunciationText(documentRef, morae, pitchPositions, nasalPositions, devoicePositions) {
+    const nasalPositionsSet = nasalPositions.length > 0 ? new Set(nasalPositions) : null;
+    const devoicePositionsSet = devoicePositions.length > 0 ? new Set(devoicePositions) : null;
+    const container = documentRef.createElement("span");
+    container.className = "pronunciation-text";
+    for (let index = 0; index < morae.length; index += 1) {
+      const next = index + 1;
+      const mora = morae[index];
+      const mora1 = documentRef.createElement("span");
+      mora1.className = "pronunciation-mora";
+      mora1.dataset.position = `${index}`;
+      mora1.dataset.pitch = isMoraPitchHigh(index, pitchPositions) ? "high" : "low";
+      mora1.dataset.pitchNext = isMoraPitchHigh(next, pitchPositions) ? "high" : "low";
+
+      const characterNodes = [];
+      for (const character of mora) {
+        const characterNode = documentRef.createElement("span");
+        characterNode.className = "pronunciation-character";
+        characterNode.textContent = character;
+        mora1.appendChild(characterNode);
+        characterNodes.push(characterNode);
+      }
+
+      if (devoicePositionsSet !== null && devoicePositionsSet.has(next)) {
+        mora1.dataset.devoice = "true";
+        const indicator = documentRef.createElement("span");
+        indicator.className = "pronunciation-devoice-indicator";
+        mora1.appendChild(indicator);
+      }
+      if (nasalPositionsSet !== null && nasalPositionsSet.has(next) && characterNodes.length > 0) {
+        mora1.dataset.nasal = "true";
+        const group = documentRef.createElement("span");
+        group.className = "pronunciation-character-group";
+        const characterNode = characterNodes[0];
+        const character = characterNode.textContent;
+        const base = DAKUTEN_BASES.get(character);
+        if (base !== undefined) {
+          mora1.dataset.originalText = mora;
+          characterNode.dataset.originalText = character;
+          characterNode.textContent = base;
+        }
+        const diacritic = documentRef.createElement("span");
+        diacritic.className = "pronunciation-nasal-diacritic";
+        diacritic.textContent = "\u309a"; // Combining handakuten
+        group.appendChild(diacritic);
+        const indicator = documentRef.createElement("span");
+        indicator.className = "pronunciation-nasal-indicator";
+        group.appendChild(indicator);
+        characterNode.parentNode.replaceChild(group, characterNode);
+        group.insertBefore(characterNode, group.firstChild);
+      }
+
+      const line = documentRef.createElement("span");
+      line.className = "pronunciation-mora-line";
+      mora1.appendChild(line);
+      container.appendChild(mora1);
+    }
+    return container;
+  }
+
+  function createPronunciationGraph(documentRef, morae, pitchPositions) {
+    const count = morae.length;
+    const svgns = "http://www.w3.org/2000/svg";
+    const svg = documentRef.createElementNS(svgns, "svg");
+    svg.setAttribute("xmlns", svgns);
+    svg.setAttribute("class", "pronunciation-graph");
+    svg.setAttribute("focusable", "false");
+    svg.setAttribute("viewBox", `0 0 ${50 * (count + 1)} 100`);
+    if (count <= 0) return svg;
+
+    const path1 = documentRef.createElementNS(svgns, "path");
+    svg.appendChild(path1);
+    const path2 = documentRef.createElementNS(svgns, "path");
+    svg.appendChild(path2);
+    const circle = (className, x, y, radius) => {
+      const node = documentRef.createElementNS(svgns, "circle");
+      node.setAttribute("class", className);
+      node.setAttribute("cx", `${x}`);
+      node.setAttribute("cy", `${y}`);
+      node.setAttribute("r", radius);
+      svg.appendChild(node);
+    };
+
+    const pathPoints = [];
+    for (let index = 0; index < count; index += 1) {
+      const highPitch = isMoraPitchHigh(index, pitchPositions);
+      const x = index * 50 + 25;
+      const y = highPitch ? 25 : 75;
+      if (highPitch && !isMoraPitchHigh(index + 1, pitchPositions)) {
+        circle("pronunciation-graph-dot-downstep1", x, y, "15");
+        circle("pronunciation-graph-dot-downstep2", x, y, "5");
+      } else {
+        circle("pronunciation-graph-dot", x, y, "15");
+      }
+      pathPoints.push(`${x} ${y}`);
+    }
+    path1.setAttribute("class", "pronunciation-graph-line");
+    path1.setAttribute("d", `M${pathPoints.join(" L")}`);
+
+    pathPoints.splice(0, count - 1);
+    const x = count * 50 + 25;
+    const y = isMoraPitchHigh(count, pitchPositions) ? 25 : 75;
+    const triangle = documentRef.createElementNS(svgns, "path");
+    triangle.setAttribute("class", "pronunciation-graph-triangle");
+    triangle.setAttribute("d", "M0 13 L15 -13 L-15 -13 Z");
+    triangle.setAttribute("transform", `translate(${x},${y})`);
+    svg.appendChild(triangle);
+    pathPoints.push(`${x} ${y}`);
+    path2.setAttribute("class", "pronunciation-graph-line-tail");
+    path2.setAttribute("d", `M${pathPoints.join(" L")}`);
+    return svg;
+  }
+
+  function createPronunciationDownstepPosition(documentRef, downstepPositions) {
+    const downsteps = typeof downstepPositions === "string" ? getDownstepPositions(downstepPositions) : downstepPositions;
+    const downstepPositionString = `${downsteps}`;
+    const notation = documentRef.createElement("span");
+    notation.className = "pronunciation-downstep-notation";
+    notation.dataset.downstepPosition = downstepPositionString;
+    for (const [className, text] of [["prefix", "["], ["number", downstepPositionString], ["suffix", "]"]]) {
+      const part = documentRef.createElement("span");
+      part.className = `pronunciation-downstep-notation-${className}`;
+      part.textContent = text;
+      notation.appendChild(part);
+    }
+    return notation;
+  }
+
+  // display-generator.js _createPronunciationPitchAccent with templates-display.html
+  // "pronunciation": one pitch accent's li.pronunciation. A notation the
+  // options hide is not built. data-pronunciation is its `reading [n]` label.
+  function createPronunciationPitchAccent(documentRef, reading, pitch, { text = true, position = true, graph = false } = {}) {
+    const positions = pitchAccentPositions(pitch);
+    const morae = splitPitchAccentMorae(reading);
+    const node = documentRef.createElement("li");
+    node.className = "pronunciation";
+    node.dataset.pitchAccentDownstepPosition = `${positions}`;
+    node.dataset.pronunciationType = "pitch-accent";
+    if (pitch.nasal.length > 0) node.dataset.nasalMoraPosition = pitch.nasal.join(" ");
+    if (pitch.devoice.length > 0) node.dataset.devoiceMoraPosition = pitch.devoice.join(" ");
+    node.dataset.tagCount = "0";
+    node.dataset.pronunciation = `${reading} [${pitchAccentDownstep(pitch)}]`;
+    const child = (className, parent = node) => {
+      const element = documentRef.createElement("span");
+      element.className = className;
+      parent.appendChild(element);
+      return element;
+    };
+    child("pronunciation-tag-list tag-list").dataset.count = "0";
+    Object.assign(child("pronunciation-disambiguation-list").dataset, { count: "0", termCount: "0", readingCount: "0" });
+    const representations = child("pronunciation-representation-list");
+    if (text) {
+      const container = child("pronunciation-text-container", representations);
+      container.lang = "ja";
+      container.appendChild(createPronunciationText(documentRef, morae, positions, pitch.nasal, pitch.devoice));
+    }
+    if (position) {
+      child("pronunciation-downstep-notation-container", representations)
+        .appendChild(createPronunciationDownstepPosition(documentRef, positions));
+    }
+    if (graph) {
+      child("pronunciation-graph-container", representations)
+        .appendChild(createPronunciationGraph(documentRef, morae, positions));
+    }
+    return node;
   }
 
   function selectPitchAccent(
@@ -255,12 +495,7 @@
         continue;
       }
       for (const pitch of group.pitches) {
-        if (
-          isRecord(pitch) &&
-          Number.isInteger(pitch.position) &&
-          pitch.position >= 0 &&
-          (maximumPosition === null || pitch.position <= maximumPosition)
-        ) {
+        if (isRecord(pitch) && isPitchForMorae(pitchAccentPositions(pitch), maximumPosition)) {
           return {
             dictionary: boundedString(group.dictionary, 4096),
             pitch,
@@ -419,9 +654,10 @@
           splitPitchAccentMorae(pitchReading).length
         );
     const pitchedMorae = selectedPitch
-      ? buildPitchAccentMorae(pitchReading, selectedPitch.pitch.position)
+      ? buildPitchAccentMorae(pitchReading, pitchAccentPositions(selectedPitch.pitch))
       : null;
     if (pitchedMorae) {
+      const downstep = pitchAccentDownstep(selectedPitch.pitch);
       // One column per furigana segment, so each reading sits over the text it
       // reads. Kana segments get a column too, keeping the contour unbroken.
       let segments = segmentFurigana(expression, reading).map((segment) => ({
@@ -436,7 +672,7 @@
       }
       const title = [
         selectedPitch.dictionary,
-        `Pitch accent ${selectedPitch.pitch.position}`,
+        `Pitch accent ${downstep}`,
       ].filter(Boolean).join(" · ");
       let moraIndex = 0;
       for (const segment of segments) {
@@ -449,7 +685,7 @@
 
         const rt = documentRef.createElement("rt");
         rt.className = "gsm-hoshidicts-pitch-reading";
-        rt.dataset.pitchPosition = String(selectedPitch.pitch.position);
+        rt.dataset.pitchPosition = downstep;
         if (selectedPitch.dictionary) {
           rt.dataset.pitchDictionary = selectedPitch.dictionary;
         }
@@ -493,168 +729,51 @@
     return String(value || "").split(/\s+/u).filter(Boolean);
   }
 
-  function isSafeCssToken(value) {
-    return (
-      typeof value === "string" &&
-      value.length > 0 &&
-      value.length <= 128 &&
-      !/[\u0000-\u001f\u007f;{}]/u.test(value) &&
-      !/(?:url|expression|var)\s*\(/iu.test(value)
-    );
+  function languageFromText(text) {
+    return JAPANESE_TEXT_PATTERN.test(text) ? "ja" : CHINESE_TEXT_PATTERN.test(text) ? "zh" : null;
   }
 
-  function normalizeColor(value) {
-    if (!isSafeCssToken(value)) {
-      return null;
-    }
-    const trimmed = value.trim();
-    if (
-      /^#(?:[0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/iu.test(trimmed) ||
-      /^(?:rgb|rgba|hsl|hsla)\([0-9.,%+\-\s/]+\)$/iu.test(trimmed) ||
-      /^(?:[a-z]+|currentColor|transparent)$/iu.test(trimmed)
-    ) {
-      return trimmed;
-    }
-    return null;
+  // Yomitan's _setMultilineTextContent: each "\n" becomes a <br>, so the text
+  // copies with its line breaks. A glossary's text gets the same language
+  // detection as a string in structured content.
+  function appendMultilineText(documentRef, parent, text) {
+    text.split("\n").forEach((line, index) => {
+      if (index > 0) parent.appendChild(documentRef.createElement("br"));
+      if (line) parent.appendChild(documentRef.createTextNode(line));
+    });
+    const language = languageFromText(text);
+    if (language) parent.lang = language;
   }
 
-  function normalizeLengthToken(value, allowNegative = false) {
-    if (typeof value === "number") {
-      if (!Number.isFinite(value) || Math.abs(value) > 256 || (!allowNegative && value < 0)) {
-        return null;
-      }
-      return `${value}px`;
-    }
-    if (!isSafeCssToken(value)) {
-      return null;
-    }
-    const trimmed = value.trim();
-    const match = /^(-?(?:0|[0-9]+(?:\.[0-9]+)?))(px|em|rem|%)?$/u.exec(trimmed);
-    if (!match) {
-      return null;
-    }
-    const amount = Number(match[1]);
-    const unit = match[2] || (amount === 0 ? "" : "px");
-    const limit = unit === "em" || unit === "rem"
-      ? 16
-      : unit === "%"
-        ? 100
-        : 256;
-    if (!Number.isFinite(amount) || Math.abs(amount) > limit || (!allowNegative && amount < 0)) {
-      return null;
-    }
-    return `${match[1]}${unit}`;
+  // An inline value also refuses var(): a dictionary stylesheet's own custom
+  // properties are renamed by applyDictionaryStyles, but a reference here would
+  // read whatever the page sets on the popup host. A backslash could escape a
+  // refused function name.
+  function isSafeStructuredStyleValue(value) {
+    return typeof value === "string" && !value.includes("\\")
+      && !UNSAFE_STYLE_FUNCTION.test(value) && !/\bvar\s*\(/iu.test(value);
   }
 
-  function normalizeLengthSequence(value, allowNegative = false) {
-    if (typeof value === "number") {
-      return normalizeLengthToken(value, allowNegative);
+  function setStructuredStyle(element, cssProperty, value) {
+    if (isSafeStructuredStyleValue(value)) {
+      element.style.setProperty(cssProperty, value);
     }
-    if (!isSafeCssToken(value)) {
-      return null;
-    }
-    const tokens = value.trim().split(/\s+/u);
-    if (tokens.length < 1 || tokens.length > 4) {
-      return null;
-    }
-    const normalized = tokens.map((token) => normalizeLengthToken(token, allowNegative));
-    return normalized.every((token) => token !== null) ? normalized.join(" ") : null;
-  }
-
-  // Value kinds that are one pattern match against a string. The rest need
-  // their own handling and stay spelled out below.
-  const STRUCTURED_STYLE_PATTERNS = new Map([
-    ["border-style", /^(?:none|hidden|dotted|dashed|solid|double)$/u],
-    ["clip-path", /^(?:circle|ellipse|inset)\([0-9.,%+\-\s]+\)$/u],
-    [
-      "cursor",
-      /^(?:auto|default|pointer|help|text|wait|progress|not-allowed|zoom-in|zoom-out)$/u,
-    ],
-    ["font-style", /^(?:normal|italic)$/u],
-    ["text-align", /^(?:start|end|left|right|center|justify|match-parent)$/u],
-    ["text-decoration-style", /^(?:solid|double|dotted|dashed|wavy)$/u],
-    ["white-space", /^(?:normal|nowrap|pre|pre-wrap|pre-line|break-spaces)$/u],
-    ["word-break", /^(?:normal|break-all|keep-all|break-word)$/u],
-  ]);
-
-  function normalizeStructuredStyleValue(kind, value) {
-    const pattern = STRUCTURED_STYLE_PATTERNS.get(kind);
-    if (pattern) {
-      return typeof value === "string" && pattern.test(value) ? value : null;
-    }
-    if (kind === "color") {
-      return normalizeColor(value);
-    }
-    if (kind === "length") {
-      return normalizeLengthToken(value);
-    }
-    if (kind === "signed-length") {
-      // A bare number here means em, not the px normalizeLengthToken assumes.
-      if (typeof value === "number") {
-        return Number.isFinite(value) && Math.abs(value) <= 16
-          ? `${value}em`
-          : null;
-      }
-      return normalizeLengthToken(value, true);
-    }
-    if (kind === "length-sequence") {
-      return normalizeLengthSequence(value);
-    }
-    if (kind === "signed-length-sequence") {
-      return normalizeLengthSequence(value, true);
-    }
-    if (kind === "font-weight") {
-      if (
-        typeof value === "string" &&
-        /^(?:normal|bold|bolder|lighter|[1-9]00)$/u.test(value)
-      ) {
-        return value;
-      }
-      if (Number.isInteger(value) && value >= 100 && value <= 900 && value % 100 === 0) {
-        return String(value);
-      }
-    }
-    if (kind === "list-style-type") {
-      return isSafeCssToken(value) && value.trim().length <= 64
-        ? value.trim()
-        : null;
-    }
-    if (kind === "text-decoration-line") {
-      const values = Array.isArray(value) ? value : [value];
-      return values.length >= 1 && values.length <= 4 && values.every(
-        (item) => typeof item === "string" &&
-          /^(?:none|underline|overline|line-through|blink)$/u.test(item)
-      ) ? values.join(" ") : null;
-    }
-    if (kind === "vertical-align") {
-      if (
-        typeof value === "string" &&
-        /^(?:baseline|sub|super|text-top|text-bottom|middle|top|bottom)$/u.test(value)
-      ) {
-        return value;
-      }
-      return normalizeLengthToken(value, true);
-    }
-    if (kind === "safe-css-token") {
-      return isSafeCssToken(value) ? value.trim() : null;
-    }
-    return null;
   }
 
   function applyStructuredStyle(element, rawStyle) {
     if (!isRecord(rawStyle)) {
       return;
     }
-    for (const [property, value] of Object.entries(rawStyle)) {
-      const definition = STRUCTURED_STYLE_PROPERTIES.get(property);
-      if (!definition) {
-        continue;
+    for (const [property, cssProperty] of STRUCTURED_STYLE_PROPERTIES) {
+      let value = rawStyle[property];
+      // As in Yomitan, numeric margin longhands are em and a decoration-line
+      // array is one value; any other value must be a string.
+      if (typeof value === "number" && /^margin[A-Z]/u.test(property)) {
+        value = `${value}em`;
+      } else if (Array.isArray(value) && property === "textDecorationLine") {
+        value = value.join(" ");
       }
-      const [cssProperty, kind] = definition;
-      const normalized = normalizeStructuredStyleValue(kind, value);
-      if (normalized !== null) {
-        element.style.setProperty(cssProperty, normalized);
-      }
+      setStructuredStyle(element, cssProperty, value);
     }
   }
 
@@ -737,6 +856,7 @@
     link.target = "_blank";
     link.rel = "noopener noreferrer";
     link.dataset.path = path;
+    if (typeof state.dictionary === "string") link.dataset.dictionary = state.dictionary;
     link.dataset.imageLoadState = "not-loaded";
     link.dataset.hasAspectRatio = "true";
     link.dataset.imageRendering = typeof value.imageRendering === "string"
@@ -765,13 +885,9 @@
     if (typeof value.title === "string" && value.title.length <= 4096) {
       container.title = value.title;
     }
-    if (isSafeCssToken(value.border)) {
-      container.style.border = value.border;
-    }
-    const borderRadius = normalizeLengthSequence(value.borderRadius);
-    if (borderRadius !== null) {
-      container.style.borderRadius = borderRadius;
-    }
+    // Yomitan assigns both verbatim.
+    setStructuredStyle(container, "border", value.border);
+    setStructuredStyle(container, "border-radius", value.borderRadius);
 
     const sizer = documentRef.createElement("span");
     sizer.className = "gloss-image-sizer";
@@ -1066,10 +1182,12 @@
     path = ["structuredContent"]
   ) {
     const currentPath = [...path];
-    const stack = [{ kind: "value", parent, value }];
-    const pushChild = (childParent, childValue, segment) => {
+    // `language` is the nearest dictionary-set lang, as in Yomitan's
+    // _appendStructuredContent: below one, text is not detected again.
+    const stack = [{ kind: "value", parent, value, language: null }];
+    const pushChild = (childParent, childValue, segment, language) => {
       stack.push({ kind: "leave" });
-      stack.push({ kind: "value", parent: childParent, value: childValue });
+      stack.push({ kind: "value", parent: childParent, value: childValue, language });
       stack.push({ kind: "enter", segment });
     };
     while (stack.length > 0) {
@@ -1085,32 +1203,27 @@
       if (frame.kind === "array") {
         if (frame.index < frame.value.length) {
           stack.push({ ...frame, index: frame.index + 1 });
-          pushChild(frame.parent, frame.value[frame.index], frame.index);
+          pushChild(frame.parent, frame.value[frame.index], frame.index, frame.language);
         }
         continue;
       }
       if (frame.kind === "append-external-icon") {
         const icon = documentRef.createElement("span");
-        icon.className = "gloss-link-external-icon";
+        icon.className = "gloss-link-external-icon icon";
+        icon.dataset.icon = "external-link";
         icon.setAttribute("aria-hidden", "true");
         frame.element.appendChild(icon);
         continue;
       }
 
-      if (state.nodes >= MAX_STRUCTURED_NODES) {
-        throw structuredContentLimitError(
-          "node count",
-          state.nodes + 1,
-          MAX_STRUCTURED_NODES,
-          currentPath
-        );
-      }
       // Bound traversal work, including containers and values that render no DOM.
-      state.nodes += 1;
+      countStructuredNode(state, currentPath);
       value = frame.value;
       parent = frame.parent;
       if (typeof value === "string") {
         parent.appendChild(documentRef.createTextNode(value));
+        const language = frame.language === null ? languageFromText(value) : null;
+        if (language) parent.lang = language;
         continue;
       }
       if (typeof value === "number" || typeof value === "boolean") {
@@ -1118,7 +1231,7 @@
         continue;
       }
       if (Array.isArray(value)) {
-        stack.push({ kind: "array", parent, value, index: 0 });
+        stack.push({ kind: "array", parent, value, index: 0, language: frame.language });
         continue;
       }
       if (!isRecord(value)) {
@@ -1126,12 +1239,12 @@
       }
 
       if (value.type === "structured-content") {
-        pushChild(parent, value.content, "content");
+        pushChild(parent, value.content, "content", frame.language);
         continue;
       }
       if (value.type === "text") {
         const property = Object.prototype.hasOwnProperty.call(value, "text") ? "text" : "content";
-        pushChild(parent, value[property], property);
+        pushChild(parent, value[property], property, frame.language);
         continue;
       }
       if (value.type === "image") {
@@ -1144,7 +1257,7 @@
       }
       if (!ALLOWED_STRUCTURED_TAGS.has(tag)) {
         if (Object.prototype.hasOwnProperty.call(value, "content")) {
-          pushChild(parent, value.content, "content");
+          pushChild(parent, value.content, "content", frame.language);
         }
         continue;
       }
@@ -1158,11 +1271,13 @@
       element.classList.add(`gloss-sc-${tag}`);
       applyStructuredStyle(element, value.style);
       applyStructuredData(element, value.data);
+      let language = frame.language;
       if (
         typeof value.lang === "string" &&
         /^[A-Za-z0-9-]{1,35}$/u.test(value.lang)
       ) {
         element.setAttribute("lang", value.lang);
+        language = value.lang;
       }
       if (tag === "td" || tag === "th") {
         for (const [property, attribute] of [
@@ -1189,6 +1304,7 @@
         const link = parseStructuredLink(value.href);
         if (link?.internal) {
           element.setAttribute("href", "#");
+          element.dataset.external = "false";
           element.dataset.hoshidictsQuery = link.query;
           if (link.primaryReading) {
             element.dataset.hoshidictsReading = link.primaryReading;
@@ -1248,9 +1364,50 @@
         !STRUCTURED_TAGS_WITHOUT_CONTENT.has(tag) &&
         Object.prototype.hasOwnProperty.call(value, "content")
       ) {
-        pushChild(contentParent, value.content, "content");
+        pushChild(contentParent, value.content, "content", language);
       }
     }
+  }
+
+  // display-generator.js _createTermDefinitionEntry with templates-display.html
+  // "gloss-item": one item per glossary element Yomitan displays, in order,
+  // each inside the row's node budget.
+  function appendGlossItem(documentRef, list, item, state, index) {
+    // A [term, rules] element is form-of data Yomitan's translator consumes
+    // and never displays.
+    if (Array.isArray(item)) return;
+    const path = ["glossary", index];
+    const content = documentRef.createElement("span");
+    content.className = "gloss-content";
+    if (typeof item === "string" || (isRecord(item) && item.type === "text" && typeof item.text === "string")) {
+      countStructuredNode(state, path);
+      appendMultilineText(documentRef, content, typeof item === "string" ? item : item.text);
+    } else if (isRecord(item) && item.type === "image") {
+      countStructuredNode(state, path);
+      appendStructuredImage(documentRef, content, item, state);
+      if (typeof item.description === "string") {
+        const description = documentRef.createElement("span");
+        description.className = "gloss-image-description";
+        appendMultilineText(documentRef, description, item.description);
+        content.append(" ", description);
+      }
+    } else if (isRecord(item) && item.type === "structured-content") {
+      content.classList.add("structured-content");
+      appendStructuredValue(documentRef, content, item, state, 0, path);
+    } else {
+      // A value outside Yomitan's schema, which its importer refuses, still
+      // renders when the structured renderer makes something of it.
+      appendStructuredValue(documentRef, content, item, state, 0, path);
+      if (!content.hasChildNodes()) return;
+    }
+    const glossItem = documentRef.createElement("li");
+    glossItem.className = "gloss-item click-scannable";
+    glossItem.dataset.index = String(list.children.length);
+    const separator = documentRef.createElement("span");
+    separator.className = "gloss-separator";
+    separator.textContent = " ";
+    glossItem.append(separator, content);
+    list.appendChild(glossItem);
   }
 
   function appendTextOnlyGlossary(documentRef, parent, rawGlossary, options = {}) {
@@ -1270,12 +1427,6 @@
     // run but would run two senses together here ("to eatto live on ..."), so
     // the top level is split into one item each, as Yomitan does.
     const items = Array.isArray(parsed) ? parsed : [parsed];
-    if (items.length === 0) {
-      return;
-    }
-    if (items.some((item) => isRecord(item) && item.type === "structured-content")) {
-      parent.classList.add("structured-content");
-    }
     const state = {
       nodes: 0,
       dictionary: options.dictionary,
@@ -1302,6 +1453,24 @@
           })
         : null,
     };
+    if (options.layout !== "anki") {
+      // The popup's glossary markup is Yomitan's: ul.gloss-list, even for one
+      // element, with data-count counting the items it shows.
+      const list = documentRef.createElement("ul");
+      list.className = "gloss-list";
+      items.forEach((item, index) => appendGlossItem(documentRef, list, item, state, index));
+      list.dataset.count = String(list.children.length);
+      parent.appendChild(list);
+      return;
+    }
+    // Yomitan's Anki glossary-single template emits one element bare and
+    // several as a list.
+    if (items.length === 0) {
+      return;
+    }
+    if (items.some((item) => isRecord(item) && item.type === "structured-content")) {
+      parent.classList.add("structured-content");
+    }
     if (items.length === 1) {
       appendStructuredValue(documentRef, parent, items[0], state, 0, ["glossary", 0]);
       return;
@@ -1329,9 +1498,7 @@
     // empty longhands until substitution. Residual escapes can disguise both
     // function names and variable delimiters; drop that cosmetic rule rather
     // than reinterpret CSS tokens. Do not strip comment-like text in strings.
-    if (declarations.includes("\\")
-      || /\b(?:url|src|image-set|paint|attr)\s*\(/iu.test(declarations)
-      || /(?<![\w\P{ASCII}-])--[\w\P{ASCII}-]+\(/u.test(declarations)) return false;
+    if (declarations.includes("\\") || UNSAFE_STYLE_FUNCTION.test(declarations)) return false;
     for (const property of style) {
       // Named fonts can activate an outer page's @font-face without a URL here.
       // CSSOM expands non-variable font shorthands into font-family as well.
@@ -1388,10 +1555,58 @@
     }
   }
 
+  // A selector list's top-level members; commas inside functions, attribute
+  // selectors and strings stay with their selector.
+  function splitSelectorList(selectorText) {
+    const selectors = [];
+    let depth = 0;
+    let quote = null;
+    let start = 0;
+    for (let index = 0; index < selectorText.length; index += 1) {
+      const character = selectorText[index];
+      if (character === "\\") {
+        index += 1;
+      } else if (quote !== null) {
+        if (character === quote) quote = null;
+      } else if (character === "\"" || character === "'") {
+        quote = character;
+      } else if (character === "(" || character === "[") {
+        depth += 1;
+      } else if (character === ")" || character === "]") {
+        depth -= 1;
+      } else if (character === "," && depth === 0) {
+        selectors.push(selectorText.slice(start, index).trim());
+        start = index + 1;
+      }
+    }
+    selectors.push(selectorText.slice(start).trim());
+    return selectors;
+  }
+
+  // Yomitan's addScopeToCssLegacy (core/utilities.js at 67db60d): every
+  // selector gains the scope as an ancestor, because Anki still ships
+  // Chromium builds without @scope. Nested rules stay relative to their
+  // prefixed parent. A rule the browser will not reparse is dropped rather
+  // than left unscoped.
+  function prefixDictionaryStyleRules(parent, scope) {
+    for (let index = parent.cssRules.length - 1; index >= 0; index -= 1) {
+      const rule = parent.cssRules[index];
+      if (rule.constructor.name === "CSSStyleRule") {
+        const previous = rule.selectorText;
+        rule.selectorText = splitSelectorList(previous).map((selector) => `${scope} ${selector}`).join(", ");
+        if (rule.selectorText === previous) parent.deleteRule(index);
+      } else if (rule.cssRules) {
+        prefixDictionaryStyleRules(rule, scope);
+      }
+    }
+  }
+
   // Replaces whatever styles a previous generation installed in `host` rather
   // than tracking the elements outside, so a caller can re-apply at any time.
-  // `host` is the shadow root (or document head) the popup lives in.
-  function applyDictionaryStyles(documentRef, host, generation, entries) {
+  // `host` is the shadow root (or document head) the popup lives in. With
+  // `scope`, each dictionary's rules are prefixed by `scope(title)` instead of
+  // wrapped in @scope.
+  function applyDictionaryStyles(documentRef, host, generation, entries, { scope = null } = {}) {
     for (const element of host.querySelectorAll(
       "style[data-hoshidicts-dictionary-style]"
     )) {
@@ -1435,18 +1650,94 @@
       const style = documentRef.createElement("style");
       style.dataset.hoshidictsDictionaryStyle = dictionary;
       style.dataset.hoshidictsGeneration = String(generation);
-      style.textContent = [
-        `@scope (.gsm-hoshidicts-glossary-content[data-hoshidicts-dictionary=${documentRef.defaultView.CSS.escape(dictionary)}]) {`,
-        ...[...sheet.cssRules].map((rule) => rule.cssText),
-        "}",
-      ].join("\n");
+      if (scope) {
+        prefixDictionaryStyleRules(sheet, scope(dictionary));
+        style.textContent = [...sheet.cssRules].map((rule) => rule.cssText).join("\n");
+      } else {
+        style.textContent = [
+          `@scope (.gsm-hoshidicts-glossary-content[data-hoshidicts-dictionary=${documentRef.defaultView.CSS.escape(dictionary)}]) {`,
+          ...[...sheet.cssRules].map((rule) => rule.cssText),
+          "}",
+        ].join("\n");
+      }
       host.appendChild(style);
       applied.push(style);
     }
     return applied;
   }
 
+  // Walk dictionary data directly. Text mode never constructs rich DOM or media.
+  // Layout follows JL's text flattening: tag spans are spaced, furigana reads
+  // 昨日[きのう], list items get markers, table rows read "| a | b |", and block
+  // boundaries add one line break instead of stacking blank lines.
+  const TEXT_BLOCK_TAGS = new Set(["div", "p", "li", "table", "thead", "tbody", "tfoot", "details", "summary"]);
+  function glossaryToPlainText(glossary) {
+    let value = glossary;
+    if (typeof value === "string") {
+      try { value = JSON.parse(value); } catch { return value; }
+    }
+    const LINE = {}, parts = [], lists = [], rows = [];
+    let lineBreak = false;
+    const write = text => {
+      if (lineBreak) {
+        // A run of block boundaries becomes one break, without the whitespace before it.
+        lineBreak = false;
+        while (parts.length) {
+          const last = parts.pop().trimEnd();
+          if (last) { parts.push(last, "\n"); break; }
+        }
+      }
+      if (text) parts.push(text);
+    };
+    const stack = [Array.isArray(value) ? value.flatMap(item => [item, LINE]) : value];
+    while (stack.length) {
+      const item = stack.pop();
+      if (item == null) continue;
+      if (item === LINE) lineBreak = true;
+      else if (typeof item === "function") item();
+      else if (Array.isArray(item)) {
+        for (let index = item.length - 1; index >= 0; index--) stack.push(item[index]);
+      } else if (typeof item !== "object") write(String(item));
+      else if (item.tag === "img" || item.type === "image") {
+        if (item.title) stack.push(LINE, String(item.title));
+      } else if (item.tag === "br") write("\n");
+      else if (item.tag === "rt") stack.push("]", item.content, "[");
+      else if (item.tag === "ul" || item.tag === "ol") {
+        lists.push({ tag: item.tag, type: item.style?.listStyleType, number: 0 });
+        stack.push(LINE, () => lists.pop(), item.content, LINE);
+      } else if (item.tag === "tr") {
+        rows.push(0);
+        stack.push(LINE, () => rows.pop(), " |", item.content, "| ", LINE);
+      } else if (item.tag !== "rp") {
+        const block = TEXT_BLOCK_TAGS.has(item.tag);
+        if (block) stack.push(LINE);
+        // JL's rule for tag pills: a styled span spaces itself only with a right
+        // margin; an unstyled classed span does when its text starts with ASCII.
+        if (item.tag === "span" && (item.style ? item.style.marginRight != null : item.data?.class != null)) {
+          write(""); // settle a pending break so parts[start] is the pill's own text
+          const start = parts.length, always = item.style != null;
+          stack.push(() => { if (parts.length > start && (always || parts[start].charCodeAt(0) < 128)) parts.push(" "); });
+        }
+        // Icon-only cells such as Jitendex's form markers carry their meaning in the title.
+        stack.push(item.content ?? (typeof item.title === "string" ? item.title : null));
+        if (item.tag === "li" && lists.length) {
+          const list = lists.at(-1), type = item.style?.listStyleType ?? list.type;
+          list.number++;
+          // A quoted type is a literal CSS marker, such as Jitendex's "①".
+          let marker = /^(["'])(.*)\1$/u.exec(type ?? "")?.[2] ?? (list.tag === "ol" ? `${list.number}.` : "•");
+          if (type === "none") marker = "";
+          if (marker) stack.push(`${marker} `);
+        } else if ((item.tag === "th" || item.tag === "td") && rows.length) {
+          if (rows[rows.length - 1]++) stack.push(" | "); // every cell after the row's first
+        }
+        if (block) stack.push(LINE);
+      }
+    }
+    return parts.join("").trim();
+  }
+
   return {
+    glossaryToPlainText,
     appendExpressionRuby,
     appendStructuredImage,
     appendStructuredValue,
@@ -1457,16 +1748,19 @@
     boundedString,
     buildPitchAccentMorae,
     createFuriganaSegment,
+    createPronunciationDownstepPosition,
+    createPronunciationGraph,
+    createPronunciationPitchAccent,
+    createPronunciationText,
+    getDownstepPositions,
     getFuriganaKanaSegments,
+    isMoraPitchHigh,
     isRecord,
-    isSafeCssToken,
-    normalizeColor,
-    normalizeLengthSequence,
-    normalizeLengthToken,
     normalizeMediaPath,
-    normalizeStructuredStyleValue,
     parseStructuredLink,
     parseTagList,
+    pitchAccentDownstep,
+    pitchAccentPositions,
     segmentFurigana,
     segmentizeFurigana,
     selectPitchAccent,

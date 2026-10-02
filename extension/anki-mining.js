@@ -2,36 +2,11 @@
 import { ankiAvailability, isUndispatchedAnkiTransportError } from "./anki.js";
 import { ankiCaptureRequirements, resolveAnkiTemplates } from "./anki-templates.js";
 import { ankiDigest } from "./anki-digest.js";
-import { ankiSetupFamily } from "./anki-setup.js";
 import { inspectAnkiNoteIds } from "./anki-index.js";
-import { ankiBrowseQuery, ankiNoteIdsQuery, ankiNoteOptions, canonicalAnkiFields, checkAnkiDuplicate, findAnkiDuplicateNotes,
-  isAnkiDuplicateError, overwriteAnkiFields, validateAnkiNote } from "./anki-duplicates.js";
+import { ankiBrowseQuery, ankiNoteIdsQuery, ankiNoteOptions, canonicalAnkiFields, checkAnkiDuplicate, explainAnkiRefusal,
+  findAnkiDuplicateNotes, isAnkiDuplicateError, overwriteAnkiFields, validateAnkiNote } from "./anki-duplicates.js";
 
 const CONFIG_CHANGED = "Anki configuration changed. Refresh this result before adding a note.";
-const AUTOMATIC_CAPTURE_FIELDS = {
-  kiku: { picture: "Picture", audio: "SentenceAudio" },
-  lapis: { picture: "Picture", audio: "SentenceAudio" },
-  senren: { picture: "picture", audio: "sentenceAudio" },
-};
-
-function requestConfiguration(current, request) {
-  const fields = AUTOMATIC_CAPTURE_FIELDS[ankiSetupFamily(current.config.model)];
-  if (!fields) return current;
-  const templates = Object.fromEntries(Object.entries(current.resolved.templates)
-    .map(([field, template]) => [field, { ...template }]));
-  const routed = { ...current, resolved: { ...current.resolved, templates } };
-  const capture = current.config.mediaCapture;
-  if (!request.capturePin || capture?.enabled !== true) return routed;
-  if (capture.includeAnimation === true && templates[fields.picture]) {
-    templates[fields.picture].value = templates[fields.picture].value
-      .replaceAll("{screenshot}", "{capture-animation}");
-  }
-  if (capture.includeCapturedAudio === true && templates[fields.audio]?.value.trim() === "") {
-    templates[fields.audio].value = "{capture-audio}";
-  }
-  return routed;
-}
-
 export async function readAnkiNoteFields(invoke, noteId) {
   const infos = await invoke("notesInfo", { notes: [noteId] });
   const info = Array.isArray(infos) ? infos.find(value => value.noteId === noteId) : null;
@@ -39,32 +14,43 @@ export async function readAnkiNoteFields(invoke, noteId) {
   return Object.fromEntries(Object.entries(info.fields).map(([field, value]) => [field, value?.value]));
 }
 
-export async function verifyAnkiFields(invoke, noteId, expected) {
-  const fields = await readAnkiNoteFields(invoke, noteId);
+// Names the submitted fields Anki lost or changed; null when the saved note matches.
+export function ankiFieldDifferences(fields, noteId, expected) {
   const missing = [], changed = [];
   for (const [field, value] of Object.entries(expected)) {
     if (typeof fields[field] !== "string") missing.push(field);
     else if (fields[field].normalize("NFC") !== value.normalize("NFC")) changed.push(field);
   }
-  if (missing.length === 0 && changed.length === 0) return;
+  if (missing.length === 0 && changed.length === 0) return null;
   const list = names => names.map(name => `“${name}”`).join(", ");
   const parts = [];
   if (missing.length) parts.push(`${missing.length === 1 ? "field" : "fields"} ${list(missing)} ${missing.length === 1 ? "is" : "are"} missing from note ${noteId}`);
   if (changed.length) parts.push(`${changed.length === 1 ? "field" : "fields"} ${list(changed)} ${changed.length === 1 ? "was" : "were"} saved with different content`);
-  throw new Error(`Anki's saved note differs from the submitted values: ${parts.join("; ")}. Inspect note ${noteId} in Anki.`);
+  return { fields: [...missing, ...changed],
+    message: `Anki's saved note differs from the submitted values: ${parts.join("; ")}. Inspect note ${noteId} in Anki.` };
+}
+
+export async function verifyAnkiFields(invoke, noteId, expected) {
+  const difference = ankiFieldDifferences(await readAnkiNoteFields(invoke, noteId), noteId, expected);
+  if (difference !== null) throw new Error(difference.message);
+}
+
+// A check result becomes the reader's decision here. Its per-note error skips
+// the gateway's translation, so it is explained before the reader sees it.
+async function checkedDecision(prepared, addable, error) {
+  return { state: addable ? "addable" : "invalid", canAdd: addable,
+    error: error === null ? null : await explainAnkiRefusal(prepared.invoke, prepared.note, error) };
 }
 
 async function addableDecision(prepared) {
   const check = await validateAnkiNote(prepared.invoke, prepared.note);
-  return { state: check.addable ? "addable" : "invalid", canAdd: check.addable, error: check.error };
+  return checkedDecision(prepared, check.addable, check.error);
 }
 
 async function unindexedDecision(prepared) {
   const { invoke, note, config, firstField } = prepared;
   const checked = await checkAnkiDuplicate(invoke, note, config);
-  if (!checked.duplicate) {
-    return { state: checked.addable ? "addable" : "invalid", canAdd: checked.addable, error: checked.error };
-  }
+  if (!checked.duplicate) return checkedDecision(prepared, checked.addable, checked.error);
   // A non-direct destination field cannot be keyed by the word index. Keep
   // Anki's exact first-field identity as a compatibility path, restricted to
   // the configured destination type so unrelated custom models never block.
@@ -142,21 +128,6 @@ function fieldsForDecision(prepared, checked) {
   };
 }
 
-function captureForApplication(request, templates) {
-  const requirements = ankiCaptureRequirements(templates);
-  const unavailable = new Set(Array.isArray(request.captureUnavailable) ? request.captureUnavailable : []);
-  requirements.includeAnimation &&= !unavailable.has("animation");
-  requirements.includeAudio &&= !unavailable.has("audio");
-  if (!requirements.includeAnimation && !requirements.includeAudio) return null;
-  const pin = request.capturePin;
-  return {
-    requirements,
-    sourceLabel: pin?.sourceLabel,
-    partial: pin?.partial === true,
-    readyAtMs: pin?.readyAtMs,
-  };
-}
-
 // Names the looked-up word in an error, so a reader mining several results
 // can tell which one Anki refused.
 function describeRequestTerm(request) {
@@ -164,15 +135,16 @@ function describeRequestTerm(request) {
   return typeof expression === "string" && expression.trim() ? `“${expression}”` : "this result";
 }
 
-async function writeAnkiNote(invoke, note, target, fields) {
+async function writeAnkiNote(invoke, note, target, fields, duplicateNoteIds, subminerEnrich) {
   let noteId;
   if (target) {
-    const reply = await invoke("updateNoteFields", { note: { id: target.noteId, fields } }, 10_000);
+    const reply = await invoke("updateNoteFields", { note: { id: target.noteId, fields }, subminerEnrich: subminerEnrich !== false }, 10_000);
     if (reply !== null) throw new Error("Anki returned an invalid field-update acknowledgement.");
     noteId = target.noteId;
   } else {
     try {
-      noteId = await invoke("addNote", { note }, 10_000);
+      noteId = await invoke("addNote", { note, subminerDuplicateNoteIds: duplicateNoteIds,
+        ...(subminerEnrich === false ? { subminerEnrich: false } : {}) }, 10_000);
     } catch (error) {
       throw addNoteContext(error, note);
     }
@@ -207,7 +179,6 @@ export function createAnkiMiningService({
   afterConfirmed = async () => {},
   afterRejected = async () => {},
   preflightExtra = async () => ({}),
-  validateCapture = async () => {},
   enrich,
   duplicateIndex,
   now = Date.now,
@@ -278,7 +249,7 @@ export function createAnkiMiningService({
 
   async function prepare(request, fresh) {
     const configured = await configuration(request?.templateId, fresh);
-    const current = requestConfiguration(configured, request);
+    const current = configured;
     if (request.configKey !== current.configKey) throw new Error(CONFIG_CHANGED);
     if (current.errors.length) throw new Error(current.errors.join("\n"));
     const resources = await buildFields(request, current, { preflight: !fresh });
@@ -290,22 +261,21 @@ export function createAnkiMiningService({
         + `${template ? `: its template ${template} produced nothing for ${describeRequestTerm(request)}` : ""}. Anki requires it.`);
     }
     const note = { deckName: current.config.deck, modelName: current.config.model, fields,
-      options: ankiNoteOptions(current.config), tags: [...new Set(current.config.tags)] };
+      options: ankiNoteOptions(current.config), tags: [...new Set([
+        ...current.config.tags, ...(request.subminerEnrich === false ? ["SubMiner::Stats"] : []),
+      ])] };
     return { ...current, note, resources, firstField, invoke: invokeFor(current.config) };
   }
 
   async function preflight(request) {
     const prepared = await prepare(request, false);
     if (prepared.resources.deferDuplicateCheck === true) {
-      const capture = captureForApplication(request, prepared.resolved.templates);
-      if (capture) await validateCapture({ request, prepared, capture });
       const extra = await preflightExtra({ request, prepared, applied: null, deferred: true });
       return {
         state: "addable",
         canAdd: true,
         error: null,
         deferred: true,
-        capture,
         screenshot: prepared.config.captureScreenshot === true
           && ankiCaptureRequirements(prepared.resolved.templates).includeScreenshot,
         ...(extra ?? {}),
@@ -313,8 +283,6 @@ export function createAnkiMiningService({
     }
     const result = await decision(prepared, request, duplicateIndex);
     const applied = result.canAdd ? fieldsForDecision(prepared, result) : null;
-    const capture = applied ? captureForApplication(request, applied.templates) : null;
-    if (capture) await validateCapture({ request, prepared, capture });
     const extra = await preflightExtra({ request, prepared, applied, deferred: false });
     return {
       state: result.state,
@@ -322,7 +290,6 @@ export function createAnkiMiningService({
       error: result.error,
       action: result.action,
       noteIds: result.noteIds,
-      capture,
       // A mapped {screenshot} that the user has left switched on: the reader
       // takes the viewport picture itself, when it submits. The whole
       // request-specific mapping decides, not the subset this preflight would
@@ -340,16 +307,13 @@ export function createAnkiMiningService({
     if (!checked.canAdd) return { state: checked.state, error: checked.error,
       action: checked.action, noteIds: checked.noteIds };
     const { config, configJson, firstField, note, invoke } = prepared;
-    const { fields, target, templates } = fieldsForDecision(prepared, checked);
-    const capture = captureForApplication(request, templates);
-    if (capture) await validateCapture({ request, prepared, capture });
+    const { fields, target } = fieldsForDecision(prepared, checked);
     if (JSON.stringify(await readConfig(request?.templateId)) !== configJson) throw new Error(CONFIG_CHANGED);
     const writeResources = await beforeWrite({
       request,
       ...prepared,
       target,
       appliedFields: fields,
-      capture,
     });
     // Failed media can restore a field's original value after preparation.
     // Leave it untouched instead of overwriting an intervening Anki edit.
@@ -362,17 +326,16 @@ export function createAnkiMiningService({
       await releaseRejected();
       throw new Error(CONFIG_CHANGED);
     }
-    // Uploads and configuration reads can outlive Stop. Validate the remaining
-    // write ownership last, with no unrelated await before sending the mutation.
+    // Validate the remaining write ownership before sending the mutation.
     try {
-      await beforeMutation({ request, capture, writeResources });
+      await beforeMutation({ request, writeResources });
     } catch (error) {
       await releaseRejected();
       throw error;
     }
     let noteId;
     try {
-      noteId = await writeAnkiNote(invoke, note, target, fields);
+      noteId = await writeAnkiNote(invoke, note, target, fields, checked.noteIds ?? [], request.subminerEnrich);
     } catch (error) {
       if (isAnkiDuplicateError(error.message)) {
         await releaseRejected();
@@ -406,10 +369,16 @@ export function createAnkiMiningService({
     } catch (error) {
       warnings.push(`Duplicate index: ${error.message}`);
     }
+    // A field an Anki add-on rewrote during the add (AJT Japanese fills furigana
+    // on note_will_be_added) is reported but does not make the note untrustworthy:
+    // enrichment re-reads and guards its own target fields before updating them.
+    // Only a failed readback, or a first field Anki did not save as submitted,
+    // leaves the note's identity unknown and skips the deferred pronunciation.
     let verified = false;
     try {
-      await verifyAnkiFields(invoke, noteId, fields);
-      verified = true;
+      const difference = ankiFieldDifferences(await readAnkiNoteFields(invoke, noteId), noteId, fields);
+      verified = difference === null || !difference.fields.includes(firstField);
+      if (difference !== null) warnings.push(difference.message);
     } catch (error) {
       warnings.push(error.message);
     }
@@ -420,12 +389,11 @@ export function createAnkiMiningService({
         noteId,
         existingFields: target?.fields,
         appliedFields: fields,
-        capture,
         writeResources,
         verified,
       });
     } catch (error) {
-      warnings.push(`Captured media cleanup: ${error.message}`);
+      warnings.push(error.message);
     }
     if (verified) {
       try {

@@ -76,13 +76,17 @@ target_link_options(hoshidicts_wasm PRIVATE
     -sMAXIMUM_MEMORY=4GB
     -sSTACK_SIZE=8MB
     -sFORCE_FILESYSTEM=1
-    -sEXPORTED_FUNCTIONS=_malloc,_free,_hdw_init_storage,_hdw_import,_hdw_reset,_hdw_add_dict,_hdw_remove_dict,_hdw_set_dict_order,_hdw_lookup,_hdw_lookup_dictionary,_hdw_kanji,_hdw_styles,_hdw_media,_hdw_media_data,_hdw_last_error
+    -sEXPORTED_FUNCTIONS=_malloc,_free,_hdw_init_storage,_hdw_import,_hdw_reset,_hdw_add_dict,_hdw_remove_dict,_hdw_set_dict_order,_hdw_lookup,_hdw_lookup_dictionary,_hdw_kanji,_hdw_styles,_hdw_media,_hdw_media_data,_hdw_page_cache_bytes,_hdw_last_error
 )
 
+# The pool is sized when the module starts: the bounded import worker group
+# plus one thread for the WasmFS OPFS proxy. A host that wants the low-memory
+# worker sets globalThis.HACHIDORI_PTHREAD_POOL_SIZE before createHoshidicts
+# (engine-worker-runtime.js: one importer thread plus the proxy).
 if(HACHIDORI_PTHREADS)
   target_link_options(hoshidicts_wasm PRIVATE
       -pthread
-      "SHELL:-sPTHREAD_POOL_SIZE=Math.max(2,Math.min(globalThis.navigator?.hardwareConcurrency||1,8))+1"
+      "SHELL:-sPTHREAD_POOL_SIZE=globalThis.HACHIDORI_PTHREAD_POOL_SIZE??(Math.max(2,Math.min(globalThis.navigator?.hardwareConcurrency||1,8))+1)"
       -sPTHREAD_POOL_SIZE_STRICT=2
       -sPTHREAD_POOL_DELAY_LOAD=0
       -sALLOW_BLOCKING_ON_MAIN_THREAD=0

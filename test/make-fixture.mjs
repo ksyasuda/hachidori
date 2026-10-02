@@ -661,6 +661,31 @@ export function dictionaryTabsFixture() {
   return { ...nested, rootReading, dictionaries: [{ title: nested.title, archive: nested.archive }, ...companions] };
 }
 
+// A clicked-kanji group: two kanji-bank-only dictionaries and one term
+// dictionary whose single-kanji entries answer the same characters (by default
+// 食, the kanji the ordinary fixture's verb 食べる links to). In memory, so the
+// generated fixture files and their documented counts are unchanged.
+export function kanjiGroupFixture(entries = [['食', 'しょく']]) {
+  const kanji = (title, meaning, strokes) => ({ title, kind: 'kanji', archive: buildZip([
+    zipEntry('index.json', JSON.stringify({ ...index, title })),
+    zipEntry('kanji_bank_1.json', JSON.stringify(entries.map(([character]) =>
+      [character, 'ショク ジキ', 'く.う た.べる', 'jouyou', [meaning], { strokes }]))),
+  ]) });
+  const termTitle = 'kanji-group-terms';
+  const termGlossary = 'kanji-group term single-kanji entry';
+  return {
+    character: entries[0][0],
+    termGlossary,
+    dictionaries: [
+      kanji('kanji-group-first', 'kanji-group first meaning', '9'),
+      { title: termTitle, kind: 'term', archive: buildTitledZip(termTitle, {
+        terms: entries.map(([character, reading]) => [character, reading, '', '', 100, [termGlossary], 1, '']),
+      }) },
+      kanji('kanji-group-second', 'kanji-group second meaning', '9'),
+    ],
+  };
+}
+
 export function frequencyRankingFixture() {
   const query = '頻度語';
   const readings = ['あ', 'い', 'う'];
@@ -709,6 +734,50 @@ export function compactSummaryFixture() {
       [summaryLookup, 'みじかいせつめい', '', '', 0, ['Alternative compact summary target.'], 2, ''],
     ] }) },
   ] };
+}
+
+// 大辞泉's の nests part-of-speech groups, numbered senses, ㋐ sub-senses and
+// ruby examples 25+ values deep, which is the shape that hit the former depth
+// limit (#287). Placeholder text stands in for the publisher's; the hierarchy
+// is what matters. `summary` is the compact preview the extractor owes each
+// group: every gloss in order, without the part-of-speech label or examples.
+export function structuredContentDeepFixture() {
+  const title = 'structured-content-deep-fixture';
+  const query = 'の';
+  const leaf = '第一語義の細分㋑の説明。';
+  const marked = (tag, marker, content) => ({ tag, data: { content: marker }, content });
+  const example = () => marked('div', 'examples', [marked('span', 'example', [
+    '「', { tag: 'ruby', content: ['用例', { tag: 'rt', content: 'ようれい' }] }, '」',
+  ])]);
+  const subsense = (mark, gloss) => ({ tag: 'li', content: [marked('div', 'subsense', [
+    marked('span', 'sense-mark', mark),
+    marked('span', 'gloss', [{ tag: 'span', lang: 'ja', content: gloss }]),
+    example(),
+  ])] });
+  const sense = (number, gloss, subsenses = []) => ({ tag: 'li', content: [marked('div', 'sense', [
+    marked('span', 'sense-number', number),
+    marked('span', 'gloss', gloss),
+    ...subsenses.length ? [marked('ol', 'subsenses', subsenses.map(entry => subsense(...entry)))] : [],
+  ])] });
+  const group = (partOfSpeech, senses) => ({ tag: 'li', content: [marked('div', 'sense-group', [
+    marked('span', 'part-of-speech', partOfSpeech),
+    marked('ol', 'senses', senses.map(entry => sense(...entry))),
+  ])] });
+  const glossary = [{ type: 'structured-content', content: [marked('div', 'entry', [
+    marked('div', 'headword', [{ tag: 'span', lang: 'ja', content: query }]),
+    marked('div', 'body', [marked('ol', 'sense-groups', [
+      group('［格助］', [
+        ['１', '第一語義の説明。', [['㋐', '第一語義の細分㋐の説明。'], ['㋑', leaf]]],
+        ['２', '第二語義の説明。'],
+      ]),
+      group('［終助］', [['１', '第三語義の説明。']]),
+    ])]),
+  ])] }];
+  return {
+    title, query, leaf, glossary: JSON.stringify(glossary),
+    summary: ['１第一語義の説明。㋐第一語義の細分㋐の説明。 ㋑第一語義の細分㋑の説明。 ２第二語義の説明。', '１第三語義の説明。'],
+    archive: () => buildTitledZip(title, { terms: [[query, query, '', '', 0, glossary, 1, '']] }),
+  };
 }
 
 export function imageSizingFixture() {
@@ -843,6 +912,28 @@ export function imagePreviewFixture() {
     ] },
   ], 1, '']], mediaEntries: images.map(({ path, bytes }) => [path, bytes]) });
   return { archive, images, query, title };
+}
+
+// Kanji dictionaries ship stroke-order strips and headword glyphs as
+// black-on-transparent SVGs tagged `appearance: "monochrome"`, which Yomitan
+// draws in the text colour. The same glyph is rendered once tagged and once
+// untagged so the recolouring can be proven to touch only the tagged image.
+export function monochromeImageFixture() {
+  const title = 'dictionary-monochrome-image-fixture';
+  const query = '単色画像';
+  const path = 'media/glyph.svg';
+  const bytes = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" viewBox="0 0 100 100">'
+    + '<rect x="10" y="10" width="80" height="80"/></svg>');
+  const cases = [
+    { name: 'monochrome', appearance: 'monochrome' },
+    { name: 'auto', appearance: 'auto' },
+  ];
+  const archive = buildTitledZip(title, { terms: [[query, 'たんしょくがぞう', '', '', 0, [
+    { type: 'structured-content', content: cases.map(({ name, appearance }) => ({
+      tag: 'img', path, width: 64, height: 64, alt: `${name} glyph`, appearance,
+    })) },
+  ], 1, '']], mediaEntries: [[path, bytes]] });
+  return { archive, bytes, cases, path, query, title };
 }
 
 // Small deterministic stand-ins for the recommended downloads. The browser

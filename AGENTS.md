@@ -8,6 +8,7 @@ These instructions apply to the entire repository.
 - Keep each pull request to one coherent outcome that can be understood, tested, and reviewed independently.
 - Commit frequently in small, coherent units. Prefer a failing focused contract test followed promptly by its implementation commit when test-first work is practical.
 - Prefer the smallest straightforward change that satisfies the request and fits the existing architecture.
+- Prefer established, maintained libraries for standard functionality over implementing it from scratch; check existing dependencies first and keep custom code focused on application-specific integration.
 - Do not mix requested work with drive-by refactors, renames, formatting churn, dependency updates, or unrelated cleanup.
 - Deduplicate an invariant or algorithm when two runtime contexts genuinely need the same behavior; do not introduce a framework for a one-off.
 - Read `CONTRIBUTING.md` and the relevant architecture or test documentation before changing an unfamiliar area.
@@ -19,6 +20,12 @@ These instructions apply to the entire repository.
 - Dictionary archives are user-selected local inputs. Do not invent fixed limits for archive bytes, entry counts, expanded size, or compression ratios unless the task explicitly requires them. Preserve existing path and import-staging correctness boundaries.
 - Do not add broad or extensive test coverage by default. Add a focused regression test when behavior changes or a bug needs to stay fixed; do not duplicate coverage already provided by a suitable suite.
 - Avoid adding test-only dependencies or expanding fixtures unless the changed behavior genuinely needs them.
+
+## Accessibility
+
+- Changes to colour, contrast, dictionary-image colouring, focus or keyboard navigation, screen-reader semantics, motion, or font sizing affect accessibility.
+- Open an accessibility-affecting change with the `accessibility` label and screenshots of the affected palettes.
+- Under Windows contrast themes, masked image layers need `forced-color-adjust: none` and a `CanvasText` background in `@media (forced-colors: active)` so the glyph remains visible.
 
 ## Issue #9 scope and phases
 
@@ -61,6 +68,7 @@ When implementing the dictionary-only scope from issue #9:
 - Generalize the offscreen import lock to a mutation lock for custom saves/appends. Reuse private staging/import helpers; do not recursively invoke the public queued import handler.
 - The fixed Note form is shared by term and kanji views. Treat append success separately from best-effort lookup refresh so a refresh error cannot invite a duplicate retry. Refresh the exact current request/view only if it is still current and anchored, and make reply/state-event ordering harmless by adopting only newer committed revisions.
 - While the Note form is open, Escape closes the form before document capture can hide the popup, and hover-hide timers must not discard the draft.
+- Reading → Personal dictionary → Use the personal dictionary (`personalDictionaryEnabled`) is a reader option, not package state. Off, it stops automatic selection lookups, hides the pencil and filters personal glossaries out of lookup replies in the engine service; it never disables, reorders, recompiles or removes the managed package.
 
 ## Lookup statistics and definition blur
 
@@ -75,10 +83,9 @@ When implementing the dictionary-only scope from issue #9:
 Settings → Advanced → Experimental features is the one place a feature that is still changing is switched on or off.
 
 - An experimental feature is one entry in `EXPERIMENTAL_FEATURES` in `extension/reader-options.js` (`id`, `label`, `description`, optional `section`) plus its `false` default under `options.experimental`. Add the entry and the default together; do not introduce a parallel storage key, a separate save path, or a second registry. `experimental-settings.js` renders the switches from that registry and needs no per-feature code.
-- Flags are booleans under `options.experimental` and travel through the existing revisioned `hd_options_write`, `normaliseOptions`, and backup paths. A patch must carry the complete record with known ids and boolean values, as `mediaCapture` does; stored garbage normalises to the default without throwing.
-- A feature's own settings live where they always did. Turning a flag off hides the feature and keeps those settings; it must not clear them. When a feature has an enable switch that keeps runtime work going (Media mining → `mediaCapture.enabled`), the Settings toggle is responsible for switching it off in the same save so nothing stays active behind a hidden section. Runtime code gates on the feature's own enable switch, not on the flag.
+- Flags are booleans under `options.experimental` and travel through the existing revisioned `hd_options_write`, `normaliseOptions`, and backup paths. A patch must carry the complete record with known ids and boolean values, as the existing feature flags do; stored garbage normalises to the default without throwing.
+- A feature's own settings live where they always did. Turning a flag off hides the feature and keeps those settings; it must not clear them. Runtime code gates on the feature's own enable switch, not on the flag.
 - A feature that names a Settings `section` keeps that section, its rail link and its picker option hidden while off, and a hash request for it resolves to `#advanced`. Real-Chrome suites that open a gated section turn its switch on first.
-- Migration is stateless and lives in `normaliseOptions`: only a stored record with no `experimental` key derives a flag from legacy state (Media mining from `mediaCapture.enabled`). Once Settings has written the record, the stored value wins.
 - Removing a flag means deleting its registry entry and default, dropping its gate, and leaving its feature permanently on or removing the feature; do not keep dead flags.
 
 ## Repository map
@@ -97,6 +104,7 @@ Run the narrowest existing checks that exercise the change:
 - Documentation-only changes: inspect the rendered Markdown, links, and final diff; code tests are not required.
 - Fixture, C ABI, or WebAssembly changes: rebuild when needed, then run `node test/make-fixture.mjs` and `node test/node-smoke.mjs`.
 - Extension runtime or renderer changes: run `node test/make-fixture.mjs` and `node test/extension-smoke.mjs`.
+- Palette, theme, popup-styling or dictionary-image styling changes: also run `node test/chrome-theme-contrast.mjs` and attach its `test/tmp/ci/theme-contrast.png` filmstrip.
 - Relay source, packaging, socket and installed-Anki checks live in [hachidori-anki](https://github.com/bee-san/hachidori-anki). Run that repository's checks for relay changes.
 - Sharing protocol, host, client, Settings, startup-page or pinned add-on version changes: also run `node --test test/sharing-protocol.test.mjs test/sharing-settings.test.mjs test/anki-addon.test.mjs` and `node test/chrome-sharing.mjs`. The browser suite needs `python3`, a network address beyond loopback, and access to the pinned GitHub release; `HACHIDORI_ANKI_ADDON=/path/to/hachidori-relay.ankiaddon` supplies a local artifact for offline or coordinated changes.
 - Manifest, service worker, offscreen lifecycle, IndexedDB persistence, content-script, or visible popup changes: also run `node test/chrome-e2e.mjs`.

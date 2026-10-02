@@ -1,0 +1,446 @@
+{
+  "default": {
+    "profiles": 6,
+    "coldFirstMs": {
+      "n": 6,
+      "median": 31.94999998807907,
+      "p95": 33.400000005960464
+    },
+    "coldCompleteMs": {
+      "n": 6,
+      "median": 49.80000001192093,
+      "p95": 49.900000005960464
+    },
+    "warmFirstMs": {
+      "n": 144,
+      "median": 16.900000005960464,
+      "p95": 17.299999982118607
+    },
+    "warmCompleteMs": {
+      "n": 144,
+      "median": 33.29999998211861,
+      "p95": 33.400000005960464
+    },
+    "renderMs": {
+      "n": 144,
+      "median": 2.25,
+      "p95": 4.5
+    },
+    "nodes": {
+      "n": 144,
+      "median": 77,
+      "p95": 352
+    },
+    "scriptMs": {
+      "n": 144,
+      "median": 1.2209999999999999,
+      "p95": 1.4830000000000017
+    },
+    "styleMs": {
+      "n": 144,
+      "median": 0.7500000000000007,
+      "p95": 1.6469999999999991
+    },
+    "layoutMs": {
+      "n": 144,
+      "median": 0.7419999999999995,
+      "p95": 1.6480000000000037
+    },
+    "heapBytes": {
+      "n": 144,
+      "median": 3452884,
+      "p95": 3907756
+    },
+    "rendererWork": [
+      {
+        "defaultViews": 2,
+        "richGlossaries": 296,
+        "dictionaryStyles": 1
+      },
+      {
+        "defaultViews": 2,
+        "richGlossaries": 296,
+        "dictionaryStyles": 1
+      },
+      {
+        "defaultViews": 2,
+        "richGlossaries": 296,
+        "dictionaryStyles": 1
+      },
+      {
+        "defaultViews": 2,
+        "richGlossaries": 296,
+        "dictionaryStyles": 1
+      },
+      {
+        "defaultViews": 2,
+        "richGlossaries": 296,
+        "dictionaryStyles": 1
+      },
+      {
+        "defaultViews": 2,
+        "richGlossaries": 296,
+        "dictionaryStyles": 1
+      }
+    ],
+    "coldSamples": [
+      {
+        "firstMs": 33.400000005960464,
+        "completeMs": 49.80000001192093
+      },
+      {
+        "firstMs": 32.19999998807907,
+        "completeMs": 49.79999998211861
+      },
+      {
+        "firstMs": 32.5,
+        "completeMs": 49.80000001192093
+      },
+      {
+        "firstMs": 30.799999982118607,
+        "completeMs": 49.900000005960464
+      },
+      {
+        "firstMs": 30.700000017881393,
+        "completeMs": 49.80000001192093
+      },
+      {
+        "firstMs": 31.69999998807907,
+        "completeMs": 49.89999997615814
+      }
+    ]
+  },
+  "nazeka": {
+    "profiles": 6,
+    "coldFirstMs": {
+      "n": 6,
+      "median": 24.299999997019768,
+      "p95": 25.099999994039536
+    },
+    "coldCompleteMs": {
+      "n": 6,
+      "median": 33.20000000298023,
+      "p95": 33.20000001788139
+    },
+    "warmFirstMs": {
+      "n": 144,
+      "median": 16.80000001192093,
+      "p95": 16.900000005960464
+    },
+    "warmCompleteMs": {
+      "n": 144,
+      "median": 33.20000001788139,
+      "p95": 33.400000005960464
+    },
+    "renderMs": {
+      "n": 144,
+      "median": 0.800000011920929,
+      "p95": 1.5
+    },
+    "nodes": {
+      "n": 144,
+      "median": 18,
+      "p95": 90
+    },
+    "scriptMs": {
+      "n": 144,
+      "median": 0.732,
+      "p95": 0.9489999999999985
+    },
+    "styleMs": {
+      "n": 144,
+      "median": 0.22900000000000004,
+      "p95": 0.30100000000000005
+    },
+    "layoutMs": {
+      "n": 144,
+      "median": 0.28500000000000053,
+      "p95": 0.7220000000000004
+    },
+    "heapBytes": {
+      "n": 144,
+      "median": 2884530,
+      "p95": 3316136
+    },
+    "rendererWork": [
+      {
+        "defaultViews": 0,
+        "richGlossaries": 0,
+        "dictionaryStyles": 0
+      },
+      {
+        "defaultViews": 0,
+        "richGlossaries": 0,
+        "dictionaryStyles": 0
+      },
+      {
+        "defaultViews": 0,
+        "richGlossaries": 0,
+        "dictionaryStyles": 0
+      },
+      {
+        "defaultViews": 0,
+        "richGlossaries": 0,
+        "dictionaryStyles": 0
+      },
+      {
+        "defaultViews": 0,
+        "richGlossaries": 0,
+        "dictionaryStyles": 0
+      },
+      {
+        "defaultViews": 0,
+        "richGlossaries": 0,
+        "dictionaryStyles": 0
+      }
+    ],
+    "coldSamples": [
+      {
+        "firstMs": 24.799999982118607,
+        "completeMs": 33.19999998807907
+      },
+      {
+        "firstMs": 25.099999994039536,
+        "completeMs": 33.19999998807907
+      },
+      {
+        "firstMs": 24.900000005960464,
+        "completeMs": 33.19999998807907
+      },
+      {
+        "firstMs": 23.80000001192093,
+        "completeMs": 33.20000001788139
+      },
+      {
+        "firstMs": 23.599999994039536,
+        "completeMs": 33.20000001788139
+      },
+      {
+        "firstMs": 23.5,
+        "completeMs": 33.20000001788139
+      }
+    ]
+  },
+  "plain": {
+    "profiles": 6,
+    "coldFirstMs": {
+      "n": 6,
+      "median": 16.650000005960464,
+      "p95": 16.700000017881393
+    },
+    "coldCompleteMs": {
+      "n": 6,
+      "median": 33.19999998807907,
+      "p95": 33.20000001788139
+    },
+    "warmFirstMs": {
+      "n": 144,
+      "median": 16.700000017881393,
+      "p95": 16.899999976158142
+    },
+    "warmCompleteMs": {
+      "n": 144,
+      "median": 33.20000001788139,
+      "p95": 33.30000001192093
+    },
+    "renderMs": {
+      "n": 144,
+      "median": 0.4000000059604645,
+      "p95": 0.7999999821186066
+    },
+    "nodes": {
+      "n": 144,
+      "median": 1,
+      "p95": 1
+    },
+    "scriptMs": {
+      "n": 144,
+      "median": 0.5529999999999979,
+      "p95": 0.7670000000000003
+    },
+    "styleMs": {
+      "n": 144,
+      "median": 0.13199999999999995,
+      "p95": 0.14900000000000005
+    },
+    "layoutMs": {
+      "n": 144,
+      "median": 0.14899999999999983,
+      "p95": 0.46299999999999986
+    },
+    "heapBytes": {
+      "n": 144,
+      "median": 2856124,
+      "p95": 3245576
+    },
+    "rendererWork": [
+      {
+        "defaultViews": 0,
+        "richGlossaries": 0,
+        "dictionaryStyles": 0
+      },
+      {
+        "defaultViews": 0,
+        "richGlossaries": 0,
+        "dictionaryStyles": 0
+      },
+      {
+        "defaultViews": 0,
+        "richGlossaries": 0,
+        "dictionaryStyles": 0
+      },
+      {
+        "defaultViews": 0,
+        "richGlossaries": 0,
+        "dictionaryStyles": 0
+      },
+      {
+        "defaultViews": 0,
+        "richGlossaries": 0,
+        "dictionaryStyles": 0
+      },
+      {
+        "defaultViews": 0,
+        "richGlossaries": 0,
+        "dictionaryStyles": 0
+      }
+    ],
+    "coldSamples": [
+      {
+        "firstMs": 16.69999998807907,
+        "completeMs": 33.19999998807907
+      },
+      {
+        "firstMs": 16.600000023841858,
+        "completeMs": 33.10000002384186
+      },
+      {
+        "firstMs": 16.599999994039536,
+        "completeMs": 33.19999998807907
+      },
+      {
+        "firstMs": 16.700000017881393,
+        "completeMs": 33.10000002384186
+      },
+      {
+        "firstMs": 16.69999998807907,
+        "completeMs": 33.19999998807907
+      },
+      {
+        "firstMs": 16.599999994039536,
+        "completeMs": 33.20000001788139
+      }
+    ]
+  },
+  "jl": {
+    "profiles": 6,
+    "coldFirstMs": {
+      "n": 6,
+      "median": 24.849999994039536,
+      "p95": 26.599999994039536
+    },
+    "coldCompleteMs": {
+      "n": 6,
+      "median": 33.19999998807907,
+      "p95": 35.20000001788139
+    },
+    "warmFirstMs": {
+      "n": 144,
+      "median": 16.799999982118607,
+      "p95": 16.900000005960464
+    },
+    "warmCompleteMs": {
+      "n": 144,
+      "median": 33.20000001788139,
+      "p95": 33.400000005960464
+    },
+    "renderMs": {
+      "n": 144,
+      "median": 0.800000011920929,
+      "p95": 1.4000000059604645
+    },
+    "nodes": {
+      "n": 144,
+      "median": 20,
+      "p95": 34
+    },
+    "scriptMs": {
+      "n": 144,
+      "median": 0.6550000000000011,
+      "p95": 0.8439999999999975
+    },
+    "styleMs": {
+      "n": 144,
+      "median": 0.232,
+      "p95": 0.27700000000000036
+    },
+    "layoutMs": {
+      "n": 144,
+      "median": 0.2605000000000003,
+      "p95": 0.5839999999999977
+    },
+    "heapBytes": {
+      "n": 144,
+      "median": 2889820,
+      "p95": 3322924
+    },
+    "rendererWork": [
+      {
+        "defaultViews": 0,
+        "richGlossaries": 0,
+        "dictionaryStyles": 0
+      },
+      {
+        "defaultViews": 0,
+        "richGlossaries": 0,
+        "dictionaryStyles": 0
+      },
+      {
+        "defaultViews": 0,
+        "richGlossaries": 0,
+        "dictionaryStyles": 0
+      },
+      {
+        "defaultViews": 0,
+        "richGlossaries": 0,
+        "dictionaryStyles": 0
+      },
+      {
+        "defaultViews": 0,
+        "richGlossaries": 0,
+        "dictionaryStyles": 0
+      },
+      {
+        "defaultViews": 0,
+        "richGlossaries": 0,
+        "dictionaryStyles": 0
+      }
+    ],
+    "coldSamples": [
+      {
+        "firstMs": 25,
+        "completeMs": 33.19999998807907
+      },
+      {
+        "firstMs": 24.69999998807907,
+        "completeMs": 33.099999994039536
+      },
+      {
+        "firstMs": 25.099999994039536,
+        "completeMs": 33.19999998807907
+      },
+      {
+        "firstMs": 24.30000001192093,
+        "completeMs": 33.099999994039536
+      },
+      {
+        "firstMs": 24.100000023841858,
+        "completeMs": 33.20000001788139
+      },
+      {
+        "firstMs": 26.599999994039536,
+        "completeMs": 35.20000001788139
+      }
+    ]
+  }
+}

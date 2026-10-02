@@ -5,8 +5,7 @@
 (function () {
   "use strict";
 
-  const ANKI_FIELDS = ["expression", "reading", "definition", "sentence", "frequency", "pitch", "audio",
-    "captureAnimation", "captureAudio", "screenshot"];
+  const ANKI_FIELDS = ["expression", "reading", "definition", "sentence", "frequency", "pitch", "audio", "screenshot"];
   const ANKI_DUPLICATE_SCOPES = ["model", "deck", "all"];
   const ANKI_DUPLICATE_BEHAVIORS = ["prevent", "new", "overwrite"];
   const ANKI_OVERWRITE_MODES = ["coalesce", "coalesce-new", "skip", "append", "prepend", "overwrite"];
@@ -26,29 +25,20 @@
     templates: [DEFAULT_ANKI_TEMPLATE],
     ...Object.fromEntries(ANKI_TEMPLATE_CONFIG_KEYS.map(key => [key, DEFAULT_ANKI_TEMPLATE[key]])),
   };
-  const DEFAULT_MEDIA_CAPTURE = {
-    enabled: false,
-    timingMode: "auto",
-    includeAnimation: true,
-    includeCapturedAudio: true,
-    historySeconds: 60,
-    clipSeconds: 10,
-    videoPreset: "standard",
-    estimatedOffsetMs: -500,
-    texthooker: { enabled: false, url: "", format: "plain" },
-    page: { nativeCues: true, domText: true, autoLearnArea: true },
-  };
   // Settings → Advanced → Experimental features. Each entry is one boolean flag
   // under `options.experimental`; `section` names the Settings card the flag
-  // reveals. A feature's own settings live where they always did, so turning
-  // a flag off keeps them for the next time it is turned on.
+  // reveals.
   const EXPERIMENTAL_FEATURES = [
-    { id: "mediaMining", label: "Media mining", section: "media",
-      description: "Record screen and audio clips from the page for Anki notes. Shows the Media capture section." },
+    { id: "themeStore", label: "Theme Store",
+      description: "Try Default, Nazeka, Plain and JL popup layouts in Design." },
     { id: "longKeyScan", label: "Long dictionary entries",
       description: "Find dictionary entries longer than the scan length. The reader collects more page text only when an installed dictionary lists such entries, and the engine reads further only when the text starts like one of them." },
     { id: "mdxImport", label: "MDX dictionaries",
       description: "Import MDict .mdx dictionaries, with their .mdd resource files, from Add dictionaries. Choose the .mdx and its .mdd files together." },
+    { id: "googleDocs", label: "Google Docs",
+      description: "Look up words in Google Docs. Asks Google Docs to expose its text to Hachidori, which Google may change or remove without notice; the sentence is the hovered run of text." },
+    { id: "smallerAnkiCards", label: "Smaller Anki cards",
+      description: "Write compact definitions to new Anki notes: dictionary stylesheets, classes and wrappers are left out, keeping the text, line breaks, lists, tables, furigana and images. Notes already in Anki are not changed." },
   ];
   const DEFAULT_EXPERIMENTAL = Object.fromEntries(EXPERIMENTAL_FEATURES.map(feature => [feature.id, false]));
   // yomitan-gsm hotkey actions that map onto existing Hachidori behaviour, in
@@ -101,10 +91,18 @@
     maxResults: 32,
     hoverEnabled: true,
     onlyScanJapaneseText: true,
+    // Reading → Personal dictionary: highlight lookups, the pencil and personal
+    // entries in results. Off never touches the managed package or its source.
+    personalDictionaryEnabled: true,
+    showNoResultNotice: true,
     lookupMode: "activationSticky",
     activationKey: "Shift",
+    definitionLookupMode: "inherit",
     hoverDelayMs: 0,
     popupHideDelayMs: 160,
+    // Yomitan's scanning.hidePopupOnCursorExit and hidePopupOnCursorExitDelay.
+    hidePopupOnCursorExit: false,
+    hidePopupOnCursorExitDelayMs: 160,
     popupNestingMaxDepth: 10,
     popupTheme: "default",
     popupToolbarPosition: "auto",
@@ -115,7 +113,6 @@
     audioSources: [{ id: "default-tts", type: "text-to-speech-reading", enabled: true, url: "", voice: "" }],
     audioAutoplay: false,
     anki: DEFAULT_ANKI,
-    mediaCapture: DEFAULT_MEDIA_CAPTURE,
     experimental: DEFAULT_EXPERIMENTAL,
     popupWidthPx: 560,
     popupHeightPx: 420,
@@ -141,22 +138,34 @@
     popupImageSource: null,
     averageFrequency: false,
     showFrequencyDictionaryNames: false,
+    compactFrequencyNumbers: false,
     showPitchAccentFurigana: true,
     pitchAccentFuriganaDictionary: "",
     showPitchAccentBadge: true,
+    // Yomitan labels every pronunciation group with its dictionary.
+    showPitchAccentDictionaryNames: true,
+    // Yomitan's downstep text, position and graph notations, with its defaults.
+    showPitchAccentText: true,
+    showPitchAccentPosition: true,
+    showPitchAccentGraph: false,
     hidePopupGrammarTags: true,
     kanjiClickDictionary: "",
     frequencyDictionary: "",
     frequencyOrder: "auto",
     automaticBackupDays: 2,
+    // Recycle the engine worker after dictionary changes and import on one
+    // thread; see docs/memory.md. Not a reader behaviour, so no hotkey toggle.
+    lowMemoryMode: false,
     keybinds: DEFAULT_KEYBINDS,
   };
-  const KEYBIND_TOGGLE_OPTIONS = Object.keys(DEFAULT_OPTIONS).filter(key => typeof DEFAULT_OPTIONS[key] === "boolean");
+  const KEYBIND_TOGGLE_OPTIONS = Object.keys(DEFAULT_OPTIONS)
+    .filter(key => typeof DEFAULT_OPTIONS[key] === "boolean" && key !== "lowMemoryMode");
   const NUMBER_RANGES = {
     scanLength: [1, 64],
     maxResults: [1, 256],
     hoverDelayMs: [0, 2000],
     popupHideDelayMs: [0, 5000],
+    hidePopupOnCursorExitDelayMs: [0, 5000],
     popupNestingMaxDepth: [0, Number.MAX_SAFE_INTEGER],
     popupWidthPx: [280, 1200],
     popupHeightPx: [200, 900],
@@ -189,17 +198,36 @@
       : id.replace(/(^|-)([a-z])/gu, (_, separator, letter) => `${separator ? " " : ""}${letter.toUpperCase()}`),
   })) }));
   const POPUP_THEME_IDS = new Set(POPUP_THEME_GROUPS.flatMap(group => group.themes.map(theme => theme.id)));
+  const POPUP_RENDERER_IDS = ["nazeka", "plain", "jl"];
+  for (const id of POPUP_RENDERER_IDS) POPUP_THEME_IDS.add(id);
+  const popupRenderer = theme => POPUP_RENDERER_IDS.includes(theme) ? theme : "default";
   const DESIGN_OPTION_KEYS = [
     "popupTheme", "popupToolbarPosition", "customPopupCss", "customPopupJavascript", "customLinks", "customButtons", "popupWidthPx", "popupHeightPx", "popupScalePercent", "popupOpacityPercent", "sourceHighlightEnabled", "showPopupAudioButton", "popupColumns",
     "showCompactDefinitionSummary", "compactDefinitionSummaryCount", "compactDefinitionSummaryDictionary",
     "kanjiClickDictionary", "popupImageSource", "averageFrequency", "showFrequencyDictionaryNames",
-    "showPitchAccentFurigana", "pitchAccentFuriganaDictionary", "showPitchAccentBadge", "hidePopupGrammarTags",
+    "compactFrequencyNumbers", "showPitchAccentFurigana", "pitchAccentFuriganaDictionary", "showPitchAccentBadge",
+    "showPitchAccentDictionaryNames", "showPitchAccentText", "showPitchAccentPosition", "showPitchAccentGraph",
+    "hidePopupGrammarTags",
   ];
   const LEGACY_MODIFIERS = new Map([["none", "Shift"], ["shift", "Shift"], ["ctrl", "Control"], ["alt", "Alt"]]);
   const LOOKUP_MODES = ["hover", "activation", "activationSticky"];
+  // How words in a popup's definitions open child popups. "inherit" follows lookupMode.
+  const DEFINITION_LOOKUP_MODES = ["inherit", "activation", "click"];
   const POPUP_TOOLBAR_POSITIONS = new Set(["auto", "top", "bottom"]);
-  // Browser KeyboardEvent names, adapting the source's desktop hotkey names.
+  // Mouse buttons that can be held to scan instead of a key. `button` is
+  // MouseEvent.button and `flag` its MouseEvent.buttons bit: the two numberings
+  // differ (middle is 1 and 4). Yomitan names buttons by bit index, so its
+  // `mouse2` is the middle button; the stored names are descriptive instead.
+  // `name` is the Settings choice and `label` reads in a sentence.
+  const ACTIVATION_BUTTONS = new Map([
+    ["MouseMiddle", { button: 1, flag: 4, name: "Middle mouse button", label: "the middle mouse button" }],
+    ["MouseBack", { button: 3, flag: 8, name: "Back mouse button (mouse 4)", label: "the Back mouse button" }],
+    ["MouseForward", { button: 4, flag: 16, name: "Forward mouse button (mouse 5)", label: "the Forward mouse button" }],
+  ]);
+  // The mouse buttons, then browser KeyboardEvent names adapting the source's
+  // desktop hotkey names.
   const ACTIVATION_KEYS = [
+    ...ACTIVATION_BUTTONS.keys(),
     "Shift", "Control", "Alt", "Meta", "Space", "Enter", "Escape", "Backspace", "Delete", "Tab",
     "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown", "Insert",
     ..."ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
@@ -212,97 +240,9 @@
   const AUDIO_SOURCE_LABELS = { custom: "Audio URL", "custom-json": "Yomitan JSON",
     "text-to-speech": "Speech: term", "text-to-speech-reading": "Speech: reading" };
   const AUDIO_SOURCE_TYPES = Object.keys(AUDIO_SOURCE_LABELS);
-  const MEDIA_TIMING_MODES = ["auto", "page", "recent"];
-  const MEDIA_HISTORY_SECONDS = [30, 60];
-  const MEDIA_CLIP_SECONDS = [5, 10];
-  const MEDIA_VIDEO_PRESETS = ["standard", "compact"];
-  const MEDIA_TEXTHOOKER_FORMATS = ["plain", "gsm"];
-  const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]"]);
-
-  function cloneMediaCapture(value = DEFAULT_MEDIA_CAPTURE) {
-    return {
-      ...value,
-      texthooker: { ...value.texthooker },
-      page: { ...value.page },
-    };
-  }
-
-  function normaliseTexthookerUrl(value) {
-    if (typeof value !== "string" || value === "") return "";
-    try {
-      const url = new URL(value);
-      if (!["ws:", "wss:"].includes(url.protocol) || !LOOPBACK_HOSTS.has(url.hostname)
-          || url.username || url.password || url.hash) return null;
-      return url.toString();
-    } catch {
-      return null;
-    }
-  }
-
-  function normaliseCaptureCollectors(source, result) {
-    const texthooker = source.texthooker && typeof source.texthooker === "object"
-      && !Array.isArray(source.texthooker) ? source.texthooker : {};
-    const page = source.page && typeof source.page === "object" && !Array.isArray(source.page) ? source.page : {};
-    if (typeof texthooker.enabled === "boolean") result.texthooker.enabled = texthooker.enabled;
-    const url = normaliseTexthookerUrl(texthooker.url);
-    if (url !== null) result.texthooker.url = url;
-    if (MEDIA_TEXTHOOKER_FORMATS.includes(texthooker.format)) result.texthooker.format = texthooker.format;
-    for (const key of ["nativeCues", "domText", "autoLearnArea"]) {
-      if (typeof page[key] === "boolean") result.page[key] = page[key];
-    }
-    if (result.texthooker.enabled && !result.texthooker.url) result.texthooker.enabled = false;
-  }
-
-  function normaliseMediaCapture(value) {
-    const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
-    const result = cloneMediaCapture();
-    for (const key of ["enabled", "includeAnimation", "includeCapturedAudio"]) {
-      if (typeof source[key] === "boolean") result[key] = source[key];
-    }
-    if (MEDIA_TIMING_MODES.includes(source.timingMode)) result.timingMode = source.timingMode;
-    if (MEDIA_HISTORY_SECONDS.includes(source.historySeconds)) result.historySeconds = source.historySeconds;
-    if (MEDIA_CLIP_SECONDS.includes(source.clipSeconds)) result.clipSeconds = source.clipSeconds;
-    if (MEDIA_VIDEO_PRESETS.includes(source.videoPreset)) result.videoPreset = source.videoPreset;
-    if (Number.isInteger(source.estimatedOffsetMs)
-        && source.estimatedOffsetMs >= -2000 && source.estimatedOffsetMs <= 2000) {
-      result.estimatedOffsetMs = source.estimatedOffsetMs;
-    }
-    if (!result.includeAnimation && !result.includeCapturedAudio) {
-      result.includeAnimation = DEFAULT_MEDIA_CAPTURE.includeAnimation;
-      result.includeCapturedAudio = DEFAULT_MEDIA_CAPTURE.includeCapturedAudio;
-    }
-    normaliseCaptureCollectors(source, result);
-    return result;
-  }
-
   function sameFields(left, right, keys) {
     return keys.every(key => Object.hasOwn(left, key) && left[key] === right[key]);
   }
-
-  function sameMediaCapture(left, right) {
-    const keys = Object.keys(DEFAULT_MEDIA_CAPTURE).filter(key => !["texthooker", "page"].includes(key));
-    return Object.hasOwn(left, "texthooker")
-      && Object.hasOwn(left, "page")
-      && sameFields(left, right, keys)
-      && sameFields(left.texthooker, right.texthooker, Object.keys(DEFAULT_MEDIA_CAPTURE.texthooker))
-      && sameFields(left.page, right.page, Object.keys(DEFAULT_MEDIA_CAPTURE.page));
-  }
-
-  function validMediaCapture(value, normalized) {
-    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-    if (!value.texthooker || typeof value.texthooker !== "object" || Array.isArray(value.texthooker)
-        || !value.page || typeof value.page !== "object" || Array.isArray(value.page)) return false;
-    const keys = Object.keys(DEFAULT_MEDIA_CAPTURE);
-    const texthookerKeys = Object.keys(DEFAULT_MEDIA_CAPTURE.texthooker);
-    const pageKeys = Object.keys(DEFAULT_MEDIA_CAPTURE.page);
-    if (Object.keys(value).some(key => !keys.includes(key))
-        || Object.keys(value.texthooker).some(key => !texthookerKeys.includes(key))
-        || Object.keys(value.page).some(key => !pageKeys.includes(key))) return false;
-    return sameMediaCapture(value, normalized)
-      && (normalized.includeAnimation || normalized.includeCapturedAudio)
-      && (!normalized.texthooker.enabled || Boolean(normalized.texthooker.url));
-  }
-
   function normaliseExperimental(value) {
     const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
     const result = { ...DEFAULT_EXPERIMENTAL };
@@ -560,6 +500,11 @@
     return typeof value === "string" ? ACTIVATION_NAMES.get(value.toLowerCase()) ?? fallback : fallback;
   }
 
+  // The activation input as it reads in "Hold … to scan": a key by its name.
+  function activationLabel(key) {
+    return ACTIVATION_BUTTONS.get(key)?.label ?? key;
+  }
+
   function clampOption(key, value) {
     let number;
     try {
@@ -576,12 +521,17 @@
 
   /**
    * Preserve legacy title-only selections until dictionary state can infer kind.
-   * @returns {string | {title: string, kind: "term" | "kanji"}}
+   * A group is referenced by its stable ID, as the Image source option does.
+   * @returns {string | {title: string, kind: "term" | "kanji"} | {kind: "tabGroup", id: string}}
    */
   function normaliseKanjiSelection(value) {
-    if (value && typeof value === "object" && typeof value.title === "string"
-        && value.title !== "" && (value.kind === "term" || value.kind === "kanji")) {
-      return { title: value.title, kind: value.kind };
+    if (value && typeof value === "object") {
+      if (value.kind === "tabGroup" && typeof value.id === "string" && value.id !== "") {
+        return { kind: "tabGroup", id: value.id };
+      }
+      if (typeof value.title === "string" && value.title !== "" && (value.kind === "term" || value.kind === "kanji")) {
+        return { title: value.title, kind: value.kind };
+      }
     }
     return typeof value === "string" ? value : "";
   }
@@ -628,6 +578,7 @@
   // Enumerated options fall back to their default outside the listed values.
   const ENUMERATED_OPTIONS = {
     lookupMode: new Set(LOOKUP_MODES),
+    definitionLookupMode: new Set(DEFINITION_LOOKUP_MODES),
     popupTheme: POPUP_THEME_IDS,
     popupToolbarPosition: POPUP_TOOLBAR_POSITIONS,
     frequencyOrder: new Set(FREQUENCY_ORDERS),
@@ -652,23 +603,36 @@
       case "customButtons": return normaliseCustomButtons(value);
       case "keybinds": return normaliseKeybinds(value);
       case "anki": return normaliseAnki(value);
-      case "mediaCapture": return normaliseMediaCapture(value);
       case "experimental": return normaliseExperimental(value);
       default: return typeof value === "string" ? value : "";
     }
   }
 
-  function resolveKanjiDictionary(selection, dictionaries) {
+  // A dictionary's clicked-kanji capability: native kanji entries when it has
+  // them, otherwise its term entries. Metadata-only packages have neither.
+  function kanjiCapability(dictionary, requestedKind = "") {
+    if (!dictionary || dictionary.enabled === false) return null;
+    const defaultKind = dictionary.kanjiCount > 0 ? "kanji" : "term";
+    const kind = requestedKind === "" ? defaultKind : requestedKind;
+    const available = kind === "kanji" ? dictionary.kanjiCount > 0 : dictionary.termCount > 0
+      || (dictionary.frequencyCount === 0 && dictionary.pitchCount === 0 && dictionary.kanjiCount === 0);
+    return available ? { kind, title: dictionary.title } : null;
+  }
+
+  // Null means Automatic native kanji. A group yields its eligible members in
+  // group order so a click can ask every one of them at once.
+  function resolveKanjiDictionary(selection, dictionaries, groups = []) {
+    if (selection?.kind === "tabGroup") {
+      const group = groups.find(entry => entry.id === selection.id);
+      const members = (group?.dictionaryIds || [])
+        .map(id => kanjiCapability(dictionaries.find(entry => entry.id === id)))
+        .filter(member => member !== null);
+      return members.length > 0 ? { kind: "group", members } : null;
+    }
     const title = typeof selection === "string" ? selection : selection?.title;
     if (typeof title !== "string" || title === "") return null;
-    const selected = dictionaries.find(entry => entry.title === title && entry.enabled !== false);
-    if (!selected) return null;
     const requestedKind = typeof selection === "object" ? selection.kind : "";
-    const defaultKind = selected.kanjiCount > 0 ? "kanji" : "term";
-    const kind = requestedKind === "" ? defaultKind : requestedKind;
-    const available = kind === "kanji" ? selected.kanjiCount > 0 : selected.termCount > 0
-      || (selected.frequencyCount === 0 && selected.pitchCount === 0 && selected.kanjiCount === 0);
-    return available ? { kind, title } : null;
+    return kanjiCapability(dictionaries.find(entry => entry.title === title), requestedKind);
   }
 
   function normalisePopupImageSource(value) {
@@ -729,7 +693,6 @@
 
   function isValidOptionField(key, raw, normalized) {
     if (key === "anki") return validAnki(raw, normalized);
-    if (key === "mediaCapture") return validMediaCapture(raw, normalized);
     if (key === "experimental") return validExperimental(raw, normalized);
     if (key === "kanjiClickDictionary") return typeof raw === "string" || typeof normalized === "object";
     if (key === "popupImageSource") return raw === null || normalized !== null;
@@ -762,11 +725,7 @@
       options.customButtons = legacyCustomButtons(options.customLinks);
     }
     options.customLinks = customLinksFromButtons(options.customButtons);
-    options.mediaCapture = cloneMediaCapture(options.mediaCapture);
     options.experimental = { ...options.experimental };
-    // Media capture predates the flag. A profile that never saved an
-    // experimental record keeps the feature exactly as it was switched on.
-    if (!Object.hasOwn(source, "experimental")) options.experimental.mediaMining = options.mediaCapture.enabled;
     return options;
   }
 
@@ -784,30 +743,19 @@
   }
 
   function projectContentOptions(value) {
-    const options = normaliseOptions(value);
-    return {
-      ...options,
-      mediaCapture: {
-        ...options.mediaCapture,
-        texthooker: {
-          enabled: options.mediaCapture.texthooker.enabled,
-          format: options.mediaCapture.texthooker.format,
-        },
-      },
-    };
+    return normaliseOptions(value);
   }
 
   globalThis.HDReaderOptions = {
     ANKI_FIELDS, ANKI_DUPLICATE_SCOPES, ANKI_DUPLICATE_BEHAVIORS, ANKI_OVERWRITE_MODES,
     ANKI_TEMPLATE_CONFIG_KEYS, DEFAULT_ANKI_TEMPLATE, STABLE_ID_MAX_LENGTH,
-    DEFAULT_OPTIONS, DEFAULT_MEDIA_CAPTURE, NUMBER_RANGES, LOOKUP_MODES, ACTIVATION_KEYS, FREQUENCY_ORDERS,
-    POPUP_THEME_GROUPS, DESIGN_OPTION_KEYS,
+    DEFAULT_OPTIONS, NUMBER_RANGES, LOOKUP_MODES, DEFINITION_LOOKUP_MODES, ACTIVATION_BUTTONS, ACTIVATION_KEYS, FREQUENCY_ORDERS,
+    POPUP_THEME_GROUPS, POPUP_RENDERER_IDS, popupRenderer, DESIGN_OPTION_KEYS,
     KEYBIND_ACTIONS, KEYBIND_ARGUMENT_DEFAULTS, KEYBIND_SCOPES, KEYBIND_MODIFIERS, KEYBIND_MODIFIER_CODES, KEYBIND_TOGGLE_OPTIONS,
     AUDIO_SOURCE_TYPES, AUDIO_SOURCE_LABELS,
-    MEDIA_TIMING_MODES, MEDIA_HISTORY_SECONDS, MEDIA_CLIP_SECONDS, MEDIA_VIDEO_PRESETS, MEDIA_TEXTHOOKER_FORMATS,
     EXPERIMENTAL_FEATURES,
-    clampOption, normaliseActivationKey, normaliseKanjiSelection, normaliseOptions,
-    normaliseTexthookerUrl, normaliseAnkiConnectUrl, normaliseMediaCapture, normaliseAnki,
+    activationLabel, clampOption, normaliseActivationKey, normaliseKanjiSelection, normaliseOptions,
+    normaliseAnkiConnectUrl, normaliseAnki,
     normaliseCustomButtons, normaliseExperimental, ankiTemplateConfig,
     definitionBlurFrequencyEvidence, definitionBlurQualifies,
     DEFINITION_BLUR_DIRECTIONS, DEFINITION_BLUR_REVEALS, DEFINITION_BLUR_FREQUENCY_ORDERS,

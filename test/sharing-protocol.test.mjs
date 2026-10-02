@@ -35,13 +35,14 @@ test("a browser names itself by its brand", () => {
   assert.equal(browserName(brands("Chromium", "Not=A?Brand")), "Chromium");
   assert.equal(browserName(brands("Microsoft Edge", "Not;A=Brand", "Chromium")), "Microsoft Edge");
   assert.equal(browserName(brands()), "another browser");
-  assert.equal(browserName({ userAgent: "Mozilla/5.0 Firefox/153.0" }), "Firefox");
   assert.equal(browserName({}), "another browser");
   assert.equal(browserName(undefined), "another browser");
 });
 
 test("only host-owned plain-message requests forward; screenshots and blob imports stay local", () => {
   assert.equal(forwardableRequest({ target: "hoshidicts-offscreen", type: "hd_lookup", text: "猫" }), true);
+  assert.equal(forwardableRequest({ target: "hoshidicts-offscreen", type: "hd_memory" }), true);
+  assert.equal(mutatingForwardedRequest({ target: "hoshidicts-offscreen", type: "hd_memory" }), false);
   assert.equal(forwardableRequest({ target: "hoshidicts-worker", type: "hd_options_write" }), true);
   assert.equal(forwardableRequest({ target: "hachidori-updates", type: "hd_updates_check" }), true);
   assert.equal(forwardableRequest({ target: "hachidori-setup", type: "hd_setup_install", sourceIds: [] }), true);

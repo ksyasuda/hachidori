@@ -49,7 +49,7 @@ function fixture(t, initialSection = "dictionaries") {
 test("global search finds inactive section controls and lazy Audio by its voice keywords", t => {
   const f = fixture(t);
   f.query("reading activation key");
-  const result = f.match("Activation key");
+  const result = f.match("Activation key or button");
   assert.ok(result, "inactive Reading controls are searchable");
   assert.match(result.querySelector("small").textContent, /Reading/u);
   assert.equal(f.el("dictionaries").hidden, true);
@@ -65,6 +65,21 @@ test("global search finds inactive section controls and lazy Audio by its voice 
   const experimental = f.match("Experimental features");
   assert.ok(experimental, "the experimental group is discoverable before its rows are mounted");
   assert.match(experimental.querySelector("small").textContent, /Advanced/u);
+});
+
+test("No key and hover searches lead to the Activation key picker, as does its hidden keep-open switch", t => {
+  const f = fixture(t);
+  for (const query of ["no key", "hover"]) {
+    f.query(query);
+    const result = f.match("Activation key or button");
+    assert.ok(result, `"${query}" finds the Activation key picker`);
+    result.click();
+    assert.equal(f.document.activeElement, f.el("opt-activation-key"));
+  }
+  f.el("opt-lookup-sticky-row").hidden = true;
+  f.query("keep popup open");
+  f.match("Keep the popup open after releasing the key or button").click();
+  assert.equal(f.document.activeElement, f.el("opt-activation-key"));
 });
 
 test("Library exposes its related views together and search reports that hierarchy", t => {
@@ -129,6 +144,21 @@ test("hidden conditional results lead to their visible enable control without en
   assert.equal(f.el("definition-blur-count-controls").hidden, true);
   assert.equal(f.el("opt-blur-count").checked, false);
   assert.equal(f.scrolled, f.el("definition-blur-settings"));
+});
+
+test("highlight, selection and custom dictionary searches find the personal dictionary switch", t => {
+  const f = fixture(t);
+  for (const words of ["highlight", "selection", "custom dictionary"]) {
+    f.query(words);
+    const result = f.match("Use the personal dictionary");
+    assert.ok(result, `"${words}" finds the switch`);
+    assert.equal(result.querySelector("small").textContent, "Reading › Personal dictionary");
+  }
+  // Off, the notice switch it governs is hidden and leads back to it.
+  f.el("selection-notice-controls").hidden = true;
+  f.query("selection has no definition");
+  f.match("Show a popup when a selection has no definition").click();
+  assert.equal(f.document.activeElement, f.el("opt-personal-dictionary"));
 });
 
 test("unmatched markup query remains plain text and clearing restores the active page", t => {

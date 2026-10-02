@@ -24,8 +24,30 @@
 
   const DEFAULT_INITIAL_RESULT_COUNT = 1;
   const DEFAULT_MAX_METADATA_TAGS = 12;
-  const METADATA_OPTION_KEYS = ["averageFrequency", "showFrequencyDictionaryNames", "showPitchAccentFurigana",
-    "pitchAccentFuriganaDictionary", "showPitchAccentBadge", "hidePopupGrammarTags"];
+  const METADATA_OPTION_KEYS = ["averageFrequency", "showFrequencyDictionaryNames", "compactFrequencyNumbers",
+    "showPitchAccentFurigana", "pitchAccentFuriganaDictionary", "showPitchAccentBadge", "showPitchAccentDictionaryNames",
+    "showPitchAccentText", "showPitchAccentPosition", "showPitchAccentGraph", "hidePopupGrammarTags"];
+
+  // Shared keyboard semantics for rich cards and direct text definitions.
+  function findDifferentDictionary(entries, index, sign, scroll, cardsOf, dictionaryOf) {
+    const cards = cardsOf(entries[index]);
+    const view = scroll.getBoundingClientRect();
+    let visible = null, coverage = 0;
+    for (const card of sign > 0 ? cards : [...cards].reverse()) {
+      const { top, bottom } = card.getBoundingClientRect();
+      const shown = Math.min(bottom, view.bottom) - Math.max(top, view.top);
+      if (shown > coverage) { visible = card; coverage = shown; }
+    }
+    if (!visible) return null;
+    const dictionary = dictionaryOf(visible);
+    for (let i = index; i >= 0 && i < entries.length; i += sign) {
+      const ordered = sign > 0 ? cardsOf(entries[i]) : cardsOf(entries[i]).reverse();
+      const start = i === index ? ordered.indexOf(visible) + 1 : 0;
+      const target = ordered.slice(start).find(card => dictionaryOf(card) !== dictionary);
+      if (target) return { index: i, target };
+    }
+    return null;
+  }
 
   function metadataOptions(context) {
     return Object.fromEntries(METADATA_OPTION_KEYS.map(key => [key, context[key]]));
@@ -98,6 +120,9 @@
         // Only CSS hides the button: it stays bound, so autoplay and keybinds still play.
         if (options.showPopupAudioButton === false) host.dataset.hoshidictsAudioButton = "hidden";
         else delete host.dataset.hoshidictsAudioButton;
+        // Hiding the pencil the same way keeps an open Note draft through a toggle.
+        if (options.personalDictionaryEnabled === false) host.dataset.hoshidictsNoteButton = "hidden";
+        else delete host.dataset.hoshidictsNoteButton;
         for (const [key, variable, unit] of [
           ["popupOpacityPercent", "opacity", "%"], ["popupWidthPx", "width", "px"], ["popupHeightPx", "height", "px"],
           ["popupScalePercent", "scale", "%"],
@@ -123,7 +148,6 @@
   const MAX_COMPACT_DEFINITION_SUMMARY_COUNT = 6;
   const COMPACT_DEFINITION_MAX_CHARACTERS = 240;
   const COMPACT_DEFINITION_MAX_NODES = 512;
-  const COMPACT_DEFINITION_MAX_DEPTH = 16;
   const COMPACT_DEFINITION_LETTER = /[A-Za-zぁ-ゟァ-ヿ㐀-鿿Ａ-Ｚａ-ｚ]/u;
   const COMPACT_DEFINITION_JAPANESE = /[ぁ-ゟァ-ヿ㐀-鿿]/u;
   const COMPACT_DEFINITION_BLOCK_TAGS = new Set([
@@ -418,7 +442,10 @@
       { minimum: 1_000_000, suffix: "m" },
       { minimum: 1_000, suffix: "k" },
     ];
-    const unit = units.find(({ minimum }) => absoluteValue >= minimum);
+    // Pick the unit after rounding, as Intl's compact notation does: a value
+    // that rounds to 1000.0 of the smaller unit moves up, so 999,949 is 999.9k
+    // but 999,950 is 1m, not 1000k.
+    const unit = units.find(({ minimum }) => Math.round((absoluteValue / minimum) * 10_000) >= 10_000);
     if (!unit) {
       return String(value);
     }
@@ -439,11 +466,17 @@
     }`;
   }
 
-  function formatFrequencyValue(frequency) {
+  // Like Yomitan's _populateFrequencyValueList: the dictionary's display value,
+  // else the number. Compact numbers abbreviate a display value that only
+  // restates the number, keeping any text of its own.
+  function formatFrequencyValue(frequency, compactFrequencyNumbers = false) {
     if (typeof frequency.displayValue === "string") {
       const displayValue = frequency.displayValue.trim();
       if (!displayValue) {
         return null;
+      }
+      if (!compactFrequencyNumbers) {
+        return displayValue;
       }
       const numericText = isKanaFrequency(frequency)
         ? displayValue.slice(0, -JITEN_KANA_FREQUENCY_MARKER.length)
@@ -456,7 +489,7 @@
         return formatCompactFrequencyValue(frequency);
       }
     }
-    return formatCompactFrequencyNumber(frequency.value);
+    return compactFrequencyNumbers ? formatCompactFrequencyNumber(frequency.value) : String(frequency.value);
   }
 
   function frequencyNumberForAverage(frequency) {
@@ -522,8 +555,10 @@
     dictionaryPresentation,
     maximumTags,
     averageFrequency = false,
-    showFrequencyDictionaryNames = false
+    showFrequencyDictionaryNames = false,
+    compactFrequencyNumbers = false
   ) {
+    const averageTags = [];
     if (averageFrequency) {
       const modes = new Map(dictionaryPresentation.map(({ title, frequencyMode }) => [title, frequencyMode]));
       const aggregates = new Map();
@@ -535,12 +570,12 @@
           if (value !== null) {
             const mode = modes.get(group.dictionary);
             const label = mode === "rank-based"
-              ? { accessible: "Rank average", display: "Avg rank" }
+              ? { accessible: "Rank average", display: "Avg rank", kind: mode }
               : mode === "occurrence-based"
-                ? { accessible: "Occurrence average", display: "Avg count" }
-                : { accessible: "Frequency average (unspecified)", display: "Avg frequency" };
+                ? { accessible: "Occurrence average", display: "Avg count", kind: mode }
+                : { accessible: "Frequency average (unspecified)", display: "Avg frequency", kind: "unspecified" };
             const aggregate = aggregates.get(label.accessible)
-              || { count: 0, reciprocalSum: 0, display: label.display };
+              || { count: 0, reciprocalSum: 0, display: label.display, kind: label.kind };
             aggregate.count += 1;
             aggregate.reciprocalSum += 1 / value;
             aggregates.set(label.accessible, aggregate);
@@ -549,17 +584,19 @@
           }
         }
       }
-      return Array.from(aggregates, ([label, { count, reciprocalSum, display }]) => {
-        const value = Math.floor(count / reciprocalSum);
-        return createFrequencyTag(
+      for (const [label, { count, reciprocalSum, display, kind }] of aggregates) {
+        const frequency = { value: Math.floor(count / reciprocalSum), displayValue: null };
+        const tag = createFrequencyTag(
           documentRef,
           { dictionary: label },
           display,
-          [{ display: formatCompactFrequencyNumber(value), frequency: { value, displayValue: null } }],
+          [{ display: formatFrequencyValue(frequency, compactFrequencyNumbers), frequency }],
           // These labels identify units, not a source dictionary.
           true
         );
-      });
+        tag.dataset.frequencyAverage = kind;
+        averageTags.push(tag);
+      }
     }
     const tags = [];
     const seen = new Set();
@@ -571,11 +608,13 @@
       const frequencies = [];
       const seenFrequencies = new Set();
       for (const frequency of group.frequencies) {
-        const originalDisplay = formatFrequencyValue(frequency);
+        const originalDisplay = formatFrequencyValue(frequency, compactFrequencyNumbers);
         if (originalDisplay === null) {
           continue;
         }
-        const display = showFrequencyDictionaryNames ? originalDisplay : formatCompactFrequencyValue(frequency);
+        // Only abbreviated numbers without names drop a dictionary's own text.
+        const display = compactFrequencyNumbers && !showFrequencyDictionaryNames
+          ? formatCompactFrequencyValue(frequency) : originalDisplay;
         const key = JSON.stringify([frequency.value, originalDisplay]);
         if (!seenFrequencies.has(key)) {
           seenFrequencies.add(key);
@@ -605,39 +644,49 @@
         ));
       }
     }
-    return tags;
+    if (!averageFrequency) return tags;
+    // Like Yomitan, averaging only hides the per-dictionary tags: they stay in
+    // the DOM, unchanged, for custom CSS and themes.
+    for (const tag of tags) tag.hidden = true;
+    return [...averageTags, ...tags];
   }
 
-  function createPitchTag(
-    documentRef,
-    group,
-    dictionaryDisplayName,
-    pitch,
-    reading,
-    buildPitchAccentMorae
-  ) {
-    const positionText = [`[${pitch.position}]`, pitch.pattern].filter(Boolean).join(" ");
-    const bodyText = reading ? `${reading} ${positionText}` : positionText;
-    const tag = createPronunciationTag(documentRef, group, dictionaryDisplayName, bodyText, "pitch");
-    const morae = buildPitchAccentMorae(reading, pitch.position);
-    if (morae === null) return tag;
-    // The same contour the header furigana draws, so every dictionary's
-    // accent reads as a graph; the text stays in the title and aria-label.
-    const contour = documentRef.createElement("span");
-    contour.className = "gsm-hoshidicts-pitch-contour";
-    for (const mora of morae) {
-      const span = documentRef.createElement("span");
-      span.className = "gsm-hoshidicts-pitch-mora";
-      span.dataset.pitchLevel = mora.level;
-      if (mora.transition) span.dataset.pitchTransition = mora.transition;
-      span.textContent = mora.text;
-      contour.appendChild(span);
+  // Yomitan's pronunciation-group (templates-display.html and display-generator.js
+  // _createGroupedPronunciation at 67db60d): the dictionary's
+  // pronunciation-dictionary tag, then its pitch accents. Each keeps the
+  // `reading [n]` label pitch badges had.
+  function createPronunciationGroup(documentRef, group, dictionaryDisplayName, pitches, reading, display,
+    createPronunciationPitchAccent) {
+    const node = documentRef.createElement("li");
+    node.className = "pronunciation-group";
+    node.dataset.dictionary = group.dictionary;
+    node.dataset.pronunciationsMulti = "true";
+    node.dataset.pronunciationsCount = String(pitches.length);
+    const element = (className, parent, tag = "span") => {
+      const child = documentRef.createElement(tag);
+      child.className = className;
+      parent.appendChild(child);
+      return child;
+    };
+    if (display.showPitchAccentDictionaryNames) {
+      const tag = element("tag gsm-hoshidicts-pitch-source", element("pronunciation-group-tag-list tag-list", node));
+      tag.dataset.category = "pronunciation-dictionary";
+      tag.dataset.details = group.dictionary;
+      element("tag-label-content", element("tag-label", tag)).textContent = dictionaryDisplayName;
     }
-    const position = documentRef.createElement("span");
-    position.className = "gsm-hoshidicts-pitch-position";
-    position.textContent = positionText;
-    tag.firstChild.replaceChildren(contour, position);
-    return tag;
+    const list = element("pronunciation-list", node, "ul");
+    list.dataset.hasTags = "false";
+    list.dataset.count = String(pitches.length);
+    pitches.forEach((pitch, index) => {
+      const item = createPronunciationPitchAccent(documentRef, reading, pitch, { text: display.showPitchAccentText,
+        position: display.showPitchAccentPosition, graph: display.showPitchAccentGraph });
+      item.classList.add("gsm-hoshidicts-tag-pitch");
+      item.dataset.index = String(index);
+      item.dataset.dictionary = group.dictionary;
+      list.appendChild(item);
+      updatePronunciationLabel(item, dictionaryDisplayName);
+    });
+    return node;
   }
 
   function updatePronunciationLabel(tag, dictionaryDisplayName) {
@@ -1220,9 +1269,9 @@
     }
 
     // Each source's text when its candidate was first painted. A pointer scan's
-    // sources are the sentence's text nodes, so the match is located through
-    // this snapshot and only the sources it covers have to be unchanged; text
-    // edited elsewhere in the sentence leaves the highlight in place.
+    // sources are the text nodes around the match, so the match is located
+    // through this snapshot and only the sources it covers have to be unchanged;
+    // text edited elsewhere in those nodes leaves the highlight in place.
     const sourceSnapshots = new WeakMap();
 
     function createMatchRanges(candidate, matchedText) {
@@ -1230,8 +1279,8 @@
       if (matchLength <= 0 || !Array.isArray(candidate.sourceElements)) {
         return null;
       }
-      const startOffset = Math.max(0, candidate.matchOffset);
-      const endOffset = Math.min(candidate.sentence.length, startOffset + matchLength);
+      const startOffset = Math.max(0, candidate.sourceOffset);
+      const endOffset = Math.min(candidate.sourceText.length, startOffset + matchLength);
       if (endOffset <= startOffset) {
         return null;
       }
@@ -1244,7 +1293,7 @@
       let snapshot = sourceSnapshots.get(candidate);
       if (!snapshot) {
         snapshot = sourceElements.map((element) => element.textContent || "");
-        if (snapshot.join("") !== candidate.sentence) {
+        if (snapshot.join("") !== candidate.sourceText) {
           return null;
         }
         sourceSnapshots.set(candidate, snapshot);
@@ -1516,18 +1565,50 @@
         ...selection, dictionaries: new Set(members),
       };
     }
+    const dictionaryTab = (dictionary) => tab(
+      dictionaryDisplayNames.get(dictionary) || dictionary,
+      dictionary, { dictionary }, [dictionary], "dictionary",
+    );
+    // A clicked-kanji group compares its members side by side: every member
+    // with an entry is its own tab in group order, instead of the reader's
+    // group and favourite tabs.
+    if (Array.isArray(renderContext.dictionaryTabScope)) {
+      const tabs = [
+        tab("All", "All dictionaries", null, [], "tab"),
+        ...renderContext.dictionaryTabScope.filter((title) => available.has(title)).map(dictionaryTab),
+      ];
+      return { tabs, dictionaryDisplayNames };
+    }
     const tabs = [
       tab("All", "All dictionaries", null, [], "tab"),
       ...availableGroups.map((group) => tab(
         group.name, `Tab group: ${group.name}`,
         { groupId: group.id }, group.dictionaries, "group",
       )),
-      ...favourites.map((dictionary) => tab(
-        dictionaryDisplayNames.get(dictionary) || dictionary,
-        dictionary, { dictionary }, [dictionary], "dictionary",
-      )),
+      ...favourites.map(dictionaryTab),
     ];
     return { tabs, dictionaryDisplayNames };
+  }
+
+  // A native kanji entry as one structured-content glossary, so a clicked-kanji
+  // group can lay it out beside its term dictionaries' cards.
+  function kanjiEntryGlossary(entry) {
+    const tokens = (value) => Array.isArray(value) ? value : String(value || "").split(/\s+/u).filter(Boolean);
+    const tags = tokens(entry.tags);
+    const readings = [["On", tokens(entry.onyomi)], ["Kun", tokens(entry.kunyomi)]]
+      .filter(([, values]) => values.length > 0)
+      .map(([label, values]) => ({ tag: "div", data: { content: "reading" },
+        content: [{ tag: "strong", content: label }, ` ${values.join(" · ")}`] }));
+    const definitions = Array.isArray(entry.definitions) ? entry.definitions : [];
+    const stats = Array.isArray(entry.stats) ? entry.stats : [];
+    return JSON.stringify([{ type: "structured-content", content: [
+      ...(tags.length > 0 ? [{ tag: "div", data: { content: "tags" }, content: tags.join(" ") }] : []),
+      ...readings,
+      ...(definitions.length > 0 ? [{ tag: "ol", content: definitions.map((content) => ({ tag: "li", content })) }] : []),
+      ...(stats.length > 0 ? [{ tag: "details", content: [{ tag: "summary", content: "Details" },
+        { tag: "table", content: stats.map((stat) => ({ tag: "tr", content: [
+          { tag: "th", content: String(stat.name) }, { tag: "td", content: String(stat.value) }] })) }] }] : []),
+    ] }]);
   }
 
   function isRecord(value) {
@@ -1645,90 +1726,98 @@
     return isRecord(value) && COMPACT_DEFINITION_BLOCK_TAGS.has(compactDefinitionTag(value));
   }
 
-  function* collectCompactDefinitionText(value, state, depth = 0) {
-    if (
-      state.nodes >= COMPACT_DEFINITION_MAX_NODES ||
-      depth > COMPACT_DEFINITION_MAX_DEPTH
-    ) {
-      return;
-    }
-    state.nodes += 1;
-    if (typeof value === "string" || typeof value === "number" ||
-        typeof value === "boolean") {
-      const text = String(value);
-      if (text) yield text;
-      return;
-    }
-    if (Array.isArray(value)) {
-      let hasText = false;
-      let previousWasBlock = false;
-      for (const child of value) {
-        if (state.nodes >= COMPACT_DEFINITION_MAX_NODES) break;
-        let childIsBlock = false;
-        let childHasText = false;
-        for (const text of collectCompactDefinitionText(child, state, depth + 1)) {
-          if (!childHasText) {
-            childIsBlock = isCompactDefinitionBlock(child);
-            if (hasText && (previousWasBlock || childIsBlock)) yield " ";
-          }
-          childHasText = true;
-          yield text;
-        }
-        if (childHasText) {
-          hasText = true;
-          previousWasBlock = childIsBlock;
-        }
+  // The compact walkers use explicit frames like the glossary renderer, so
+  // nesting depth is never a failure condition; the node budget bounds the work.
+  function* collectCompactDefinitionText(root, state) {
+    const stack = [{ kind: "value", value: root }];
+    // Enclosing arrays, outermost first. A child's first text decides its
+    // block separator, so empty inline children never need a block check.
+    const arrays = [];
+    const separators = () => {
+      let count = 0;
+      for (let index = arrays.length - 1; index >= 0 && !arrays[index].childHasText; index -= 1) {
+        const array = arrays[index];
+        array.childIsBlock = isCompactDefinitionBlock(array.value[array.index - 1]);
+        if (array.hasText && (array.previousWasBlock || array.childIsBlock)) count += 1;
+        array.childHasText = true;
       }
-      return;
+      return count;
+    };
+    while (stack.length > 0) {
+      const frame = stack.pop();
+      if (frame.kind === "array") {
+        if (frame.childHasText) {
+          frame.hasText = true;
+          frame.previousWasBlock = frame.childIsBlock;
+        }
+        if (frame.index < frame.value.length && state.nodes < COMPACT_DEFINITION_MAX_NODES) {
+          frame.childHasText = false;
+          stack.push(frame, { kind: "value", value: frame.value[frame.index] });
+          frame.index += 1;
+        } else {
+          arrays.pop();
+        }
+        continue;
+      }
+      if (state.nodes >= COMPACT_DEFINITION_MAX_NODES) continue;
+      state.nodes += 1;
+      const { value } = frame;
+      let text = "";
+      if (typeof value === "string" || typeof value === "number" ||
+          typeof value === "boolean") {
+        text = String(value);
+      } else if (Array.isArray(value)) {
+        const array = { kind: "array", value, index: 0,
+          hasText: false, previousWasBlock: false, childHasText: false, childIsBlock: false };
+        arrays.push(array);
+        stack.push(array);
+        continue;
+      } else {
+        if (!isRecord(value) || isIgnoredCompactDefinitionSection(value)) continue;
+        const tag = compactDefinitionTag(value);
+        if (COMPACT_DEFINITION_IGNORED_TAGS.has(tag)) continue;
+        if (tag !== "br") {
+          const content = compactDefinitionContent(value);
+          if (content !== undefined) stack.push({ kind: "value", value: content });
+          continue;
+        }
+        text = " ";
+      }
+      if (!text) continue;
+      for (let count = separators(); count > 0; count -= 1) yield " ";
+      yield text;
     }
-    if (!isRecord(value) || isIgnoredCompactDefinitionSection(value)) {
-      return;
-    }
-    const tag = compactDefinitionTag(value);
-    if (COMPACT_DEFINITION_IGNORED_TAGS.has(tag)) {
-      return;
-    }
-    if (tag === "br") {
-      yield " ";
-      return;
-    }
-    const content = compactDefinitionContent(value);
-    if (content !== undefined) yield* collectCompactDefinitionText(content, state, depth + 1);
   }
 
-  function findCompactDefinitionNodes(value, predicate, state, depth = 0) {
-    if (
-      state.nodes >= COMPACT_DEFINITION_MAX_NODES ||
-      depth > COMPACT_DEFINITION_MAX_DEPTH
-    ) {
-      return [];
-    }
-    state.nodes += 1;
-    if (Array.isArray(value)) {
-      const matches = [];
-      for (const child of value) {
-        matches.push(...findCompactDefinitionNodes(
-          child,
-          predicate,
-          state,
-          depth + 1
-        ));
-        if (state.nodes >= COMPACT_DEFINITION_MAX_NODES) break;
+  function findCompactDefinitionNodes(root, predicate, state) {
+    const matches = [];
+    const stack = [{ kind: "value", value: root }];
+    while (stack.length > 0 && state.nodes < COMPACT_DEFINITION_MAX_NODES) {
+      const frame = stack.pop();
+      if (frame.kind === "array") {
+        if (frame.index < frame.value.length) {
+          stack.push(frame, { kind: "value", value: frame.value[frame.index] });
+          frame.index += 1;
+        }
+        continue;
       }
-      return matches;
+      state.nodes += 1;
+      const { value } = frame;
+      if (Array.isArray(value)) {
+        stack.push({ kind: "array", value, index: 0 });
+        continue;
+      }
+      if (!isRecord(value) || isIgnoredCompactDefinitionSection(value)) continue;
+      const tag = compactDefinitionTag(value);
+      if (tag === "br" || COMPACT_DEFINITION_IGNORED_TAGS.has(tag)) continue;
+      if (predicate(value, tag)) {
+        matches.push(value);
+        continue;
+      }
+      const content = compactDefinitionContent(value);
+      if (content !== undefined) stack.push({ kind: "value", value: content });
     }
-    if (!isRecord(value) || isIgnoredCompactDefinitionSection(value)) {
-      return [];
-    }
-    const tag = compactDefinitionTag(value);
-    if (tag === "br" || COMPACT_DEFINITION_IGNORED_TAGS.has(tag)) return [];
-    if (predicate(value, tag)) {
-      return [value];
-    }
-    const content = compactDefinitionContent(value);
-    return content !== undefined
-      ? findCompactDefinitionNodes(content, predicate, state, depth + 1)
-      : [];
+    return matches;
   }
 
   function isCompactDefinitionList(_value, tag) {
@@ -1890,22 +1979,35 @@
 
   // null means no visible content; false means text or another non-image lead.
   // Stop at that first meaningful token, not at an image later in a definition.
-  function leadingCompactDefinitionImage(value, state, depth = 0) {
-    if (state.nodes >= COMPACT_DEFINITION_MAX_NODES || depth > COMPACT_DEFINITION_MAX_DEPTH) return false;
-    state.nodes += 1;
-    if (Array.isArray(value)) {
-      for (const child of value) {
-        const leading = leadingCompactDefinitionImage(child, state, depth + 1);
-        if (leading !== null) return leading;
+  function leadingCompactDefinitionImage(root, state) {
+    const stack = [{ kind: "value", value: root }];
+    while (stack.length > 0) {
+      const frame = stack.pop();
+      if (frame.kind === "array") {
+        if (frame.index < frame.value.length) {
+          stack.push(frame, { kind: "value", value: frame.value[frame.index] });
+          frame.index += 1;
+        }
+        continue;
       }
-      return null;
+      if (state.nodes >= COMPACT_DEFINITION_MAX_NODES) return false;
+      state.nodes += 1;
+      const { value } = frame;
+      if (Array.isArray(value)) {
+        stack.push({ kind: "array", value, index: 0 });
+        continue;
+      }
+      if (!isRecord(value)) {
+        if (value != null && /\S/u.test(String(value))) return false;
+        continue;
+      }
+      if (isIgnoredCompactDefinitionSection(value)) continue;
+      const tag = compactDefinitionTag(value);
+      if (tag === "img") return value;
+      if (tag === "br" || COMPACT_DEFINITION_IGNORED_TAGS.has(tag)) continue;
+      stack.push({ kind: "value", value: compactDefinitionContent(value) });
     }
-    if (!isRecord(value)) return value != null && /\S/u.test(String(value)) ? false : null;
-    if (isIgnoredCompactDefinitionSection(value)) return null;
-    const tag = compactDefinitionTag(value);
-    if (tag === "img") return value;
-    if (tag === "br" || COMPACT_DEFINITION_IGNORED_TAGS.has(tag)) return null;
-    return leadingCompactDefinitionImage(compactDefinitionContent(value), state, depth + 1);
+    return null;
   }
 
   function extractCompactDefinitionSummary(
@@ -1980,9 +2082,14 @@
     return pageZoom * 100 / scalePercent;
   }
 
-  function calculatePopupPosition(anchorRect, popupSize, viewport, { gap = 4, padding = 6, vertical = false } = {}) {
+  // Roots prefer the space above the word; nested panes prefer below it, as
+  // Yomitan places a child. Either falls back to the side that fits, then to
+  // the roomier side. Like Yomitan's _getConstrainedPositionBinary, a pane
+  // that fits on neither side is shortened to that side's room instead of
+  // covering the word, so the requested height is a maximum.
+  function calculatePopupPosition(anchorRect, popupSize, viewport, { gap = 4, padding = 6, vertical = false, preferBelow = false } = {}) {
     const width = Math.min(popupSize.width, Math.max(1, viewport.width - padding * 2));
-    const height = Math.min(popupSize.height, Math.max(1, viewport.height - padding * 2));
+    let height = Math.min(popupSize.height, Math.max(1, viewport.height - padding * 2));
     const clamp = (value, minimum, maximum) => Math.max(minimum, Math.min(value, maximum));
     let left;
     let top;
@@ -1998,7 +2105,9 @@
     } else {
       const spaceBelow = Math.max(0, viewport.height - padding - anchorRect.bottom - gap);
       const spaceAbove = Math.max(0, anchorRect.top - gap - padding);
-      const placeAbove = spaceAbove >= height || (spaceBelow < height && spaceAbove >= spaceBelow);
+      const preferred = (space, other) => space >= height || (other < height && space >= other);
+      const placeAbove = preferBelow ? !preferred(spaceBelow, spaceAbove) : preferred(spaceAbove, spaceBelow);
+      height = Math.max(1, Math.min(height, placeAbove ? spaceAbove : spaceBelow));
       top = placeAbove ? anchorRect.top - gap - height : anchorRect.bottom + gap;
       left = anchorRect.left;
       placement = placeAbove ? "above" : "below";
@@ -2010,6 +2119,20 @@
       top: clamp(Math.round(top), padding, viewport.height - height - padding),
       width,
     };
+  }
+
+  function createAudioControl(documentRef, expressionText) {
+    const audio = documentRef.createElement("div");
+    audio.className = "gsm-hoshidicts-audio-control";
+    const button = documentRef.createElement("button");
+    button.type = "button";
+    button.className = "gsm-hoshidicts-audio-button";
+    button.title = "Play pronunciation; Shift-click, right-click or press Down for choices";
+    button.setAttribute("aria-label", `Play pronunciation for ${expressionText}`);
+    button.setAttribute("aria-haspopup", "dialog");
+    button.setAttribute("aria-expanded", "false");
+    audio.append(button);
+    return { element: audio, button };
   }
 
   function createPopupView(options) {
@@ -2032,7 +2155,7 @@
       popup.appendChild(resizeHandle);
     }
     const appendExpressionRuby = options.appendExpressionRuby;
-    const buildPitchAccentMorae = options.buildPitchAccentMorae;
+    const createPronunciationPitchAccent = options.createPronunciationPitchAccent;
     const appendTextOnlyGlossary = options.appendTextOnlyGlossary;
     const appendStructuredImage = options.appendStructuredImage;
     const parseTagList = options.parseTagList;
@@ -2147,6 +2270,8 @@
       preview.setAttribute("aria-hidden", "true");
       preview.dataset.appearance = link.dataset.appearance;
       preview.dataset.imageRendering = link.dataset.imageRendering;
+      // The monochrome mask layer paints this same validated source.
+      preview.style.setProperty("--image", `url("${source}")`);
       const expanded = documentRef.createElement("img");
       expanded.src = source;
       expanded.alt = image.alt;
@@ -2227,24 +2352,9 @@
       const cardsOf = node => node.classList.contains("gsm-hoshidicts-entry")
         ? [...node.querySelectorAll(".gsm-hoshidicts-glossary-grid > .gsm-hoshidicts-glossary-card")] : [];
       const dictionaryOf = card => card.querySelector(":scope > .gsm-hoshidicts-glossary-card-title")?.title ?? "";
-      const cards = cardsOf(nodes[index]);
-      const view = contentScroll.getBoundingClientRect();
-      let visible = null, coverage = 0;
-      for (const card of sign > 0 ? cards : [...cards].reverse()) {
-        const { top, bottom } = card.getBoundingClientRect();
-        const shown = Math.min(bottom, view.bottom) - Math.max(top, view.top);
-        if (shown > coverage) { visible = card; coverage = shown; }
-      }
-      if (!visible) return false;
-      const dictionary = dictionaryOf(visible);
       const search = entries => {
-        for (let i = index; i >= 0 && i < entries.length; i += sign) {
-          const ordered = sign > 0 ? cardsOf(entries[i]) : cardsOf(entries[i]).reverse();
-          const start = i === index ? ordered.indexOf(visible) + 1 : 0;
-          const target = ordered.slice(start).find(card => dictionaryOf(card) !== dictionary);
-          if (target) return scrollToEntry(entries, i, target);
-        }
-        return false;
+        const found = findDifferentDictionary(entries, index, sign, contentScroll, cardsOf, dictionaryOf);
+        return found ? scrollToEntry(entries, found.index, found.target) : false;
       };
       return search(nodes) || (sign > 0 && expandEntries() && search(entryNodes()));
     }
@@ -2856,6 +2966,11 @@
         includePitch = true,
         averageFrequency = false,
         showFrequencyDictionaryNames = false,
+        compactFrequencyNumbers = false,
+        showPitchAccentDictionaryNames = true,
+        showPitchAccentText = true,
+        showPitchAccentPosition = true,
+        showPitchAccentGraph = false,
         imageContext,
         isCurrent,
         onLayoutChange,
@@ -2877,11 +2992,15 @@
           context.dictionaryPresentation || [],
           maxMetadataTags,
           context.averageFrequency === true,
-          context.showFrequencyDictionaryNames === true
+          context.showFrequencyDictionaryNames === true,
+          context.compactFrequencyNumbers === true
         ) : [];
-        const countChanged = frequencyCount !== frequencyTags.length;
-        frequencyCount = frequencyTags.length;
+        // Hidden per-dictionary tags take no display budget from pitch badges.
+        const visibleCount = frequencyTags.filter(tag => !tag.hidden).length;
+        const countChanged = frequencyCount !== visibleCount;
+        frequencyCount = visibleCount;
         frequencyRow.replaceChildren(...frequencyTags);
+        frequencyRow.hidden = visibleCount === 0 && frequencyTags.length > 0;
         return countChanged;
       }
       function updatePitch(context) {
@@ -2889,33 +3008,33 @@
         if (context.showPitchAccentBadge !== true) return;
         const names = createDictionaryDisplayNames(result.term.pitches.map(({ dictionary }) => dictionary),
           context.dictionaryPresentation);
+        const display = {
+          showPitchAccentDictionaryNames: context.showPitchAccentDictionaryNames !== false,
+          showPitchAccentText: context.showPitchAccentText !== false,
+          showPitchAccentPosition: context.showPitchAccentPosition !== false,
+          showPitchAccentGraph: context.showPitchAccentGraph === true,
+        };
+        const reading = String(result.term.reading || result.term.expression || "").trim();
+        const groups = documentRef.createElement("ol");
+        groups.className = "pronunciation-group-list";
         const seen = new Set();
         let count = frequencyCount;
         for (const group of result.term.pitches) {
-          for (const pitch of group.pitches) {
-            const reading = String(
-              result.term.reading || result.term.expression || ""
-            ).trim();
-            const key = JSON.stringify([
-              group.dictionary,
-              reading,
-              pitch.position,
-              pitch.pattern,
-            ]);
-            if (!seen.has(key) && count < maxMetadataTags) {
-              seen.add(key);
-              pitchRow.appendChild(createPitchTag(
-                documentRef,
-                group,
-                names.get(group.dictionary) || group.dictionary,
-                pitch,
-                reading,
-                buildPitchAccentMorae
-              ));
-              count += 1;
-            }
+          const pitches = group.pitches.filter((pitch) => {
+            const key = JSON.stringify([group.dictionary, pitch.position, pitch.pattern]);
+            if (seen.has(key) || count >= maxMetadataTags) return false;
+            seen.add(key);
+            count += 1;
+            return true;
+          });
+          if (pitches.length > 0) {
+            groups.appendChild(createPronunciationGroup(documentRef, group,
+              names.get(group.dictionary) || group.dictionary, pitches, reading, display,
+              createPronunciationPitchAccent));
           }
         }
+        groups.dataset.count = String(groups.children.length);
+        if (groups.children.length > 0) pitchRow.appendChild(groups);
       }
       const ipaGroups = result.term.pitches.filter(group => group.transcriptions.length > 0);
       let fillOpenIpa = () => {};
@@ -2948,7 +3067,8 @@
         ipaRow.appendChild(overflow);
       } else appendTranscriptions(ipaRow);
       const context = { dictionaryPresentation, averageFrequency, showFrequencyDictionaryNames,
-        showPitchAccentBadge: includePitch };
+        compactFrequencyNumbers, showPitchAccentBadge: includePitch, showPitchAccentDictionaryNames,
+        showPitchAccentText, showPitchAccentPosition, showPitchAccentGraph };
       updateFrequency(context);
       updatePitch(context);
       entry.append(frequencyRow, pitchRow, ipaRow);
@@ -2991,10 +3111,7 @@
     function renderPrimaryMetadataCapsule(
       capsule,
       result,
-      dictionaryPresentation,
-      hideGrammarTags,
-      averageFrequency,
-      showFrequencyDictionaryNames,
+      context,
       { frequencyChanged = true, grammarChanged = true } = {}
     ) {
       if (frequencyChanged) {
@@ -3002,21 +3119,23 @@
         const frequencyTags = createFrequencyTags(
           documentRef,
           result,
-          dictionaryPresentation,
+          Array.isArray(context.dictionaryPresentation) ? context.dictionaryPresentation : [],
           maxMetadataTags,
-          averageFrequency,
-          showFrequencyDictionaryNames
+          context.averageFrequency === true,
+          context.showFrequencyDictionaryNames === true,
+          context.compactFrequencyNumbers === true
         );
         if (frequencyTags.length > 0) {
           const frequencies = documentRef.createElement("span");
           frequencies.className = "gsm-hoshidicts-primary-frequencies";
           frequencies.append(...frequencyTags);
+          frequencies.hidden = frequencyTags.every(tag => tag.hidden);
           capsule.prepend(frequencies);
         }
       }
       if (grammarChanged) {
         capsule.querySelector(".gsm-hoshidicts-primary-grammar")?.remove();
-        if (!hideGrammarTags) {
+        if (context.hidePopupGrammarTags === false) {
           const grammarMetadata = collectGrammarMetadata(result);
           if (grammarMetadata.length > 0) {
             const grammar = documentRef.createElement("span");
@@ -3036,7 +3155,7 @@
           }
         }
       }
-      capsule.hidden = capsule.childNodes.length === 0;
+      capsule.hidden = Array.from(capsule.children).every(child => child.hidden);
     }
 
     function updateCompactSummary(headword, result, context, media) {
@@ -3119,6 +3238,8 @@
       headword.className = "gsm-hoshidicts-headword";
       const expression = documentRef.createElement("span");
       expression.className = "gsm-hoshidicts-expression";
+      // As Yomitan's _appendFurigana: the headword is Japanese whatever the page's lang.
+      expression.lang = "ja";
       const expressionText = String(result.term.expression || "").trim();
       const readingText = String(result.term.reading || "").trim();
       function populateRuby() {
@@ -3175,16 +3296,7 @@
       for (const previous of actions.querySelectorAll(
         ":scope > .gsm-hoshidicts-popup-close, :scope > .gsm-hoshidicts-kanji-back"
       )) previous.remove();
-      const audio = documentRef.createElement("div");
-      audio.className = "gsm-hoshidicts-audio-control";
-      const button = documentRef.createElement("button");
-      button.type = "button";
-      button.className = "gsm-hoshidicts-audio-button";
-      button.title = "Play pronunciation; Shift-click, right-click or press Down for choices";
-      button.setAttribute("aria-label", `Play pronunciation for ${expressionText}`);
-      button.setAttribute("aria-haspopup", "dialog");
-      button.setAttribute("aria-expanded", "false");
-      audio.append(button);
+      const { element: audio, button } = createAudioControl(documentRef, expressionText);
       actions.prepend(audio);
       const existingMiningAction = actions.querySelector(":scope > .gsm-hoshidicts-mine-button");
       if (existingMiningAction) actions.prepend(existingMiningAction);
@@ -3353,16 +3465,7 @@
         }
 
         if (resultIndex === 0 && primaryMetadataCapsule) {
-          renderPrimaryMetadataCapsule(
-            primaryMetadataCapsule,
-            result,
-            Array.isArray(renderContext.dictionaryPresentation)
-              ? renderContext.dictionaryPresentation
-              : [],
-            renderContext.hidePopupGrammarTags !== false,
-            renderContext.averageFrequency === true,
-            renderContext.showFrequencyDictionaryNames === true
-          );
+          renderPrimaryMetadataCapsule(primaryMetadataCapsule, result, renderContext);
           primaryMetadataRow.appendChild(primaryMetadataCapsule);
         }
 
@@ -3381,6 +3484,12 @@
             averageFrequency: renderContext.averageFrequency === true,
             showFrequencyDictionaryNames:
               renderContext.showFrequencyDictionaryNames === true,
+            compactFrequencyNumbers: renderContext.compactFrequencyNumbers === true,
+            showPitchAccentDictionaryNames:
+              renderContext.showPitchAccentDictionaryNames !== false,
+            showPitchAccentText: renderContext.showPitchAccentText !== false,
+            showPitchAccentPosition: renderContext.showPitchAccentPosition !== false,
+            showPitchAccentGraph: renderContext.showPitchAccentGraph === true,
           }
         );
 
@@ -3412,17 +3521,22 @@
           title.title = dictionary;
           card.appendChild(title);
           const definitions = documentRef.createElement("ol");
-          definitions.className = "gsm-hoshidicts-definitions";
+          definitions.className = "gsm-hoshidicts-definitions definition-list";
+          definitions.dataset.count = String(glossaries.length);
           if (glossaries.length === 1) {
             definitions.classList.add("gsm-hoshidicts-definitions-single");
           }
           applyDefinitionBlurState(definitions);
           for (const [definitionIndex, glossary] of glossaries.entries()) {
+            // Yomitan's definition-item: one per term-bank row.
             const definition = documentRef.createElement("li");
+            definition.className = "definition-item";
+            definition.dataset.dictionary = dictionary;
+            definition.dataset.index = String(definitionIndex);
             const definitionTags = parseTagList(glossary.definitionTags);
             if (definitionTags.length > 0) {
               const definitionTagRow = documentRef.createElement("div");
-              definitionTagRow.className = "gsm-hoshidicts-definition-tags";
+              definitionTagRow.className = "gsm-hoshidicts-definition-tags definition-tag-list";
               for (const tag of definitionTags) {
                 definitionTagRow.appendChild(
                   createTag(documentRef, tag, "", "definition")
@@ -3584,17 +3698,19 @@
       function updateMetadataLabels(container, result) {
         let changed = false;
         for (const [kind, groups] of [["frequency", result.term.frequencies], ["pitch", result.term.pitches], ["ipa", result.term.pitches]]) {
-          if (kind === "frequency" && imageContext.averageFrequency === true) continue;
           const names = createDictionaryDisplayNames(groups.map(({ dictionary }) => dictionary), imageContext.dictionaryPresentation);
           if (kind !== "frequency") {
             for (const tag of container.querySelectorAll(`.gsm-hoshidicts-tag-${kind}`)) {
               changed = updatePronunciationLabel(tag, names.get(tag.dataset.dictionary) || tag.dataset.dictionary) || changed;
             }
-            continue;
           }
           for (const source of container.querySelectorAll(`.gsm-hoshidicts-${kind}-source`)) {
-            const dictionary = source.parentNode.dataset.dictionary;
-            changed = updateLabel(source, names.get(dictionary) || dictionary) || changed;
+            // An average's label names a unit, not a dictionary.
+            if (source.parentNode.dataset.frequencyAverage) continue;
+            const dictionary = source.closest("[data-dictionary]").dataset.dictionary;
+            // A pronunciation-dictionary tag keeps its name in Yomitan's label span.
+            changed = updateLabel(source.querySelector(".tag-label-content") ?? source,
+              names.get(dictionary) || dictionary) || changed;
           }
         }
         return changed;
@@ -3605,17 +3721,17 @@
         updateMetadata() {
           const nextModes = frequencyModes(imageContext);
           const labelsChanged = JSON.stringify(imageContext.dictionaryPresentation) !== JSON.stringify(appliedDictionaryPresentation);
-          const frequencyChanged = ["averageFrequency", "showFrequencyDictionaryNames"]
+          const frequencyChanged = ["averageFrequency", "showFrequencyDictionaryNames", "compactFrequencyNumbers"]
             .some(key => imageContext[key] !== appliedMetadata[key]) || nextModes !== appliedFrequencyModes;
           const grammarChanged = imageContext.hidePopupGrammarTags !== appliedMetadata.hidePopupGrammarTags;
-          const pitchChanged = imageContext.showPitchAccentBadge !== appliedMetadata.showPitchAccentBadge;
+          const pitchChanged = ["showPitchAccentBadge", "showPitchAccentDictionaryNames", "showPitchAccentText",
+            "showPitchAccentPosition", "showPitchAccentGraph"].some(key => imageContext[key] !== appliedMetadata[key]);
           let changed = false;
           let deferred = false;
           if (labelsChanged) changed = updateMetadataLabels(primaryMetadataCapsule, results[0]);
           if (frequencyChanged || grammarChanged) {
-            renderPrimaryMetadataCapsule(primaryMetadataCapsule, results[0], imageContext.dictionaryPresentation || [],
-              imageContext.hidePopupGrammarTags !== false, imageContext.averageFrequency === true,
-              imageContext.showFrequencyDictionaryNames === true, { frequencyChanged, grammarChanged });
+            renderPrimaryMetadataCapsule(primaryMetadataCapsule, results[0], imageContext,
+              { frequencyChanged, grammarChanged });
             changed = true;
           }
           entryMetadata.forEach(({ header, metadata, grammarRow }, index) => {
@@ -3703,6 +3819,7 @@
       }
       const glyph = documentRef.createElement("div");
       glyph.className = "gsm-hoshidicts-kanji-glyph";
+      glyph.lang = "ja";
       glyph.textContent = kanji.character;
       navigation.appendChild(glyph);
       for (const previous of noteControls.actions.querySelectorAll(
@@ -4096,7 +4213,9 @@
             && context.popupImageSources !== imageContext.popupImageSources;
           if ((imagesChanged || summaryChanged) && ownsView() && options.canUpdateCompactSummary?.() === false) return true;
           const focused = popup.getRootNode().activeElement;
-          const next = createDictionaryTabs(dictionaries, context);
+          // Presentation updates carry the reader's inventory, not this view's
+          // clicked-kanji scope, which stays with the render that chose it.
+          const next = createDictionaryTabs(dictionaries, { ...renderContext, ...context });
           const previous = tabDescriptors;
           const selectedKey = previous[selectedIndex].key;
           let index = next.tabs.findIndex(tab => tab.key === selectedKey);
@@ -4211,6 +4330,7 @@
   }
 
   return {
+    findDifferentDictionary,
     createPopupAppearance,
     createCustomPopupStyle,
     resolveToolbarPosition,
@@ -4219,14 +4339,16 @@
     popupCoordinateScale,
     createDictionaryDisplayNames,
     createFrequencyTags,
-    createPitchTag,
     createPopupView,
+    createAudioControl,
+    deinflectionSteps,
     createSourceHighlighter,
     createTag,
     normaliseDictionaryTab,
     extractCompactDefinitionSummary,
     formatCompactFrequencyNumber,
     formatFrequencyValue,
+    kanjiEntryGlossary,
     metadataOptions,
   };
 }));

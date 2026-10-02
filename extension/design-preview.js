@@ -7,18 +7,13 @@
   const shadow = host.attachShadow({ mode: "open" });
   const appearance = HDPopup.createPopupAppearance(host);
   const customStyle = HDPopup.createCustomPopupStyle(shadow);
-  const stylesheet = document.createElement("link");
-  stylesheet.rel = "stylesheet";
-  stylesheet.href = "render/reader.css";
   const popup = document.createElement("div");
   popup.className = "gsm-hoshidicts-popup";
-  const iconStylesheet = document.createElement("link");
-  iconStylesheet.rel = "stylesheet";
-  iconStylesheet.href = "icons.css";
-  shadow.append(stylesheet, iconStylesheet, popup);
+  shadow.append(popup);
   const source = document.getElementById("preview-source");
-  const candidate = { query: "食べる", sentence: source.textContent,
-    sourceElements: [source], matchOffset: source.textContent.indexOf("食べる") };
+  const sourceOffset = source.textContent.indexOf("食べる");
+  const candidate = { query: "食べる", sentence: source.textContent, matchOffset: sourceOffset,
+    sourceElements: [source], sourceText: source.textContent, sourceOffset };
   let options = { ...HDReaderOptions.DEFAULT_OPTIONS };
   let state;
   let sample;
@@ -32,6 +27,12 @@
   let sampleMedia = null;
   let sampleLookupStats = null;
   let clickedKanjiIndex = 0;
+  const themeHost = HDThemeHost.createThemeHost({ getOptions: () => options,
+    assetUrl: path => new URL(path, document.baseURI).href,
+    onReady() { appearance.refreshHighlight(); positionPopup(); },
+  });
+  themeHost.attach(shadow);
+
   // Fixed mature word, count of 3 and native frequency samples; the shared
   // rules, real hover and real delay decide the preview's blur. Nothing is
   // recorded, looked up or sent to Anki.
@@ -87,9 +88,10 @@
     if (popup.dataset.toolbarPosition !== edge) view.setToolbarPosition(edge);
   }
 
-  const view = HDPopup.createPopupView({ document, window, popup,
+  const view = themeHost.createView({ document, window, popup,
+    sourceHighlighter: HDPopup.createSourceHighlighter(window, document, "gsm-hoshidicts-match", shadow),
     appendExpressionRuby: HDGlossary.appendExpressionRuby,
-    buildPitchAccentMorae: HDGlossary.buildPitchAccentMorae,
+    createPronunciationPitchAccent: HDGlossary.createPronunciationPitchAccent,
     appendTextOnlyGlossary: HDGlossary.appendTextOnlyGlossary,
     appendStructuredImage: HDGlossary.appendStructuredImage,
     parseTagList: HDGlossary.parseTagList,
@@ -108,10 +110,25 @@
     },
     onAddCustomEntry() { throw new Error("This is a preview. Notes are not saved."); },
     onCustomLinkClick(link) {
-      void (globalThis.browser ?? globalThis.chrome).runtime.sendMessage({ target: "hoshidicts-worker", type: "hd_open_external", ...link })
+      void globalThis.chrome.runtime.sendMessage({ target: "hoshidicts-worker", type: "hd_open_external", ...link })
         .catch(error => console.debug("hachidori: preview link could not be opened", error));
     },
-    onResultsRendered({ lookupStats }) {
+    onResultsRendered({ lookupStats, miningActions = [] }) {
+      // A visual sample only: the preview never connects to Anki or saves notes.
+      for (const { actions } of miningActions) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "gsm-hoshidicts-mine-button";
+        button.disabled = true;
+        button.title = "Mine to Anki (preview only)";
+        button.setAttribute("aria-label", button.title);
+        const icon = document.createElement("span");
+        icon.className = "gsm-hoshidicts-mine-icon hd-icon";
+        icon.dataset.icon = "add";
+        icon.setAttribute("aria-hidden", "true");
+        button.append(icon);
+        actions.prepend(button);
+      }
       sampleLookupStats = lookupStats;
       paintSampleLookupStats();
       updateSampleAudio();
@@ -165,7 +182,9 @@
           { dictionary: "Sample corpus", frequencies: [{ value: 18240, displayValue: "18,240" }] },
           ...installedFrequencies,
         ],
-        pitches: [{ dictionary: pitch, pitches: [{ position: 2, pattern: "LHL", nasal: [], devoice: [] }], transcriptions: ["ta̠be̞ɾɯ̟ᵝ"] }],
+        // The engine's shape for Yomitan's string form: the pattern beside a
+        // placeholder position of 0.
+        pitches: [{ dictionary: pitch, pitches: [{ position: 0, pattern: "LHL", nasal: [], devoice: [] }], transcriptions: ["ta̠be̞ɾɯ̟ᵝ"] }],
       } }];
     return { results, dictionaryPresentation: [
       { title: "Sample ranks", frequencyMode: "rank-based", frequencyCount: 2 },
@@ -195,28 +214,32 @@
 
   function renderSample(preserveViewControls = false) {
     if (kanjiCharacter) {
-      const capability = HDReaderOptions.resolveKanjiDictionary(options.kanjiClickDictionary, state.dictionaries);
+      const capability = HDReaderOptions.resolveKanjiDictionary(options.kanjiClickDictionary, state.dictionaries, state.groups);
       kanjiSource = capability;
       const renderContext = { ...context(), preserveViewControls, highlightText: candidate.query, onBack() {
         kanjiCharacter = null;
         renderSample();
         popup.querySelectorAll(".gsm-hoshidicts-kanji-link")[clickedKanjiIndex]?.focus({ preventScroll: true });
       } };
-      if (capability?.kind === "term") {
+      const nativeSample = (dictionary) => ({ dictionary, onyomi: "ショク ジキ", kunyomi: "た.べる く.う", tags: "常用",
+        definitions: ["eat", "food"], stats: [{ name: "strokes", value: "9" }, { name: "grade", value: "2" }] });
+      if (capability?.kind === "term" || capability?.kind === "group") {
+        // A group compares its members: one card each, in group order, with a tab per member.
+        const members = capability.kind === "group" ? capability.members : [capability];
         view.renderResults([{ matched: kanjiCharacter, trace: [], term: {
-          expression: kanjiCharacter, reading: "しょく", glossaries: [{ dictionary: capability.title,
-            glossary: JSON.stringify(["food; eating — sample single-kanji entry"]) }], frequencies: [], pitches: [],
-        } }], candidate, renderContext);
+          expression: kanjiCharacter, reading: "しょく", glossaries: members.map(member => ({ dictionary: member.title,
+            glossary: member.kind === "kanji" ? HDPopup.kanjiEntryGlossary(nativeSample(member.title))
+              : JSON.stringify(["food; eating — sample single-kanji entry"]) })), frequencies: [], pitches: [],
+        } }], candidate, capability.kind === "group"
+          ? { ...renderContext, dictionaryTabScope: members.map(member => member.title) } : renderContext);
         sampleTermView = true;
         armSampleBlur();
       } else {
         // Native kanji is outside term blur.
         sampleTermView = false;
         clearSampleBlurTimer();
-        view.renderKanji({ character: kanjiCharacter, entries: [{ dictionary: capability?.title || "Sample kanji",
-          onyomi: "ショク ジキ", kunyomi: "た.べる く.う", tags: "常用", definitions: ["eat", "food"],
-          stats: [{ name: "strokes", value: "9" }, { name: "grade", value: "2" }],
-        }] }, candidate, { ...renderContext, definitionBlurState: "revealed" });
+        view.renderKanji({ character: kanjiCharacter, entries: [nativeSample(capability?.title || "Sample kanji")] },
+          candidate, { ...renderContext, definitionBlurState: "revealed" });
       }
     } else {
       view.renderResults(sample.results, candidate, { ...context(), preserveViewControls,
@@ -231,6 +254,7 @@
   }
 
   window.HDDesignPreview = { update(nextOptions, nextState) {
+    const themeChanged = HDReaderOptions.popupRenderer(options.popupTheme) !== HDReaderOptions.popupRenderer(nextOptions.popupTheme);
     const toolbarChanged = !state || options.popupToolbarPosition !== nextOptions.popupToolbarPosition;
     const geometryChanged = !state || options.popupColumns !== nextOptions.popupColumns
       || options.popupWidthPx !== nextOptions.popupWidthPx || options.popupHeightPx !== nextOptions.popupHeightPx
@@ -244,6 +268,7 @@
     // A blur edit restarts the sample decision so its effect is visible.
     const blurChanged = !state || DEFINITION_BLUR_KEYS.some(key => options[key] !== nextOptions[key]);
     options = { ...nextOptions };
+    void themeHost.sync();
     view.setCustomButtons(options.customButtons);
     updateSampleAudio();
     if (geometryChanged) view.hideImagePreview();
@@ -258,6 +283,7 @@
       }
     }
     const key = JSON.stringify([HDPopup.metadataOptions(nextOptions),
+      nextOptions.popupTheme,
       nextOptions.showCompactDefinitionSummary, nextOptions.compactDefinitionSummaryCount,
       nextOptions.compactDefinitionSummaryDictionary, nextOptions.popupImageSource, nextOptions.kanjiClickDictionary, nextState.revision]);
     if (key === updateKey) return;
@@ -268,15 +294,14 @@
     const nextSample = createSample();
     const nextSampleKey = JSON.stringify(nextSample.results);
     sample = nextSample;
-    const changed = kanjiCharacter
-      ? JSON.stringify(kanjiSource) !== JSON.stringify(HDReaderOptions.resolveKanjiDictionary(options.kanjiClickDictionary, state.dictionaries))
-      : sampleKey !== nextSampleKey;
+    const changed = themeChanged || (kanjiCharacter
+      ? JSON.stringify(kanjiSource) !== JSON.stringify(HDReaderOptions.resolveKanjiDictionary(options.kanjiClickDictionary, state.dictionaries, state.groups))
+      : sampleKey !== nextSampleKey);
     sampleKey = nextSampleKey;
     if (changed) {
       if (!kanjiCharacter) termView = { ...view.captureTermView(), selectedDictionaryTab };
       renderSample(true);
     } else view.updateDictionaryPresentation(context());
   } };
-  stylesheet.addEventListener("load", () => { appearance.refreshHighlight(); view.scheduleMasonry(); });
   window.addEventListener("pagehide", () => { clearSampleBlurTimer(); customStyle.destroy(); appearance.destroy(); view.destroy(); }, { once: true });
 }());

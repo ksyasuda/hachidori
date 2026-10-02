@@ -100,6 +100,7 @@ const PAGE_HTML = `<!doctype html><html><head><meta charset="utf-8"><title>overl
   box("line", ${JSON.stringify(TEXT)}, 100);
   box("line2", "漢字", 200);
   window.__hostEvents = [];
+  window.addEventListener("mousedown", (event) => { window.__lastPressPrevented = event.defaultPrevented; });
   for (const type of ["hachidori-popup-shown", "hachidori-popup-hidden"]) {
     window.addEventListener(type, () => window.__hostEvents.push(type.replace("hachidori-popup-", "")));
   }
@@ -170,15 +171,6 @@ async function showSection(page, id) {
     const visible = [...document.querySelectorAll("main > section")].filter((node) => !node.hidden);
     return visible.length === 1 && visible[0].id === section;
   }, { timeout: 30_000, polling: 100 }, id);
-}
-
-// Media capture is an experimental feature: its section only joins the
-// navigation after the Advanced switch is on.
-async function enableMediaMining(page) {
-  await showSection(page, "advanced");
-  await page.click("#opt-experimental-mediaMining");
-  await page.waitForFunction(() => !document.querySelector('.settings-nav a[href="#media"]').parentElement.hidden,
-    { timeout: 10_000, polling: 100 });
 }
 
 async function editSettingsControls(settings, values) {
@@ -452,25 +444,10 @@ try {
     { effective: "light", stored: "auto" }, { effective: "dark", stored: "auto" },
   ], "overlay Settings follows the live browser preference from its first seeded options");
   await importFixture(settings);
-  await enableMediaMining(settings);
-  await showSection(settings, "media");
-  await settings.waitForFunction(() =>
-    [...document.querySelectorAll("#media button, #media input, #media select")].every(control => control.disabled));
-  await settings.waitForFunction(() => {
-    const status = document.getElementById("options-status").textContent;
-    return !status.includes("Unsaved") && !status.includes("Saving");
-  });
-  const mediaSettings = await settings.evaluate(() => ({
-    controlsDisabled: [...document.querySelectorAll("#media button, #media input, #media select")]
-      .every(control => control.disabled),
-    enabled: document.getElementById("opt-media-enabled").checked,
-    note: document.getElementById("media-overlay-help").textContent,
-    noteVisible: !document.getElementById("media-overlay-help").hidden,
-    status: document.getElementById("media-runtime-status").textContent,
-  }));
+  assert.equal(await settings.$("#media"), null, "removed recorder settings are absent");
   if (process.env.HACHIDORI_OVERLAY_SETTINGS_SCREENSHOT) {
+    await showSection(settings, "advanced");
     await settings.setViewport({ width: 1280, height: 1200 });
-    await settings.$eval("#media-heading", heading => heading.scrollIntoView({ block: "start" }));
     await settings.screenshot({ path: process.env.HACHIDORI_OVERLAY_SETTINGS_SCREENSHOT });
   }
   await showSection(settings, "keybinds");
@@ -512,24 +489,15 @@ try {
   await showSection(settings, "lookup");
   const readingSettings = await settings.evaluate(() => ({
     readingEnabled: !document.getElementById("opt-hover-enabled").disabled,
+    activationKey: document.getElementById("opt-activation-key").value,
+    keepOpenHidden: document.getElementById("opt-lookup-sticky-row").hidden,
     localFilePromptHidden: document.getElementById("settings-local-file-access").hidden,
     localFilePromptEmpty: document.getElementById("settings-local-file-access").childElementCount === 0,
   }));
-  const guardedRequests = await settings.evaluate(() => Promise.all([
-    chrome.runtime.sendMessage({ target: "hachidori-capture", type: "hd_capture_open", requestId: "overlay-ui-capture" }),
-
-    chrome.runtime.sendMessage({
-      target: "hoshidicts-worker", type: "hd_open_external", requestId: "overlay-ui-link",
-      url: "https://example.test/", active: true,
-    }),
-  ]));
-  assert.deepEqual(mediaSettings, {
-    controlsDisabled: true,
-    enabled: false,
-    note: "Hachidori recording is unavailable in this embedded overlay. GameSentenceMiner owns game screenshots, recordings and sentence audio; these saved browser settings are left unchanged.",
-    noteVisible: true,
-    status: "Media capture is unavailable in this overlay.",
-  });
+  const guardedRequests = await settings.evaluate(() => chrome.runtime.sendMessage({
+    target: "hoshidicts-worker", type: "hd_open_external", requestId: "overlay-ui-link",
+    url: "https://example.test/", active: true,
+  }));
   assert.deepEqual(keybindSettings, { browserDisabled: true, browserHelpVisible: true, pageKeybindsEnabled: true });
   assert.deepEqual(designSettings, {
     customButtonsDisabled: false,
@@ -542,12 +510,10 @@ try {
   assert.equal(ankiSettings.screenshotDisabled, true);
   assert.equal(ankiSettings.screenshotEnabled, false);
   assert.match(ankiSettings.screenshotHelp, /unavailable in this overlay/u);
-  assert.deepEqual(readingSettings, { readingEnabled: true, localFilePromptHidden: true, localFilePromptEmpty: true });
-  assert.ok(guardedRequests[0].ok === false && guardedRequests[0].error.includes("unavailable in this overlay")
-    && guardedRequests[1].ok === false && guardedRequests[1].error.includes("only from lookup popups"),
+  assert.deepEqual(readingSettings, { readingEnabled: true, activationKey: "", keepOpenHidden: true,
+    localFilePromptHidden: true, localFilePromptEmpty: true }, "a seeded overlay shows No key");
+  assert.ok(guardedRequests.ok === false && guardedRequests.error.includes("only from lookup popups"),
   JSON.stringify(guardedRequests));
-  assert.equal(browser.targets().some(target => target.url().endsWith("/capture.html")), false,
-    "disabled media controls never open a capture tab");
   // Setup never opens in an overlay: the host has no tab to show it in.
   assert.equal(browser.targets().some((target) => target.url().endsWith("/startup.html")), false,
     "overlay mode opens no startup page");
@@ -566,7 +532,6 @@ try {
         id: "remote-link", type: "link", label: "Remote link", url: "https://example.test/%w",
       }],
       customLinks: [{ label: "Remote link", url: "https://example.test/%w" }],
-      mediaCapture: { ...options.mediaCapture, enabled: true },
       revision: options.revision + 1,
     } });
   });
@@ -900,6 +865,104 @@ try {
   assert.equal(beyond, TEXT.slice(2), "dragging past the last box keeps its glyph");
   await tab.keyboard.press("Escape");
   assert.equal(await popup.waitForHidden(), true);
+
+  // Over a full-window layer with an in-flow caption (SubMiner's subtitle
+  // overlay), the caret APIs snap to the caption from anywhere. A press away
+  // from it pressed no glyph: the page keeps its press and no drag starts.
+  await tab.evaluate(() => {
+    window.getSelection().removeAllRanges();
+    const layer = document.createElement("div");
+    layer.id = "caption-layer";
+    layer.style.cssText = "position:fixed;inset:0;display:flex;align-items:flex-end;justify-content:center";
+    layer.innerHTML = '<span style="font-size:34px;margin-bottom:20px">下の字幕です</span>';
+    document.body.append(layer);
+  });
+  await settle();
+  await events();
+  await tab.mouse.move(boxes[0].x, second.y + second.height + 150);
+  await tab.mouse.down();
+  const awayPrevented = await tab.evaluate(() => window.__lastPressPrevented);
+  await tab.mouse.up();
+  await settle();
+  await tab.evaluate(() => document.getElementById("caption-layer").remove());
+  assert.deepEqual({ prevented: awayPrevented, selected: await selected(), popup: popup.visible(await popup.state()) },
+    { prevented: false, selected: "", popup: false }, "a press away from every glyph starts no glyph drag");
+  await events();
+
+  // With the personal dictionary off a drag only selects text to copy:
+  // releasing looks nothing up and hands the window straight back.
+  await editSettingsControls(settings, { "opt-personal-dictionary": false });
+  await tab.bringToFront();
+  await tab.evaluate(() => window.getSelection().removeAllRanges());
+  await tab.mouse.move(2, 2);
+  await tab.mouse.move(...trailing(boxes[0]));
+  await settle();
+  await events();
+  await tab.evaluate(() => { document.documentElement.dataset.hachidoriPhysicalClickRequests = "[]"; });
+  await tab.mouse.down();
+  await tab.mouse.move(...trailing(boxes[5]), { steps: 10 });
+  await tab.mouse.up();
+  await settle();
+  const lookups = await tab.evaluate(() => JSON.parse(document.documentElement.dataset.hachidoriPhysicalClickRequests
+    || "[]").filter(request => request.type === "hd_lookup").length);
+  assert.deepEqual({ selected: await selected(), events: await events(), popup: popup.visible(await popup.state()), lookups },
+    { selected: TEXT, events: ["shown", "hidden"], popup: false, lookups: 0 },
+    "with the personal dictionary off, a released drag keeps its selection without a lookup or the host claim");
+  await tab.evaluate(() => window.getSelection().removeAllRanges());
+  await editSettingsControls(settings, { "opt-personal-dictionary": true });
+
+  // Issue #357: a scan mouse button's press claims the window before a host's
+  // own document mousedown listener runs, as GSM's does, and holds the claim
+  // until a release leaves no popup open.
+  const writeOptions = patch => settings.evaluate(async (options) => {
+    const stored = (await chrome.storage.local.get("options")).options;
+    const baseRevision = Number.isInteger(stored?.revision) && stored.revision >= 0 ? stored.revision : 0;
+    const reply = await chrome.runtime.sendMessage({ target: "hoshidicts-worker", type: "hd_options_write",
+      requestId: "overlay-scan-button", baseRevision, options });
+    if (!reply.ok) throw new Error(reply.error);
+  }, patch);
+  await writeOptions({ lookupMode: "activation", activationKey: "MouseMiddle" });
+  await tab.bringToFront();
+  await tab.evaluate(() => {
+    window.__pressEvents = [];
+    document.addEventListener("mousedown", () => window.__pressEvents.push([...window.__hostEvents]));
+  });
+  const pressEvents = () => tab.evaluate(() => window.__pressEvents.splice(0));
+  // Like a held key, a scan press looks up a selection first; the drags above left one.
+  await tab.evaluate(() => window.getSelection().removeAllRanges());
+  const away = [50, 400];
+  await tab.mouse.move(...away);
+  await settle();
+  await events();
+  await tab.mouse.down({ button: "middle" });
+  await settle();
+  await tab.mouse.up({ button: "middle" });
+  await settle();
+  assert.deepEqual({ atPress: await pressEvents(), events: await events(), popup: popup.visible(await popup.state()) },
+    { atPress: [["shown"]], events: ["shown", "hidden"], popup: false },
+    "a scan press away from text claims the window at once and its release gives it back");
+  await tab.mouse.move(...middle(boxes[0]));
+  await tab.mouse.down({ button: "middle" });
+  const scanned = await popup.waitForVisible();
+  await tab.mouse.up({ button: "middle" });
+  const closed = await popup.waitForHidden();
+  assert.ok(scanned?.plain.includes("食べる"), `holding the scan button reads the boxed word: ${JSON.stringify(scanned)}`);
+  assert.deepEqual({ atPress: await pressEvents(), events: await events(), closed },
+    { atPress: [["shown"]], events: ["shown", "hidden"], closed: true },
+    "a scan press on a glyph claims the window before the host hears it, and activation release closes the popup");
+  await writeOptions({ lookupMode: "activationSticky", activationKey: "MouseMiddle" });
+  await tab.mouse.move(...away);
+  await tab.mouse.move(...middle(boxes[0]));
+  await tab.mouse.down({ button: "middle" });
+  const sticky = await popup.waitForVisible();
+  await tab.mouse.up({ button: "middle" });
+  await settle(500);
+  assert.ok(sticky?.plain.includes("食べる") && popup.visible(await popup.state()),
+    `a sticky scan popup stays after release: ${JSON.stringify(sticky)}`);
+  assert.deepEqual(await events(), ["shown"], "the sticky popup keeps the claim after release");
+  await tab.keyboard.press("Escape");
+  assert.equal(await popup.waitForHidden(), true);
+  assert.deepEqual(await events(), ["hidden"]);
 
   passed = true;
   console.log("overlay mode selects boxed glyphs by drag, offers the pencil for unknown text and keeps the host window claimed");
