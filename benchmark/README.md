@@ -89,9 +89,11 @@ and complete-result measurements; see [the theme report](../docs/themes/benchmar
 
 Use `HACHIDORI_HOVER_SAMPLES` to change the profile count. Each profile also times
 1,000 production `resolveCandidate()` calls at a glyph, 1,000 at a point in
-the tile's padding, 20 CSS pixels left of the text, and 1,000 at a word 600
+the tile's padding, 20 CSS pixels left of the text, 1,000 at a word 600
 characters into a 5,000-character paragraph held in one text node with no
-sentence terminator, after 100 excluded warmups per point.
+sentence terminator, and 1,000 at the first glyph of a text input, which reuse
+its imposter, after 100 excluded warmups per point. Its `fieldBuild` times 200
+first hovers of that input, each building a fresh imposter.
 `session-*-hit-testing.json` records coordinates, duration and accepted
 candidate counts, so a padding miss can be distinguished from a false lookup.
 Its `sentenceCost` times the sentence extraction alone on that long-paragraph
@@ -637,6 +639,32 @@ node benchmark/anki-index-refresh.mjs --notes 20000 --runs 5 \
 `--back-bytes 2000` pads the second field of newly seeded notes to a realistic
 mined-note size; use another `--model`/`--deck` for that collection so the
 plain one stays comparable. Seeding is idempotent and only adds missing notes.
+
+### Popup readiness for several results
+
+`anki-popup-readiness.mjs` measures what a popup's Anki buttons cost before
+they are ready, against the same kind of isolated Anki. It loads one
+checkout's production gateway, duplicate index, live lookup and mining
+service, starts each sample from an empty index, and runs `status()` and then
+every result's preflight the way that checkout's reader asks: one batch if the
+service has `preflightMany`, otherwise one preflight per result in order. It
+reports the AnkiConnect request sequence, the decisions, and the time until the
+last result is ready, for each duplicate policy, **Check within** scope and
+result count. Its collection has a Kiku-layout destination and three other
+recognized note types, so deck and All of Anki scope read their fields. Pass
+another checkout's `--extension` to compare revisions with the same harness:
+
+```sh
+node benchmark/anki-popup-readiness.mjs --extension /path/to/checkout/extension \
+  --entries 1,5,10 --runs 10 --endpoint http://127.0.0.1:18765 \
+  --expected-media-dir /tmp/hachidori-anki-index-benchmark/base/HachidoriBenchmark/collection.media \
+  --output /tmp/anki-popup-readiness.json
+```
+
+`--seed 20000` first pads the destination note type with that many notes that
+match no result, so each field search scans a realistic collection.
+`--glossary-bytes 20000` gives every note a glossary of that size, so the add
+check carries the rendered fields a structured dictionary produces.
 
 ### Scheduling inside a real Electron overlay host
 

@@ -22,6 +22,7 @@ import {
   MANY_BANK_TITLE,
   MEDIA_PATH,
   STYLES,
+  TAGS,
   TERMS,
   LONG_KEY_TITLE,
   LONG_KEY_PROVERB,
@@ -170,6 +171,11 @@ const KANJI_ENTRY = {
 };
 const LOOKUP_KANJI = { character: 'string', entries: arrayOf(KANJI_ENTRY) };
 const STYLE = { dictionary: 'string', styles: 'string' };
+const TAG = { name: 'string', category: 'string', order: 'number', notes: 'string', score: 'number' };
+const DICTIONARY_TAGS = { dictionary: 'string', tags: arrayOf(TAG) };
+// The fixture's tag bank as hdw_tags returns it, in bank order.
+const FIXTURE_TAGS = [{ dictionary: TITLE, tags: TAGS.map(([name, category, order, notes, score]) =>
+  ({ name, category, order, notes, score })) }];
 const IMPORT_REPORT = {
   success: 'boolean',
   title: 'string',
@@ -179,8 +185,15 @@ const IMPORT_REPORT = {
   pitchCount: 'int',
   kanjiCount: 'int',
   mediaCount: 'int',
+  skippedRecordCount: 'int',
+  unresolvedRedirectCount: 'int',
+  missingResourceCount: 'int',
+  unreadableResourceCount: 'int',
   error: 'string',
 };
+// What a successful MDX import left out; a Yomitan archive reports 0 for each.
+const MDX_LOSS_COUNTS = ['skippedRecordCount', 'unresolvedRedirectCount', 'missingResourceCount',
+  'unreadableResourceCount'];
 
 function shapeProblems(value, shape, path = '$', out = []) {
   if (typeof shape === 'string') {
@@ -267,6 +280,7 @@ const lookupDictionary = (text, path, maxResults = 32, scanLength = 16, options 
 );
 const kanji = (character) => JSON.parse(call('hdw_kanji', 'string', ['string'], [character]));
 const styles = () => JSON.parse(call('hdw_styles', 'string', [], []));
+const tags = () => JSON.parse(call('hdw_tags', 'string', [], []));
 const media = (dictionary, path) => call('hdw_media', 'number', ['string', 'string'], [dictionary, path]);
 const mediaBytes = (length) => {
   // 'pointer', as offscreen.js uses: only that return type is masked back to
@@ -306,6 +320,9 @@ check('title', () => eq(report.title, EXPECTED.title, 'title'));
 for (const key of ['termCount', 'metaCount', 'frequencyCount', 'pitchCount', 'kanjiCount', 'mediaCount']) {
   check(key, () => eq(report[key], EXPECTED[key], key));
 }
+check('a Yomitan archive reports no MDX import losses', () => {
+  for (const key of MDX_LOSS_COUNTS) eq(report[key], 0, key);
+});
 check('last_error cleared after a successful import', () => eq(lastError(), '', 'hdw_last_error'));
 check('output directory laid out as add_dict expects', () => {
   const entries = entriesOf(DICT_DIR);
@@ -691,7 +708,56 @@ check('ipa transcriptions merge into the same pitch entry', () => {
 
 // ---------------------------------------------------------------------------
 
-G('hdw_kanji / hdw_styles / hdw_media');
+G('text frequencies');
+
+// Yomitan's schema lets a frequency be a string, bare or under a reading, and
+// some lists store every rank that way (monogatari: "324/37459"). As in
+// Yomitan's Translator._getFrequencyInfo, the text is displayed unchanged and
+// its first number is the value. The package gets its own output directory so
+// the /dicts checks below still see only the fixture.
+const TEXT_FREQUENCY_TITLE = 'text-frequency-fixture';
+const TEXT_FREQUENCY_OUT = '/work/text-frequency';
+M.FS.mkdir(TEXT_FREQUENCY_OUT);
+M.FS.writeFile('/work/text-frequency.zip', buildTitledZip(TEXT_FREQUENCY_TITLE, {
+  banks: false,
+  termMeta: [
+    ['食べる', 'freq', '324/37459'],
+    ['読む', 'freq', { reading: 'よむ', frequency: 'five (5)' }],
+    ['読む', 'freq', { reading: 'とく', frequency: 'six (6)' }],
+  ],
+}));
+const textFrequencyReport = hdwImport('/work/text-frequency.zip', TEXT_FREQUENCY_OUT);
+check('a frequency-only archive of text values imports', () => {
+  eq(textFrequencyReport.success, true, `import failed: ${textFrequencyReport.error}`);
+  eq(textFrequencyReport.frequencyCount, 3, 'frequencyCount');
+});
+eq(addDict(`${TEXT_FREQUENCY_OUT}/${TEXT_FREQUENCY_TITLE}`, KINDS.freq), 1, `add text frequencies: ${lastError()}`);
+
+check('a bare text frequency shows its text, with its first number as the value', () => {
+  same(
+    lookup('食べる').results[0].term.frequencies,
+    [
+      { dictionary: TITLE, frequencies: [{ value: 142, displayValue: '142位' }] },
+      { dictionary: TEXT_FREQUENCY_TITLE, frequencies: [{ value: 324, displayValue: '324/37459' }] },
+    ],
+    'frequencies',
+  );
+});
+
+check('a text frequency under a reading applies to that reading only', () => {
+  same(
+    lookup('読む').results[0].term.frequencies,
+    [
+      { dictionary: TITLE, frequencies: [{ value: 88, displayValue: '88' }] },
+      { dictionary: TEXT_FREQUENCY_TITLE, frequencies: [{ value: 5, displayValue: 'five (5)' }] },
+    ],
+    'frequencies',
+  );
+});
+
+// ---------------------------------------------------------------------------
+
+G('hdw_kanji / hdw_styles / hdw_tags / hdw_media');
 
 check('kanji hit conforms and carries sorted stats', () => {
   const result = kanji('食');
@@ -726,6 +792,13 @@ check('styles come from the imported index.json', () => {
   const result = styles();
   conforms(result, arrayOf(STYLE), 'hdw_styles');
   same(result, [{ dictionary: TITLE, styles: STYLES }], 'styles');
+});
+
+check('tag banks come from the imported index.json, every row in bank order', () => {
+  const result = tags();
+  eq(lastError(), '', 'hdw_last_error');
+  conforms(result, arrayOf(DICTIONARY_TAGS), 'hdw_tags');
+  same(result, FIXTURE_TAGS, 'tags');
 });
 
 check('media returns the byte length and the real file bytes', () => {
@@ -932,12 +1005,14 @@ check('reset drops every dictionary', () => {
   same(lookup('食べる'), { results: [], dictionaryCount: 0 }, 'lookup with zero dictionaries');
   same(kanji('食'), { character: '', entries: [] }, 'kanji with zero dictionaries');
   same(styles(), [], 'styles with zero dictionaries');
+  same(tags(), [], 'tags with zero dictionaries');
   eq(media(TITLE, MEDIA_PATH), 0, 'media with zero dictionaries');
 });
 
 check('dictionaries can be reloaded from the same MEMFS directory', () => {
   eq(addDict(DICT_DIR, 0), 1, `add_dict after reset: ${lastError()}`);
   eq(lookup('食べたかった').results[0].term.expression, '食べる', 'expression');
+  same(tags(), FIXTURE_TAGS, 'tags after the reload');
 });
 
 // Linear memory never shrinks: the import high-water mark stays for the life
@@ -1006,6 +1081,7 @@ check('a successful re-import replaces the dictionary in place', () => {
   );
   eq(addDict(DICT_DIR, 0), 1, `add_dict after the re-import: ${lastError()}`);
   eq(lookup('食べたかった').results[0].term.expression, '食べる', 'expression');
+  same(tags(), FIXTURE_TAGS, 'tags after the re-import');
 });
 
 // ---------------------------------------------------------------------------
@@ -1142,6 +1218,9 @@ check('a .hoshidicts_3 directory from the previous engine still loads beside a f
   // The int32 score of the old layout and the double of the new one must read
   // back as the same number, or the score change silently reorders results.
   eq(merged.term.score, 120, 'score across both layouts');
+  // The previous engine only counted its tag banks: until it is imported
+  // again, that directory has no tags, and the fresh one keeps its own.
+  same(tags(), FIXTURE_TAGS, 'tags beside a directory imported before tag banks were stored');
 });
 
 check('a .hoshidicts_4 directory from the previous engine still decompresses its glossaries', () => {
@@ -1386,13 +1465,13 @@ G('MDX import');
 
 // hoshidicts imports an MDict .mdx directly (format decided by content, not
 // extension) and reads `<stem>.mdd` beside it for media and stylesheets. The
-// fixtures in test/mdict are copies of the engine's own
-// (tests/fixtures/mdict/v2_utf8_lzo_html.* from gen_fixtures.py, committed here
-// because the smoke suites run without the submodule): an HTML MDX with an
-// @@@LINK alias, duplicate headwords, a StyleSheet substitution and an MDD
-// holding a PNG, a CSS file and a traversal key. hdw_import's title pre-check
-// reads index.json out of a ZIP, so this is also the proof that an MDict file
-// gets past it and through the same staging.
+// fixtures in test/mdict are byte copies of the engine's own
+// (tests/fixtures/mdict, written by gen_fixtures.py; committed here because
+// the smoke suites run without the submodule). v2_utf8_lzo_html is an HTML MDX
+// with an @@@LINK alias, duplicate headwords, a StyleSheet substitution and an
+// MDD holding a PNG, a CSS file and a traversal key. hdw_import's title
+// pre-check reads index.json out of a ZIP, so this is also the proof that an
+// MDict file gets past it and through the same staging.
 const MDX_FIXTURES = join(HERE, 'mdict');
 const MDX_TITLE = 'HTML Fixture';
 const MDX_DIR = `/dicts/${MDX_TITLE}`;
@@ -1409,10 +1488,32 @@ check('an .mdx with its .mdd imports through hdw_import', () => {
   eq(mdxReport.success, true, `import failed: ${mdxReport.error}`);
   eq(mdxReport.title, MDX_TITLE, 'title from the MDX header');
   eq(mdxReport.termCount, 8, 'seven entries plus the alias headword');
-  eq(mdxReport.mediaCount, 4, 'referenced MDD assets and the stylesheets');
+  // style.css, utf16.css and img/pic.png; a disabled sound:// link imports nothing.
+  eq(mdxReport.mediaCount, 3, 'referenced MDD assets and the stylesheets');
   ok(M.FS.readdir('/dicts').includes(MDX_TITLE), '/dicts holds the MDX beside the ZIP imports');
   ok(!M.FS.readdir('/dicts').includes('.hdw-import'), 'no staging directory left behind');
   ok(markerOf(entriesOf(MDX_DIR)) !== undefined, `no marker in ${JSON.stringify(entriesOf(MDX_DIR).sort())}`);
+});
+
+check('the MDX import report counts what it left out', () => {
+  eq(mdxReport.skippedRecordCount, 0, 'skippedRecordCount');
+  eq(mdxReport.unresolvedRedirectCount, 1, 'missing-alias (@@@LINK=nowhere) is unresolved');
+  eq(mdxReport.missingResourceCount, 1, '../evil.png is a traversal key, so no MDD provides it');
+  eq(mdxReport.unreadableResourceCount, 0, 'unreadableResourceCount');
+});
+
+check('an .mdx chosen without its .mdd reports its images and styles missing', () => {
+  const out = '/work/mdx-alone';
+  M.FS.mkdir(out);
+  M.FS.mkdir('/work/mdx-alone-source');
+  M.FS.writeFile('/work/mdx-alone-source/Alone.mdx',
+    new Uint8Array(readFileSync(join(MDX_FIXTURES, 'v2_utf8_lzo_html.mdx'))));
+  const r = hdwImport('/work/mdx-alone-source/Alone.mdx', out);
+  conforms(r, IMPORT_REPORT, 'ImportReport');
+  eq(r.success, true, `import failed: ${r.error}`);
+  eq(r.mediaCount, 0, 'no media without an MDD');
+  eq(r.missingResourceCount, 2, 'img/pic.png and evil.png are missing');
+  eq(r.unresolvedRedirectCount, 1, 'missing-alias is unresolved');
 });
 
 check('the MDX dictionary loads and answers like a Yomitan one', () => {
@@ -1437,6 +1538,7 @@ check('MDD stylesheets and media come through hdw_styles and hdw_media', () => {
   eq(length, 69, 'PNG byte length');
   same([...mediaBytes(length).subarray(0, 4)], [0x89, 0x50, 0x4e, 0x47], 'PNG signature');
   eq(media(MDX_TITLE, 'mdict-media/evil.png'), 0, 'a traversal MDD key is not imported');
+  eq(media(MDX_TITLE, 'mdict-media/a.spx'), 0, 'a disabled sound:// file is not imported');
 });
 
 check('an .mdd on its own is refused and leaves no debris', () => {
@@ -1445,6 +1547,65 @@ check('an .mdd on its own is refused and leaves no debris', () => {
   eq(r.success, false, 'success');
   ok(r.error.includes('MDD resource file'), `error: ${r.error}`);
   ok(!M.FS.readdir('/dicts').includes('.hdw-import'), 'no staging directory left behind');
+});
+
+// Issue #437's reproduction, copied from the engine's fixtures like the pair
+// above: key_rules.mdx with MDict's default key rules (no KeyCaseSensitive or
+// StripKey attribute), key_rules_exact.mdx with KeyCaseSensitive="Yes"
+// StripKey="No"; css_charsets.mdd with Shift_JIS sheets with and without
+// @charset, a windows-1252 sheet that declares it (and undecodable ones the
+// engine leaves out); and legacy_font.mdx with three <font size> elements.
+const importMdx = (stem, companions = []) => {
+  M.FS.mkdir(`/work/${stem}`);
+  for (const name of [`${stem}.mdx`, ...companions]) {
+    M.FS.writeFile(`/work/${stem}/${name}`, new Uint8Array(readFileSync(join(MDX_FIXTURES, name))));
+  }
+  reset();
+  const report = hdwImport(`/work/${stem}/${stem}.mdx`, '/dicts');
+  if (report.success) {
+    eq(addDict(`/dicts/${report.title}`, 0), 1, `add_dict ${report.title}: ${lastError()}`);
+  }
+  return report;
+};
+const headword = (text) => lookup(text).results.find((result) => result.term.expression === text);
+
+check('@@@LINK aliases follow MDict\'s default key rules and chains', () => {
+  const report = importMdx('key_rules');
+  eq(report.success, true, `import failed: ${report.error}`);
+  eq(report.termCount, 7, 'three entries, three aliases and the two-hop alias');
+  for (const [alias, definition] of [['ティーシャツ', 'T-shirt'], ['ワイファイ', 'wireless LAN'], ['AliasOne', 'definition']]) {
+    const glossary = String(headword(alias)?.term.glossaries[0]?.glossary);
+    ok(glossary.includes(definition), `${alias} carries its target's definition: ${glossary}`);
+  }
+});
+
+check('KeyCaseSensitive="Yes" StripKey="No" resolve only exact targets', () => {
+  const report = importMdx('key_rules_exact');
+  eq(report.success, true, `import failed: ${report.error}`);
+  eq(report.termCount, 5, 'three entries and the two exactly spelled aliases');
+  eq(headword('ティーシャツ'), undefined, '@@@LINK=tシャツ does not match Tシャツ');
+  eq(headword('ワイファイ'), undefined, '@@@LINK=WiFi does not match Wi-Fi');
+  ok(headword('AliasOne'), 'the exact two-hop chain still resolves');
+});
+
+check('Shift_JIS and windows-1252 MDD stylesheets import as UTF-8', () => {
+  const report = importMdx('css_charsets', ['css_charsets.mdd']);
+  eq(report.success, true, `import failed: ${report.error}`);
+  const sheet = styles().find((entry) => entry.dictionary === report.title)?.styles ?? '';
+  ok(sheet.includes('.日本 { color: red; }'), `Shift_JIS sheet with @charset decoded: ${sheet}`);
+  ok(sheet.includes('.日本 { color: green; }'), 'Shift_JIS sheet without @charset decoded');
+  ok(sheet.includes('.café { color: red; }'), 'windows-1252 sheet decoded');
+  ok(!sheet.includes('@charset'), 'no @charset rule left in the combined sheet');
+  ok(!sheet.includes('\ufffd'), 'no replacement characters');
+});
+
+check('<font size> becomes a CSS keyword and inline style wins', () => {
+  const report = importMdx('legacy_font');
+  eq(report.success, true, `import failed: ${report.error}`);
+  const glossary = String(headword('font')?.term.glossaries[0]?.glossary);
+  ok(glossary.includes('"style":{"color":"red","fontSize":"medium"}'), `size="3": ${glossary}`);
+  ok(glossary.includes('"style":{"fontSize":"x-large"}'), 'size="+2"');
+  ok(glossary.includes('"style":{"fontSize":"20px"}'), 'the inline style wins over size="5"');
 });
 
 G('production custom dictionary ZIP');
@@ -1475,7 +1636,7 @@ check('production ZIP imports through the real WASM importer', () => {
   eq(customReport.success, true, `custom import failed: ${customReport.error}`);
   eq(customReport.title, CUSTOM_DICTIONARY_TITLE, 'custom dictionary title');
   eq(customReport.termCount, 1_001, 'custom term count');
-  for (const key of ['metaCount', 'frequencyCount', 'pitchCount', 'kanjiCount', 'mediaCount']) {
+  for (const key of ['metaCount', 'frequencyCount', 'pitchCount', 'kanjiCount', 'mediaCount', ...MDX_LOSS_COUNTS]) {
     eq(customReport[key], 0, `custom ${key}`);
   }
 });

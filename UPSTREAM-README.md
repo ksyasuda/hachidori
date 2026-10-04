@@ -29,6 +29,12 @@
 
 Hachidori is a blazing fast Japanese Dictionary Chrome Extension that is feature rich and opinionated.
 
+<p align="center">
+  <a href="https://cdn.jsdelivr.net/gh/bee-san/hachidori@27ac4da45bf6c63f07f16108af386a941b3972b9/media/promo-video/out/hachidori-promo.mp4"><img src="https://cdn.jsdelivr.net/gh/bee-san/hachidori@27ac4da45bf6c63f07f16108af386a941b3972b9/media/promo-video/out/hachidori-promo.gif" width="720" alt="One-minute tour of Hachidori: importing dictionaries in seconds, hover lookups with conjugation, pitch accent and frequency, lookups in text boxes, one-click Anki cards, the personal dictionary, lookup blur and popup themes"></a>
+  <br>
+  <a href="https://cdn.jsdelivr.net/gh/bee-san/hachidori@27ac4da45bf6c63f07f16108af386a941b3972b9/media/promo-video/out/hachidori-promo.mp4">▶ Watch the one-minute tour (MP4)</a>
+</p>
+
 ## Install in 15 seconds
 
 Click <a href="https://chromewebstore.google.com/detail/hachidori/mikpaebfdmidjnopgffchicnmoahhcbe">here to install from Chrome store.</a> (note: this will always lag behind the repo and may have bugs fixed in the repo)
@@ -52,7 +58,7 @@ Do you keep on seeing a name pop up over & over again in a book, but it's not in
 
 With Hachidori, you can highlight the word and add it as a custom definition.
 
-Never add your own words? Turn off **Settings → Reading → Personal dictionary →
+Never add your own words? Turn off **Settings → Library → Personal dictionary →
 Use the personal dictionary** and highlighting text no longer opens a popup.
 
 <p align="center">
@@ -91,14 +97,18 @@ changing and may be removed:
   (proverbs, titles) without scanning further on every hover.
 - **MDX dictionaries** — import MDict `.mdx` dictionaries with their `.mdd`
   resource files from **Add dictionaries**, next to Yomitan ZIPs. Choose the
-  `.mdx` and its `.mdd` files together.
+  `.mdx` and its `.mdd` files together. When an import leaves something out
+  (unreadable entries, aliases with no target, or images and styles no `.mdd`
+  provides), its row says so with a note for each.
 - **Google Docs** — look up words while reading a Google Doc. Docs paints its
   text to a canvas; Hachidori asks it to expose the text as well, which Google
   may change or remove without notice. The sentence is the hovered run of text.
 - **Smaller Anki cards** — write compact definitions to new Anki notes. The
   dictionary stylesheets, classes and wrappers are left out; the text, line
   breaks, lists, tables, furigana, images and the markers note types such as
-  Lapis, Kiku and Senren rely on are kept. A Jitendex note shrinks to about a
+  Lapis, Kiku and Senren rely on are kept. As in Yomitan, the definition ends
+  without a Rules/Deinflection line; use `{part-of-speech}` and
+  `{conjugation}` for that information. A Jitendex note shrinks to about a
   quarter of its size. Notes already in Anki are not changed. The behaviour
   follows the Compact HTML Cleanup Anki add-on.
 
@@ -126,6 +136,8 @@ The logo pack and six visual novel backgrounds were supplied by bee-san. See the
 assets and their copyright declaration.
 
 Hachidori is powered by [hoshidicts](https://github.com/Manhhao/hoshidicts) by Manhhao. Its popup renderer, structured-content renderer, furigana segmentation, and CSS are ported from [GameSentenceMiner PR #549](https://github.com/bpwhelan/GameSentenceMiner/pull/549), which adapts [Hoshi Reader](https://github.com/Manhhao/Hoshi-Reader) and [Yomitan](https://github.com/yomidevs/yomitan). See the full [renderer attribution](extension/render/ATTRIBUTION.md).
+
+Headword furigana use the kanji readings of [KANJIDIC2](https://www.edrdg.org/wiki/index.php/KANJIDIC_Project). This file is the property of the [Electronic Dictionary Research and Development Group](https://www.edrdg.org/), and is used in conformance with the Group's [licence](https://www.edrdg.org/edrdg/licence.html). The readings in `extension/vendor/kanjidic/` remain under [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/).
 
 ## License
 

@@ -165,10 +165,10 @@
       activeTermRender: null, currentViewRequest: null, noteEditing: false,
       pendingCustomAppends: 0, deferredDictionaryInvalidationRevision: -1,
       deferredRefresh: null, lookupToken: 0, pendingHover: null, pendingLink: null,
-      pendingPopupInteraction: null,
       retainedView: false,
       pendingViewReplay: null,
       blurTimer: null,
+      placedAnchor: null,
     };
   }
 
@@ -203,6 +203,9 @@
   let pointerInPopup = false;
   let activationPressed = false;
   let activationCode = null;
+  // A press or a key since the pointer last moved: the reader may be typing in
+  // the field under the pointer rather than pointing at its text.
+  let editedSincePointerMoved = false;
   // The scan button's last press and the native actions it cancels.
   let scanPress = null;
   let pendingCandidateLookup = null;
@@ -220,8 +223,8 @@
   let dictionaryStateRevision = -1;
   let lookupStatsDescriptor = { generation: null, revision: -1 };
   const DEFINITION_BLUR_KEYS = [
-    "definitionBlurEnabled", "definitionBlurAnkiMature", "definitionBlurFrequencyEnabled",
-    "definitionBlurFrequencyDictionary", "definitionBlurFrequencyOrder", "definitionBlurFrequencyThreshold",
+    "definitionBlurCountEnabled", "definitionBlurAnkiMature", "definitionBlurFrequencyEnabled",
+    "definitionBlurFrequencyDictionary", "frequencyDictionary", "definitionBlurFrequencyOrder", "definitionBlurFrequencyThreshold",
     "definitionBlurDirection", "definitionBlurThreshold", "definitionBlurReveal", "definitionBlurDelayMs",
   ];
 
@@ -410,8 +413,7 @@
         continue;
       }
       for (const entry of nativeEntries.filter((candidate) => candidate.dictionary === member.title)) {
-        append({ matched: character, term: { expression: character, reading: "", frequencies: [], pitches: [],
-          glossaries: [{ dictionary: entry.dictionary, glossary: window.HDPopup.kanjiEntryGlossary(entry) }] } });
+        append(window.HDPopup.kanjiEntryResult(character, entry));
       }
     }
     return merged;
@@ -451,6 +453,10 @@
   }
 
   function isOurNode(node) {
+    // The text-field imposter can exist before the popup host does.
+    if (fieldImposter?.container.contains(node)) {
+      return true;
+    }
     if (!host) {
       return false;
     }
@@ -698,20 +704,71 @@
    * start in it; the highlighter and rawMatchedText work there. `sentence` and
    * `matchOffset` are Yomitan's sentence around the match, which Anki notes,
    * the Note form and custom links receive. Until the engine answers, the match
-   * is the hovered glyph; the reply refines it to the matched word.
+   * is the hovered glyph; the reply refines it to the matched word. An exact
+   * selection arrives with its own sentence source (selectionSentence).
    */
   function withSentence(candidate, sourceOffset, matchLength, styleCache) {
     candidate.sourceText = candidate.sourceElements.map((source) => source.textContent || "").join("");
     candidate.sourceOffset = sourceOffset;
-    candidate.sentenceSource = sentenceSource(candidate.sourceElements, styleCache);
+    candidate.sentenceSource ??= sentenceSource(candidate.sourceElements, styleCache);
     return refineSentence(candidate, matchLength);
   }
 
   function refineSentence(candidate, matchLength) {
-    const { sentence, matchOffset } = extractSentence(candidate.sentenceSource, candidate.sourceOffset, matchLength);
+    // An exact selection's match is the selection, where selectionSentence put it.
+    const { sentence, matchOffset } = extractSentence(candidate.sentenceSource,
+      candidate.selectionOffset ?? candidate.sourceOffset, candidate.selectionLength ?? matchLength);
     candidate.sentence = sentence;
     candidate.matchOffset = matchOffset;
     return candidate;
+  }
+
+  /** The selected part of the text node `node`, or null when none of it is selected. */
+  function selectedSpan(range, node) {
+    if (!range.intersectsNode(node)) return null;
+    const start = node === range.startContainer ? range.startOffset : 0;
+    const end = node === range.endContainer ? range.endOffset : node.nodeValue.length;
+    return end > start ? { start, end } : null;
+  }
+
+  /** The first selected character a hover could point at: in text the scan reads, and not whitespace. */
+  function firstSelectedGlyph(range, styleCache) {
+    const walker = document.createTreeWalker(range.commonAncestorContainer, NodeFilter.SHOW_TEXT);
+    let node = range.startContainer;
+    if (node.nodeType === Node.TEXT_NODE) walker.currentNode = node;
+    else node = walker.nextNode();
+    for (; node && range.comparePoint(node, 0) <= 0; node = walker.nextNode()) {
+      const selected = selectedSpan(range, node);
+      if (!selected || !isScannableTextNode(node, styleCache)) continue;
+      const glyph = node.nodeValue.slice(selected.start, selected.end).search(/\S/u);
+      if (glyph >= 0) return { node, offset: selected.start + glyph };
+    }
+    return null;
+  }
+
+  /**
+   * An exact selection's sentence, read as a hover over its first selected
+   * glyph reads one: from the text nodes the scan reads around that glyph, up
+   * to the edge of its block. It never takes in the furigana, scripts or
+   * hidden text of the element that happens to contain the whole selection. A
+   * selection that leaves the block is cut where the block ends.
+   * `selectionOffset` and `selectionLength` place the selection in
+   * `sentenceSource`.
+   */
+  function selectionSentence(range, styleCache) {
+    const first = firstSelectedGlyph(range, styleCache);
+    if (!first) return { sentenceSource: "", selectionOffset: 0, selectionLength: 0 };
+    const sources = collectSentenceSources(first.node, document.body, styleCache);
+    let start = 0;
+    let end = 0;
+    let consumed = 0;
+    for (const source of sources) {
+      if (source === first.node) start = consumed + first.offset;
+      const selected = selectedSpan(range, source);
+      if (selected) end = consumed + selected.end;
+      consumed += source.nodeValue.length;
+    }
+    return { sentenceSource: sentenceSource(sources, styleCache), selectionOffset: start, selectionLength: end - start };
   }
 
   function withinSources(sources, node) {
@@ -936,8 +993,8 @@
     return docsImposter;
   }
 
-  /** The offset of the glyph under the pointer, found by bisecting the imposter's client rects. */
-  function docsOffsetAt(node, clientX, clientY) {
+  /** The offset of the glyph under the pointer, found by bisecting an imposter's client rects. */
+  function imposterOffsetAt(node, clientX, clientY) {
     const range = document.createRange();
     let start = 0;
     let end = node.nodeValue.length;
@@ -954,15 +1011,15 @@
     return start;
   }
 
-  function resolveDocsCandidate(clientX, clientY) {
-    const rect = docsRectAt(clientX, clientY);
-    if (!rect) return null;
-    const { text, node } = docsImposterFor(rect);
+  /**
+   * The candidate at `offset` in an imposter's one text node. The imposter is
+   * the scan root, so the walk ends with that node and never crosses into the
+   * page, and the node is the sole source, so the sentence and the highlight
+   * work in it as they do in a page's text nodes.
+   */
+  function imposterCandidate(anchor, node, offset, vertical) {
     const styleCache = new Map();
-    // The imposter lives inside Docs' <svg>, which the page scan treats as
-    // opaque, so it is scanned with the <text> itself as the root: the walk
-    // ends with its one text node and never crosses into the rest of the tile.
-    const entries = collectScanEntries(node, docsOffsetAt(node, clientX, clientY), text, scanWindow(), styleCache);
+    const entries = collectScanEntries(node, offset, anchor, scanWindow(), styleCache);
     if (entries.length === 0) return null;
     const query = entries.map((entry) => entry.text).join("");
     if (options.onlyScanJapaneseText && !isJapaneseToken(query)) return null;
@@ -970,24 +1027,203 @@
     const anchorRange = document.createRange();
     anchorRange.setStart(node, first.offset);
     anchorRange.setEnd(node, Math.min(node.nodeValue.length, first.offset + first.sourceLength));
-    // `sourceElements` is the run's one text node, so the sentence and the
-    // highlight work in the run as they do in a page's text nodes.
     return withSentence({
-      anchor: text,
+      anchor,
       anchorRange,
       query,
       scanEntries: entries,
       sourceDepth: -1,
       sourceElements: [node],
-      vertical: false,
+      vertical,
     }, first.offset, first.sourceLength, styleCache);
+  }
+
+  function resolveDocsCandidate(clientX, clientY) {
+    const rect = docsRectAt(clientX, clientY);
+    if (!rect) return null;
+    const { text, node } = docsImposterFor(rect);
+    // The <text> lives inside Docs' <svg>, which the page scan treats as opaque.
+    return imposterCandidate(text, node, imposterOffsetAt(node, clientX, clientY), false);
+  }
+
+  // An <input> or <textarea> keeps its value in user-agent shadow DOM, which
+  // the caret APIs never enter. As Yomitan's TextSourceGenerator does, the
+  // reader lays an invisible copy of the hovered field over it and scans that.
+  // These are Yomitan's input types; a password is never read.
+  const FIELD_INPUT_TYPES = new Set(["text", "search"]);
+  // One imposter at a time. It stays while it anchors the root lookup or its
+  // field is under the pointer, so repeated moves share the pending lookup and
+  // the popup, and it goes once neither holds or the popup closes.
+  let fieldImposter = null;
+
+  /** `element` when it is a visible text field with a value the reader may read, else null. */
+  function scannableField(element) {
+    const tag = element?.localName;
+    if ((tag !== "textarea" && (tag !== "input" || !FIELD_INPUT_TYPES.has(element.type)))
+        || !element.value || element.getRootNode() !== document || !document.body) return null;
+    const styleCache = new Map();
+    // A field styled to mask its text, such as a PIN box, is a password in all but name.
+    const masked = computedStyleFor(element, styleCache).getPropertyValue("-webkit-text-security");
+    if ((masked !== "" && masked !== "none") || isHiddenElement(element, styleCache)) return null;
+    for (let current = element.parentElement; current; current = current.parentElement) {
+      if (OPAQUE_TAGS.has(current.localName) || computedStyleFor(current, styleCache).display === "none") return null;
+    }
+    return element;
+  }
+
+  function releaseFieldImposter() {
+    fieldImposter?.container.remove();
+    fieldImposter = null;
+  }
+
+  function retireFieldImposter() {
+    if (!fieldImposter || lastPointer?.target === fieldImposter.field) return;
+    const { imposter } = fieldImposter;
+    if (pendingCandidateLookup?.candidate.anchor !== imposter && rootLevel.activeCandidate?.anchor !== imposter) {
+      releaseFieldImposter();
+    }
+  }
+
+  /**
+   * Yomitan's _createImposter: the field's value in a <div> that carries every
+   * computed property of the field and lies exactly over it with its scroll
+   * offsets, in a container that is invisible, unselectable and never
+   * hit-tested. `box` is the field's client rect. The imposter is reused while
+   * the field keeps its value, scroll offsets and place in the document.
+   */
+  function fieldImposterFor(field, box) {
+    const page = document.documentElement.getBoundingClientRect();
+    const place = { left: box.left - page.left, top: box.top - page.top, width: box.width, height: box.height };
+    const reused = fieldImposter;
+    if (reused?.field === field && reused.value === field.value && reused.scrollLeft === field.scrollLeft
+        && reused.scrollTop === field.scrollTop && reused.container.isConnected
+        && Object.keys(place).every((key) => reused.place[key] === place[key])) {
+      return reused;
+    }
+    releaseFieldImposter();
+    const style = window.getComputedStyle(field);
+    const container = document.createElement("div");
+    setImportant(container, {
+      all: "initial", position: "absolute", left: "0", top: "0", width: `${page.width}px`, height: `${page.height}px`,
+      overflow: "hidden", opacity: "0", "pointer-events": "none", "user-select": "none",
+    });
+    container.setAttribute("aria-hidden", "true");
+    const imposter = document.createElement("div");
+    for (const property of style) imposter.style.setProperty(property, style.getPropertyValue(property), "important");
+    // Placed and scrolled where the field is at once, not eased there.
+    setImportant(imposter, {
+      position: "absolute", left: `${place.left}px`, top: `${place.top}px`, margin: "0", "pointer-events": "none",
+      "user-select": "none", transition: "none", animation: "none", "scroll-behavior": "auto",
+    });
+    const input = field.localName === "input";
+    let value = field.value;
+    if (input) {
+      // One unwrapped line keeping repeated spaces, as the input lays it out. A
+      // line as tall as the content box centres the glyphs in it, as the input
+      // does whatever its own line height.
+      const frame = style.boxSizing === "border-box"
+        ? ["padding-top", "padding-bottom", "border-top-width", "border-bottom-width"]
+          .reduce((sum, property) => sum + pixels(style, property), 0)
+        : 0;
+      setImportant(imposter, {
+        overflow: "hidden", "white-space": "pre", "line-height": `${pixels(style, "height") - frame}px`,
+      });
+    } else {
+      if (style.overflow === "visible") setImportant(imposter, { overflow: "auto" });
+      // A final line break opens a line in a textarea but not in a <div>.
+      if (value.endsWith("\n")) value += "\n";
+    }
+    const node = document.createTextNode(value);
+    imposter.append(node);
+    container.append(imposter);
+    document.body.append(container);
+    const narrower = fitFieldImposter(field, imposter, style, box, place);
+    // The copy lays out text the field has scrolled out of sight. An input shows
+    // text only in its content box; a textarea scrolls it in its padding box.
+    const inset = input ? [pixels(style, "padding-left"), pixels(style, "padding-right") + narrower] : [0, 0];
+    fieldImposter = {
+      field, container, imposter, node, place, value: field.value, scrollLeft: field.scrollLeft,
+      scrollTop: field.scrollTop, vertical: style.writingMode.startsWith("vertical"),
+      clip: {
+        left: field.clientLeft + inset[0], right: field.clientLeft + field.clientWidth - inset[1],
+        top: field.clientTop, bottom: field.clientTop + field.clientHeight,
+      },
+    };
+    return fieldImposter;
+  }
+
+  /**
+   * Corrects the laid-out copy's size and place against the field, as Yomitan
+   * does, then scrolls it as the field is scrolled. Returns how much narrower
+   * the field's own text box is: a search field's clear button or a datalist's
+   * picker lets an input scroll further than the copy could.
+   */
+  function fitFieldImposter(field, imposter, style, box, place) {
+    const drawn = imposter.getBoundingClientRect();
+    if (drawn.width !== box.width || drawn.height !== box.height) {
+      setImportant(imposter, { width: `${pixels(style, "width") + box.width - drawn.width}px`,
+        height: `${pixels(style, "height") + box.height - drawn.height}px` });
+    }
+    if (drawn.left !== box.left || drawn.top !== box.top) {
+      setImportant(imposter, {
+        left: `${place.left + box.left - drawn.left}px`, top: `${place.top + box.top - drawn.top}px`,
+      });
+    }
+    const narrower = field.localName === "input"
+      ? Math.max(0, field.scrollWidth - field.clientWidth - imposter.scrollWidth + imposter.clientWidth)
+      : 0;
+    if (narrower > 0) {
+      setImportant(imposter, { "padding-right": `${pixels(style, "padding-right") + narrower}px` });
+      if (style.boxSizing !== "border-box") {
+        const width = Number.parseFloat(imposter.style.getPropertyValue("width"));
+        setImportant(imposter, { width: `${width - narrower}px` });
+      }
+    }
+    imposter.scrollLeft = field.scrollLeft;
+    imposter.scrollTop = field.scrollTop;
+    return narrower;
+  }
+
+  function pixels(style, property) {
+    return Number.parseFloat(style.getPropertyValue(property)) || 0;
+  }
+
+  function setImportant(element, declarations) {
+    for (const [property, value] of Object.entries(declarations)) {
+      element.style.setProperty(property, value, "important");
+    }
+  }
+
+  function resolveFieldCandidate(field, clientX, clientY) {
+    const box = field.getBoundingClientRect();
+    const { clip, imposter, node, vertical } = fieldImposterFor(field, box);
+    const x = clientX - box.left;
+    const y = clientY - box.top;
+    if (x < clip.left || x > clip.right || y < clip.top || y > clip.bottom) return null;
+    const offset = imposterOffsetAt(node, clientX, clientY);
+    return glyphContainsPoint(node, offset, clientX, clientY)
+      ? imposterCandidate(imposter, node, offset, vertical)
+      : null;
+  }
+
+  /**
+   * Caret APIs snap to nearby text even in padding, and bisection always finds
+   * some glyph. Admit only the pointed glyph, with two CSS pixels for thin
+   * glyphs and subpixel layout.
+   */
+  function glyphContainsPoint(node, offset, clientX, clientY) {
+    const text = node.nodeValue || "";
+    if (offset >= text.length) return false;
+    const glyph = document.createRange();
+    glyph.setStart(node, offset);
+    glyph.setEnd(node, offset + (text.codePointAt(offset) > 0xffff ? 2 : 1));
+    return [...glyph.getClientRects()].some((rect) => clientX >= rect.left - 2 && clientX <= rect.right + 2
+      && clientY >= rect.top - 2 && clientY <= rect.bottom + 2);
   }
 
   /**
    * The offset of the glyph under (clientX, clientY) in the caret range's text
-   * node, or -1 when the point is beside it. Caret APIs snap to nearby text even
-   * in padding or past a line's end, so admit only the pointed glyph, with two
-   * CSS pixels for thin glyphs and subpixel layout.
+   * node, or -1 when the point is beside it.
    */
   function pointedGlyphOffset(caretRange, clientX, clientY) {
     const node = caretRange.startContainer;
@@ -995,17 +1231,7 @@
     let offset = caretRange.startOffset;
     // Caret alignment can step back onto the low surrogate of a wide glyph.
     if (offset > 0 && (text.charCodeAt(offset) & 0xfc00) === 0xdc00) offset -= 1;
-    if (offset >= text.length) return -1;
-    const glyph = document.createRange();
-    glyph.setStart(node, offset);
-    glyph.setEnd(node, offset + (text.codePointAt(offset) > 0xffff ? 2 : 1));
-    for (const rect of glyph.getClientRects()) {
-      if (clientX >= rect.left - 2 && clientX <= rect.right + 2
-          && clientY >= rect.top - 2 && clientY <= rect.bottom + 2) {
-        return offset;
-      }
-    }
-    return -1;
+    return glyphContainsPoint(node, offset, clientX, clientY) ? offset : -1;
   }
 
   /**
@@ -1017,12 +1243,12 @@
       const docs = resolveDocsCandidate(clientX, clientY);
       if (docs) return docs;
     }
+    const hit = document.elementFromPoint(clientX, clientY);
+    const field = scannableField(hit);
+    if (field) return resolveFieldCandidate(field, clientX, clientY);
     const caretRange = caretRangeAt(clientX, clientY);
     const node = caretRange?.startContainer;
-    if (node?.nodeType !== Node.TEXT_NODE
-        || !document.elementFromPoint(clientX, clientY)?.contains(node)) {
-      return null;
-    }
+    if (node?.nodeType !== Node.TEXT_NODE || !hit?.contains(node)) return null;
     const offset = pointedGlyphOffset(caretRange, clientX, clientY);
     return offset < 0 ? null : resolveCandidateAt(node, offset);
   }
@@ -1213,6 +1439,7 @@
           && hasVisibleContent(control, styleCache)) return null;
     }
     const rawSelectionText = range.toString();
+    // The highlight works in the anchor's text; the sentence is read as a hover reads it.
     return withSentence({
       anchor,
       anchorRange: range.cloneRange(),
@@ -1222,6 +1449,7 @@
       sourceDepth: -1,
       sourceElements: [anchor],
       vertical: computedStyleFor(anchor, styleCache).writingMode.startsWith("vertical"),
+      ...selectionSentence(range, styleCache),
     }, rangeOffsetWithin(anchor, range.startContainer, range.startOffset), rawSelectionText.length, styleCache);
   }
 
@@ -1334,6 +1562,16 @@
     return matched;
   }
 
+  /**
+   * The match as `candidate.sentence` spells it; the Anki sentence and cloze
+   * cut it out by its length. A selection's raw text counts the furigana and
+   * hidden text of its anchor, which its sentence leaves out.
+   */
+  function sentenceMatchedText(candidate, matched) {
+    if (candidate.exactSelection !== true) return rawMatchedText(candidate, matched);
+    return candidate.sentence.slice(candidate.matchOffset, candidate.matchOffset + candidate.selectionLength);
+  }
+
   function teardown(reason) {
     if (disposed) {
       return;
@@ -1384,6 +1622,7 @@
     appearance?.destroy();
     customStyle?.destroy();
     releaseDocsProbe();
+    releaseFieldImposter();
     host?.remove();
     host = null;
     shadow = null;
@@ -1411,6 +1650,7 @@
     } catch {
       // Best effort: the point is only to leave nothing half-built behind.
     }
+    releaseFieldImposter();
     host?.remove();
     host = null;
     shadow = null;
@@ -1744,12 +1984,21 @@
       ));
   }
 
+  // Like Yomitan, a root popup stays where it first opened (#402): later
+  // placements reuse the source rect captured then, and its page source may
+  // scroll away or leave the DOM without closing it. A child keeps following
+  // its link text inside the parent pane.
+  function sourceRetained(candidate, level) {
+    return anchorConnected(candidate)
+      || (level === rootLevel && candidate != null && rootLevel.placedAnchor?.candidate === candidate);
+  }
+
   function requestCanRender(token, candidate, level = rootLevel) {
     if (disposed || level.retired || token !== level.lookupToken || !level.popup) return false;
     if (retireDetachedAncestor(level)) return false;
     // Initial selections still own the live page selection; Note/Back replays
     // intentionally use their stored descriptor even after focus collapses it.
-    if (!anchorConnected(candidate) || (level === rootLevel && pendingCandidateLookup?.token === token
+    if (!sourceRetained(candidate, level) || (level === rootLevel && pendingCandidateLookup?.token === token
         && candidate.exactSelection === true && !selectionIsUnchanged(candidate))) {
       hide(level);
       return false;
@@ -1760,7 +2009,7 @@
   function retireDetachedAncestor(level) {
     for (let depth = 0; depth < level.depth; depth += 1) {
       const ancestor = levels[depth];
-      if (!anchorConnected(ancestor.activeCandidate)) {
+      if (!sourceRetained(ancestor.activeCandidate, ancestor)) {
         hide(ancestor);
         return true;
       }
@@ -1901,15 +2150,21 @@
       return;
     }
     if (retireDetachedAncestor(fromLevel)) return;
-    if (!anchorConnected(rootLevel.activeCandidate)) {
-      hide();
-      return;
+    const placed = rootLevel.placedAnchor;
+    let anchorRect = placed?.candidate === rootLevel.activeCandidate ? placed.rect : null;
+    if (!anchorRect) {
+      if (!anchorConnected(rootLevel.activeCandidate)) {
+        hide();
+        return;
+      }
+      anchorRect = anchorRectFor(rootLevel.activeCandidate);
+      rootLevel.placedAnchor = { candidate: rootLevel.activeCandidate, rect: anchorRect };
     }
     highlighter?.refresh();
     const viewport = popupViewport();
     if (fromLevel === rootLevel) {
       placePopup(rootLevel, popupResize?.level === rootLevel ? popupResizePosition() : calculatePopupPosition(
-        popupRect(anchorRectFor(rootLevel.activeCandidate)),
+        popupRect(anchorRect),
         viewport,
         rootLevel.activeCandidate.vertical
       ), resetToolbar);
@@ -2200,6 +2455,7 @@
       getPageZoom: () => pageZoom,
       getPopupScalePercent: () => options.popupScalePercent,
       getPopupColumns: () => options.popupColumns,
+      getImageHoverPreview: () => options.imageHoverPreview,
       onResizeStart: event => startPopupResize(event, level),
       onResizeMove: movePopupResize,
       onResizeEnd: stopPopupResize,
@@ -2269,10 +2525,12 @@
       const term = { ...result.term, frequencies: result.term.frequencies.map(group =>
         ({ ...group, frequencyMode: frequencyModes.get(group.dictionary) })) };
       return { ...result, term, generation: level.activeTermRender.generation, sentence: candidate.sentence,
-        matchOffset: candidate.matchOffset, matched: rawMatchedText(candidate, result.matched || result.term.expression),
+        matchOffset: candidate.matchOffset, matched: sentenceMatchedText(candidate, result.matched || result.term.expression),
         searchQuery: request?.payload?.text ?? request?.kanjiPayload?.character ?? candidate.query,
         popupSelectionText: selection?.anchorNode && level.popup.contains(selection.anchorNode) ? selection.toString() : "",
         documentTitle: document.title, audioSelection: audio.selectionFor(result) ?? undefined,
+        // Like Yomitan, a note mined on Hachidori's own page (the setup practice) has no source address.
+        pageUrl: location.protocol === EXTENSION_PROTOCOL ? "" : location.href,
         dictionaryAliases: Object.fromEntries(dictionaries.filter(item => item.displayName).map(item => [item.title, item.displayName])),
         dictionaryIds: Object.fromEntries(dictionaries.map(item => [item.title, item.id])),
         frequencyDictionaries: dictionaries.filter(item => item.enabled && item.frequencyCount > 0).map(item => item.title),
@@ -2393,7 +2651,7 @@
   }
 
   function definitionBlurActive(candidate = options) {
-    return (candidate.definitionBlurEnabled && candidate.showLookupCounts)
+    return (candidate.definitionBlurCountEnabled && candidate.showLookupCounts)
       || candidate.definitionBlurAnkiMature || candidate.definitionBlurFrequencyEnabled;
   }
 
@@ -2506,7 +2764,7 @@
     if (!blur) return;
     if (blur.lookupCount === undefined && lookupCount !== undefined) blur.lookupCount = lookupCount;
     if (blur.awaitingOptions || blur.state === "revealed") return;
-    const countEnabled = options.definitionBlurEnabled && options.showLookupCounts;
+    const countEnabled = options.definitionBlurCountEnabled && options.showLookupCounts;
     const frequency = currentDefinitionBlurFrequency(blur);
     const qualifies = definitionBlurQualifies(options, countEnabled ? blur.lookupCount : null,
       blur.ankiMature, frequency.qualified);
@@ -2561,6 +2819,7 @@
     level.popup.inert = false;
     level.view.scrollElement.scrollTop = 0;
     syncHostAttention();
+    if (level === rootLevel) retireFieldImposter();
   }
 
   function pruneLevels(depth, restoreFocus = true) {
@@ -2618,6 +2877,7 @@
     pointerLevel = null;
     pruneLevels(1, false);
     rootLevel.activeCandidate = null;
+    rootLevel.placedAnchor = null;
     rootLevel.activeSignature = null;
     rootLevel.activeHighlightText = "";
     rootLevel.activeTermRender = null;
@@ -2627,6 +2887,7 @@
     rootLevel.deferredRefresh = null;
     rootLevel.retainedView = false;
     rootLevel.lookupToken += 1;
+    releaseFieldImposter();
     if (rootLevel.popup) {
       rootLevel.popup.hidden = true;
       rootLevel.popup.inert = false;
@@ -2660,8 +2921,9 @@
       }
       // Leaving the chain from a corridor between panes fires no mouseleave.
       scheduleCursorExitHide();
+      // No position means the pointer has since left the window or the reader
+      // the tab, and neither dismisses the chain (#432).
       if (lastPointer) scanPointer(lastPointer);
-      else scheduleHide();
     }, 80);
   }
 
@@ -3204,10 +3466,6 @@
     const { candidate, capability, character } = request;
     const group = capability?.kind === "group";
     const token = (level.lookupToken += 1);
-    level.pendingPopupInteraction = token;
-    const finishInteraction = () => {
-      if (level.pendingPopupInteraction === token) level.pendingPopupInteraction = null;
-    };
     level.retainedView = replayOptions?.preserveViewControls === true;
     level.view?.hideImagePreview();
     // Every selected source is asked at once. A term-only selection defers the
@@ -3220,11 +3478,9 @@
         ...request.termPayloads.map((payload) => sendRequest("hd_lookup_dictionary", payload)),
       ]);
     } catch (error) {
-      finishInteraction();
       return handleLookupFailure(token, error, level, request, true);
     }
     if (!requestCanRender(token, candidate, level) || level.popup.hidden) {
-      finishInteraction();
       return false;
     }
     for (const each of [reply, ...termReplies]) if (each) noteGeneration(each.generation, level);
@@ -3235,7 +3491,6 @@
       results = projectResultsToDictionary(Array.isArray(termReplies[0].results) ? termReplies[0].results : [], capability.title);
     }
     if (results.length > 0) {
-      finishInteraction();
       return renderTerms(
         results,
         candidate,
@@ -3253,11 +3508,9 @@
       try {
         reply = await sendRequest("hd_kanji", request.kanjiPayload);
       } catch (error) {
-        finishInteraction();
         return handleLookupFailure(token, error, level, request, true);
       }
       if (!requestCanRender(token, candidate, level) || level.popup.hidden) {
-        finishInteraction();
         return false;
       }
       noteGeneration(reply.generation, level);
@@ -3265,7 +3518,6 @@
     const kanji = reply.kanji;
     const validEntries = nativeKanjiEntries(reply);
     if (!kanji || validEntries.length === 0) {
-      finishInteraction();
       return handleLookupFailure(token, new Error("kanji lookup returned no usable result"), level, request, true);
     }
     const selectedEntries = capability?.kind === "kanji"
@@ -3293,8 +3545,6 @@
     } catch (error) {
       console.warn("hachidori: could not render kanji", error);
       return handleLookupFailure(token, error, level, request, true);
-    } finally {
-      finishInteraction();
     }
     ensureDictionaryStyles(currentGeneration);
     positionPopup(level);
@@ -3373,7 +3623,7 @@
         && !level.retired
         && level.currentViewRequest === expectedView
         && level.popup && !level.popup.hidden
-        && anchorConnected(expectedView.candidate)
+        && sourceRetained(expectedView.candidate, level)
       ) {
         level.deferredRefresh = expectedView;
       }
@@ -3390,7 +3640,7 @@
       if (level.pendingCustomAppends > 0 || hasProtectedNote(level.depth + 1)) continue;
       const request = level.deferredRefresh;
       if (request && request === level.currentViewRequest && !level.popup.hidden
-          && anchorConnected(request.candidate)) {
+          && sourceRetained(request.candidate, level)) {
         level.deferredRefresh = null;
         level.deferredDictionaryInvalidationRevision = -1;
         // The append has committed. Replay failures must never invite a second
@@ -3429,6 +3679,7 @@
     // or deferred glossary. Only an unfinished candidate loses ownership.
     if (pendingCandidateLookup?.token === rootLevel.lookupToken) rootLevel.lookupToken += 1;
     discardPendingCandidate();
+    retireFieldImposter();
   }
 
   function cancelPendingHover(level) {
@@ -3592,6 +3843,7 @@
       teardown("context-invalidated");
       return;
     }
+    retireFieldImposter();
     if (!options.hoverEnabled) return;
     if (transferTimer !== null) return;
     const popupLevel = activePointerLevel(pointer);
@@ -3706,6 +3958,7 @@
     if (disposed || !options.hoverEnabled) {
       return;
     }
+    editedSincePointerMoved = false;
     lastPointer = {
       clientX: event.clientX,
       clientY: event.clientY,
@@ -3719,10 +3972,9 @@
       extendGlyphDrag(event);
       return;
     }
-    // Cancel a pending dismissal here rather than waiting for the throttled
-    // scan, so the popup stays reachable even with hoverDelayMs turned up. The
-    // retargeted event target is enough; the rect test costs a layout and can
-    // wait for the scan.
+    // Cancel a pending dismissal here rather than waiting for the scheduled
+    // scan. The retargeted event target is enough; the rect test costs a
+    // layout and can wait for the scan.
     if (isOurNode(event.target)) {
       pointerInPopup = true;
       clearTransferTimer();
@@ -3756,14 +4008,13 @@
     if (scanTimer !== null) {
       return;
     }
-    // Trailing-edge throttle: at most one scan per hoverDelayMs, always at the
-    // pointer's latest position.
+    // Coalesce the moves of one task into a scan at the pointer's latest position.
     scanTimer = window.setTimeout(() => {
       scanTimer = null;
       if (lastPointer) {
         scanPointer(lastPointer);
       }
-    }, options.hoverDelayMs);
+    }, 0);
   }
 
   const GLYPH_DRAG_START_PX = 3;
@@ -3806,6 +4057,7 @@
     if (disposed) {
       return;
     }
+    editedSincePointerMoved = true;
     // A press decides afresh what its own release and click may do.
     if (scanPress?.button === event.button) scanPress = null;
     const button = activationButton();
@@ -3829,10 +4081,8 @@
   // The scan button works like the activation key: pressing it looks up the
   // word under the pointer, and moving while it is held keeps scanning. Its
   // capture-phase press claims an overlay host's window before the host's own
-  // listener can turn click-through back on. Over content the reader scans, the
-  // press starts no autoscroll and Back or Forward does not navigate; the click
-  // opens no new tab only when the press was on a word the reader looks up. A
-  // popup link's press is the link's, so its middle click keeps opening it.
+  // listener can turn click-through back on. A popup link's press is the
+  // link's, so its middle click keeps opening it.
   function startButtonScan(event) {
     const { clientX, clientY } = event;
     const inPopup = isOurNode(event.target) || pointInsidePopup(clientX, clientY);
@@ -3844,18 +4094,30 @@
     const level = inPopup ? activePointerLevel(lastPointer) : null;
     // Child popups set to Click wait for no button.
     if (level && (popupLinkAt(lastPointer.target, level) || !definitionKeyGated())) return false;
-    const scannable = level
-      ? Boolean(selectionBoundaryElement(lastPointer.target)?.closest(DEFINITION_TEXT_SELECTOR))
-      : !inPopup && isScannableElement(selectionBoundaryElement(event.target), new Map());
-    if (scannable) event.preventDefault();
-    const candidate = scannable
-      && (level ? resolveDefinitionCandidate(clientX, clientY, level) : resolveCandidate(clientX, clientY));
-    scanPress = { button: event.button, cancelRelease: scannable && NAVIGATION_BUTTONS.has(event.button),
-      cancelClick: Boolean(candidate) };
+    const { claimed, cancelRelease, candidate } = scanPressClaim(event, inPopup, level);
+    if (claimed) event.preventDefault();
+    scanPress = { button: event.button, cancelRelease, cancelClick: Boolean(candidate) };
     activationPressed = true;
     syncHostAttention();
     scanActivatedPointer();
     return true;
+  }
+
+  // Over content the reader scans, a scan press starts no autoscroll and Back
+  // or Forward does not navigate; the click opens no new tab only when the
+  // press was on a word the reader looks up. A text field keeps its press, so
+  // it still pastes or navigates, unless the press is on a word in it.
+  function scanPressClaim({ button, clientX, clientY, target }, inPopup, level) {
+    if (scannableField(inPopup ? null : target)) {
+      const candidate = resolveCandidate(clientX, clientY);
+      return { claimed: Boolean(candidate), cancelRelease: Boolean(candidate), candidate };
+    }
+    const claimed = level
+      ? Boolean(selectionBoundaryElement(lastPointer.target)?.closest(DEFINITION_TEXT_SELECTOR))
+      : !inPopup && isScannableElement(selectionBoundaryElement(target), new Map());
+    const candidate = claimed
+      && (level ? resolveDefinitionCandidate(clientX, clientY, level) : resolveCandidate(clientX, clientY));
+    return { claimed, cancelRelease: claimed && NAVIGATION_BUTTONS.has(button), candidate };
   }
 
   // Release decides what the press was: a selection looks up that text, a
@@ -4096,8 +4358,16 @@
     if (normaliseActivationKey(event.key, null) === options.activationKey) {
       activationPressed = true;
       activationCode = event.code;
+    } else {
+      editedSincePointerMoved = true;
     }
-    if (!wasPressed && activationPressed) scanActivatedPointer();
+    if (!wasPressed && activationPressed && !typingUnderPointer()) scanActivatedPointer();
+  }
+
+  // Shift for a capital letter in the field under a resting pointer must not
+  // cover the field with its own text; moving with the key held still scans.
+  function typingUnderPointer() {
+    return editedSincePointerMoved && scannableField(document.activeElement) === lastPointer?.target;
   }
 
   function onKeyUp(event) {
@@ -4118,14 +4388,27 @@
     // bubble, and a capture listener would fire for every element left.
     if (!disposed && event.relatedTarget === null) {
       lastPointer = null;
-      pointerInPopup = false;
       cancelCandidateScan();
-      schedulePointerHide();
+      // As in Yomitan's TextScanner, leaving the window only forgets the
+      // pointer, whether on the way to the tab strip or another window (#432)
+      // or as an overlay host turns click-through on past OCR text (#403). The
+      // popup follows the ordinary hover and cursor-exit rules at the next move.
+      if (!overlayMode) pointerInPopup = false;
     }
   }
 
   function onWindowBlur() {
     stopPopupResize();
+    if (!disposed && overlayMode) {
+      // An overlay host moves focus between itself and the game while the
+      // reader stays in the page (#403), so blur dismisses nothing and keeps a
+      // drag or a held scan button. Only a key's release can go missing.
+      if (!ACTIVATION_BUTTONS.has(options.activationKey)) {
+        activationPressed = false;
+        activationCode = null;
+      }
+      return;
+    }
     if (!disposed) {
       // Cleared first, so the drag's sync also releases a held scan button's claim.
       activationPressed = false;
@@ -4133,13 +4416,12 @@
       setSelectionDrag(false);
       lastPointer = null;
       pointerInPopup = false;
-      const interaction = levels.find((level) => !level.popup?.hidden
-        && level.pendingPopupInteraction === level.lookupToken);
-      if (interaction) {
-        interaction.pendingPopupInteraction = null;
-        return;
-      }
-      hide();
+      // Focus that moved into one of this page's frames is a click outside the
+      // popup. Leaving the tab, the window or the browser is not: Yomitan has
+      // no blur listener, so the popup, its children and a Note draft wait for
+      // the reader's return (#432). Only unfinished pointer work is cancelled.
+      if (document.hasFocus()) hide();
+      else cancelCandidateScan();
     }
   }
 
@@ -4163,25 +4445,10 @@
     }
   }
 
+  // Page and element scrolls leave an open popup where it is (#402).
   function onScroll() {
     cancelCandidateScan();
     rootLevel.view?.hideImagePreview();
-    if (disposed || !rootLevel.popup || rootLevel.popup.hidden || !rootLevel.activeCandidate) {
-      return;
-    }
-    if (!anchorConnected(rootLevel.activeCandidate)) {
-      hide();
-      return;
-    }
-    const rect = anchorRectFor(rootLevel.activeCandidate);
-    if (
-      rect.bottom < 0 || rect.top > window.innerHeight ||
-      rect.right < 0 || rect.left > window.innerWidth
-    ) {
-      hide();
-      return;
-    }
-    positionPopup();
   }
 
   function invalidateStoredState(dictionaryChanged) {
@@ -4294,11 +4561,11 @@
       || next.definitionLookupMode !== options.definitionLookupMode;
     const interactionChanged = activationChanged || next.hoverEnabled !== options.hoverEnabled
       || next.onlyScanJapaneseText !== options.onlyScanJapaneseText || personalChanged;
-    const scanDelayChanged = next.hoverDelayMs !== options.hoverDelayMs && scanTimer !== null;
     const hideDelayChanged = next.popupHideDelayMs !== options.popupHideDelayMs && hideTimer !== null;
     const cursorExitChanged = next.hidePopupOnCursorExit !== options.hidePopupOnCursorExit
       || next.hidePopupOnCursorExitDelayMs !== options.hidePopupOnCursorExitDelayMs;
     const columnsChanged = next.popupColumns !== options.popupColumns;
+    const layoutChanged = next.glossaryLayoutMode !== options.glossaryLayoutMode;
     const sizeChanged = next.popupWidthPx !== options.popupWidthPx || next.popupHeightPx !== options.popupHeightPx
       || next.popupScalePercent !== options.popupScalePercent;
     const toolbarChanged = next.popupToolbarPosition !== options.popupToolbarPosition;
@@ -4390,7 +4657,7 @@
     if ((sizeChanged || toolbarChanged) && options.hoverEnabled && rootLevel.popup && !rootLevel.popup.hidden) {
       positionPopup(rootLevel, toolbarChanged);
     }
-    if ((columnsChanged || sizeChanged || cssChanged) && options.hoverEnabled) {
+    if ((columnsChanged || layoutChanged || sizeChanged || cssChanged) && options.hoverEnabled) {
       for (const level of levels) {
         if (!level.popup?.hidden) level.view?.scheduleMasonry();
       }
@@ -4402,7 +4669,7 @@
       activationCode = null;
       hide();
     }
-    else if (interactionChanged || scanDelayChanged) {
+    else if (interactionChanged) {
       if (selectionIsUnchanged()) {
         clearScanTimer();
         clearHideTimer();

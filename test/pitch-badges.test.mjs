@@ -13,8 +13,8 @@ const { JSDOM } = require(require.resolve("jsdom", { paths: [process.env.HACHIDO
 const entry = (position, pattern = "", nasal = [], devoice = []) => ({ position, pattern, nasal, devoice });
 const pitch = (dictionary, ...pitches) => ({ dictionary, pitches: pitches.map(value =>
   typeof value === "object" ? value : entry(value)), transcriptions: [] });
-const result = (expression, reading, pitches) => ({ matched: expression, deinflected: expression, trace: [],
-  term: { expression, reading, rules: "", frequencies: [], pitches,
+const result = (expression, reading, pitches, rules = "") => ({ matched: expression, deinflected: expression, trace: [],
+  term: { expression, reading, rules, frequencies: [], pitches,
     glossaries: [{ dictionary: "Jitendex", glossary: JSON.stringify(["gloss"]), termTags: "" }] } });
 const RESULT = result("昭和", "しょうわ", [pitch("NHK", 0), pitch("Daijirin", 1)]);
 
@@ -93,6 +93,33 @@ test("a dictionary's accents share one group and a string pattern reads as its d
     .map(mora => `${mora.dataset.pitchLevel}:${mora.dataset.pitchTransition ?? ""}`), ["low:rise", "high:drop"]);
 });
 
+test("the overline furigana style draws the headword with the pronunciation list's Yomitan text", t => {
+  const f = fixture(t);
+  const [group] = f.render(result("食べる", "たべる", [pitch("NHK", 2)]), { pitchAccentFuriganaStyle: "overline" });
+  const expression = f.popup.querySelector(".gsm-hoshidicts-expression");
+  const card = f.popup.querySelector(".gsm-hoshidicts-glossary-card");
+  const contours = [...expression.querySelectorAll(".gsm-hoshidicts-pitch-contour")];
+  const segments = contours.map(levels);
+  assert.deepEqual(segments, [["た:low>high"], ["べ:high>low", "る:low>low"]]);
+  assert.deepEqual(segments.flat(), levels(group.querySelector(".pronunciation")), "the same levels as the list");
+  assert.ok(contours.every(contour => contour.dataset.pitchStyle === "overline"));
+  assert.equal(expression.querySelectorAll(".gsm-hoshidicts-pitch-mora").length, 0);
+  assert.equal(expression.querySelectorAll(".pronunciation-mora > .pronunciation-mora-line").length, 3);
+  const reading = expression.querySelector(".gsm-hoshidicts-pitch-reading");
+  assert.equal(reading.dataset.pitchPosition, "2");
+  assert.equal(reading.dataset.pitchDictionary, "NHK");
+  assert.equal(reading.title, "NHK · Pitch accent 2");
+  f.view.updateDictionaryPresentation({ pitchAccentFuriganaStyle: "contour" });
+  assert.deepEqual([...f.popup.querySelectorAll(".gsm-hoshidicts-expression .gsm-hoshidicts-pitch-mora")]
+    .map(mora => `${mora.dataset.pitchLevel}:${mora.dataset.pitchTransition ?? ""}`), ["low:rise", "high:drop", "low:"]);
+  assert.ok(card.isConnected && f.popup.querySelector(".gsm-hoshidicts-glossary-card") === card,
+    "a style switch keeps the definitions");
+  // 見る [1] drops at the segment boundary: み, the first segment's last mora, hooks.
+  f.render(result("見る", "みる", [pitch("NHK", 1)]), { pitchAccentFuriganaStyle: "overline" });
+  assert.deepEqual([...f.popup.querySelectorAll(".gsm-hoshidicts-expression .gsm-hoshidicts-pitch-contour")]
+    .map(levels), [["み:high>low"], ["る:low>low"]]);
+});
+
 test("the text, position and graph toggles update an open popup without replacing definitions", t => {
   const f = fixture(t);
   f.render(RESULT);
@@ -140,4 +167,45 @@ test("aliases relabel the dictionary tag in place and the names switch hides it 
   f.view.updateDictionaryPresentation({ showPitchAccentDictionaryNames: true });
   assert.deepEqual(labels(), ["NHK 日本語発音アクセント辞典", "Daijirin"]);
   assert.ok(card.isConnected && f.popup.querySelector(".gsm-hoshidicts-glossary-card") === card);
+});
+
+test("the headword and each badge carry their pitch accent group, contour or not", t => {
+  const f = fixture(t);
+  const groupOf = (expression, reading, pitches, rules) => {
+    f.render(result(expression, reading, [pitch("NHK", ...pitches)], rules));
+    return [f.popup.querySelector(".gsm-hoshidicts-expression").dataset.pitchCategory,
+      f.popup.querySelector(".pronunciation").dataset.pitchCategory];
+  };
+  // jp-mining-note's examples, by Yomitan's getPitchCategory: 道具 and 弱点
+  // both drop after the third mora, but 道具 has only three.
+  for (const [expression, reading, value, rules, expected] of [
+    ["自然", "しぜん", 0, "", "heiban"], ["人生", "じんせい", 1, "", "atamadaka"],
+    ["弱点", "じゃくてん", 3, "", "nakadaka"], ["道具", "どうぐ", 3, "", "odaka"],
+    ["驚く", "おどろく", 3, "v5", "kifuku"], ["橋", "はし", entry(0, "LHL"), "", "odaka"],
+  ]) {
+    assert.deepEqual(groupOf(expression, reading, [value], rules), [expected, expected], expression);
+  }
+  // The headword follows the furigana's pitch; each badge keeps its own.
+  const badges = () => [...f.popup.querySelectorAll(".pronunciation")].map(node => node.dataset.pitchCategory);
+  const headword = () => f.popup.querySelector(".gsm-hoshidicts-expression");
+  f.render(RESULT);
+  assert.equal(headword().dataset.pitchCategory, "heiban");
+  assert.deepEqual(badges(), ["heiban", "atamadaka"]);
+  f.render(RESULT, { pitchAccentFuriganaDictionary: "Daijirin" });
+  assert.equal(headword().dataset.pitchCategory, "atamadaka");
+  // The Overline style's line and hook sit inside the same coloured headword.
+  f.render(RESULT, { pitchAccentFuriganaStyle: "overline" });
+  assert.ok(headword().querySelector(".pronunciation-mora-line"));
+  assert.equal(headword().dataset.pitchCategory, "heiban");
+  // Colours do not need the contour, and the dictionary still chooses the group.
+  f.render(RESULT, { showPitchAccentFurigana: false });
+  assert.equal(f.popup.querySelector(".gsm-hoshidicts-pitch-ruby"), null);
+  assert.equal(headword().dataset.pitchCategory, "heiban");
+  f.view.updateDictionaryPresentation({ showPitchAccentFurigana: false, pitchAccentFuriganaDictionary: "Daijirin" });
+  assert.equal(f.popup.querySelector(".gsm-hoshidicts-pitch-ruby"), null);
+  assert.equal(headword().dataset.pitchCategory, "atamadaka");
+  assert.deepEqual(badges(), ["heiban", "atamadaka"]);
+  // A headword with no pitch that fits its reading has no group.
+  f.render(result("昭和", "しょうわ", [pitch("NHK", 7)]));
+  assert.equal(headword().dataset.pitchCategory, undefined);
 });

@@ -98,7 +98,6 @@
     lookupMode: "activationSticky",
     activationKey: "Shift",
     definitionLookupMode: "inherit",
-    hoverDelayMs: 0,
     popupHideDelayMs: 160,
     // Yomitan's scanning.hidePopupOnCursorExit and hidePopupOnCursorExitDelay.
     hidePopupOnCursorExit: false,
@@ -121,8 +120,12 @@
     sourceHighlightEnabled: true,
     showPopupAudioButton: true,
     popupColumns: 1,
+    // Yomitan's general.glossaryLayoutMode: "compact" puts a definition's
+    // glosses on one line, separated by " | ". Popup CSS only.
+    glossaryLayoutMode: "default",
     showLookupCounts: true,
-    definitionBlurEnabled: false,
+    // Only the lookup-count condition; stored as `definitionBlurEnabled` before #401.
+    definitionBlurCountEnabled: false,
     definitionBlurAnkiMature: false,
     definitionBlurFrequencyEnabled: false,
     definitionBlurFrequencyDictionary: "",
@@ -136,11 +139,17 @@
     compactDefinitionSummaryCount: 3,
     compactDefinitionSummaryDictionary: "",
     popupImageSource: null,
+    // Hover/focus enlargement of dictionary images: "off", "large" skips
+    // inline glyphs (em-sized or at most 32px square), "all" previews every image.
+    imageHoverPreview: "large",
     averageFrequency: false,
     showFrequencyDictionaryNames: false,
     compactFrequencyNumbers: false,
     showPitchAccentFurigana: true,
     pitchAccentFuriganaDictionary: "",
+    // How the headword's furigana draws its pitch: "contour" (a line over high
+    // morae and under low ones) or "overline" (the pitch list's Yomitan text).
+    pitchAccentFuriganaStyle: "contour",
     showPitchAccentBadge: true,
     // Yomitan labels every pronunciation group with its dictionary.
     showPitchAccentDictionaryNames: true,
@@ -148,6 +157,9 @@
     showPitchAccentText: true,
     showPitchAccentPosition: true,
     showPitchAccentGraph: false,
+    // jp-mining-note's pitch accent group colours, off by default as there.
+    // The key is US-spelled like colorScheme; Settings says "colours".
+    showPitchAccentColors: false,
     hidePopupGrammarTags: true,
     kanjiClickDictionary: "",
     frequencyDictionary: "",
@@ -163,7 +175,6 @@
   const NUMBER_RANGES = {
     scanLength: [1, 64],
     maxResults: [1, 256],
-    hoverDelayMs: [0, 2000],
     popupHideDelayMs: [0, 5000],
     hidePopupOnCursorExitDelayMs: [0, 5000],
     popupNestingMaxDepth: [0, Number.MAX_SAFE_INTEGER],
@@ -184,6 +195,10 @@
   const DEFINITION_BLUR_DIRECTIONS = ["atLeast", "below"];
   const DEFINITION_BLUR_REVEALS = ["timed", "hover"];
   const DEFINITION_BLUR_FREQUENCY_ORDERS = ["auto", "ascending", "descending"];
+  const IMAGE_HOVER_PREVIEWS = ["off", "large", "all"];
+  // Yomitan's stored values, so its "compact-popup-anki" can follow without a migration.
+  const GLOSSARY_LAYOUT_MODES = ["default", "compact"];
+  const PITCH_ACCENT_FURIGANA_STYLES = ["contour", "overline"];
   // Audited Hoshidicts catalogue from GSM PR #549; palette values live in reader.css.
   const POPUP_THEME_GROUPS = [
     { label: "Automatic", ids: ["auto"] },
@@ -198,16 +213,16 @@
       : id.replace(/(^|-)([a-z])/gu, (_, separator, letter) => `${separator ? " " : ""}${letter.toUpperCase()}`),
   })) }));
   const POPUP_THEME_IDS = new Set(POPUP_THEME_GROUPS.flatMap(group => group.themes.map(theme => theme.id)));
-  const POPUP_RENDERER_IDS = ["nazeka", "plain", "jl"];
+  const POPUP_RENDERER_IDS = ["nazeka", "plain", "jl", "bee"];
   for (const id of POPUP_RENDERER_IDS) POPUP_THEME_IDS.add(id);
   const popupRenderer = theme => POPUP_RENDERER_IDS.includes(theme) ? theme : "default";
   const DESIGN_OPTION_KEYS = [
-    "popupTheme", "popupToolbarPosition", "customPopupCss", "customPopupJavascript", "customLinks", "customButtons", "popupWidthPx", "popupHeightPx", "popupScalePercent", "popupOpacityPercent", "sourceHighlightEnabled", "showPopupAudioButton", "popupColumns",
-    "showCompactDefinitionSummary", "compactDefinitionSummaryCount", "compactDefinitionSummaryDictionary",
-    "kanjiClickDictionary", "popupImageSource", "averageFrequency", "showFrequencyDictionaryNames",
-    "compactFrequencyNumbers", "showPitchAccentFurigana", "pitchAccentFuriganaDictionary", "showPitchAccentBadge",
-    "showPitchAccentDictionaryNames", "showPitchAccentText", "showPitchAccentPosition", "showPitchAccentGraph",
-    "hidePopupGrammarTags",
+    "popupTheme", "popupToolbarPosition", "customPopupCss", "customPopupJavascript", "customLinks", "customButtons", "popupWidthPx", "popupHeightPx", "popupScalePercent", "popupOpacityPercent", "sourceHighlightEnabled", "popupColumns",
+    "glossaryLayoutMode", "showCompactDefinitionSummary", "compactDefinitionSummaryCount", "compactDefinitionSummaryDictionary",
+    "kanjiClickDictionary", "popupImageSource", "imageHoverPreview", "averageFrequency", "showFrequencyDictionaryNames",
+    "compactFrequencyNumbers", "showPitchAccentFurigana", "pitchAccentFuriganaDictionary", "pitchAccentFuriganaStyle",
+    "showPitchAccentBadge", "showPitchAccentDictionaryNames", "showPitchAccentText", "showPitchAccentPosition", "showPitchAccentGraph",
+    "showPitchAccentColors", "hidePopupGrammarTags",
   ];
   const LEGACY_MODIFIERS = new Map([["none", "Shift"], ["shift", "Shift"], ["ctrl", "Control"], ["alt", "Alt"]]);
   const LOOKUP_MODES = ["hover", "activation", "activationSticky"];
@@ -536,16 +551,23 @@
     return typeof value === "string" ? value : "";
   }
 
+  // An empty blur dictionary means "Same as sorting": the Reading → Frequency
+  // sorting dictionary, which may itself be Automatic (no single dictionary).
+  function definitionBlurFrequencyDictionary(options) {
+    return options.definitionBlurFrequencyDictionary || options.frequencyDictionary;
+  }
+
   // Shared by the reader and the Design preview. Native numeric frequency
   // values are the evidence; rendered labels are intentionally ignored.
   function definitionBlurFrequencyEvidence(options, frequencyGroups, dictionaries) {
     const unavailable = { qualified: false, value: null, order: null };
-    if (!options.definitionBlurFrequencyEnabled || !options.definitionBlurFrequencyDictionary
+    const title = definitionBlurFrequencyDictionary(options);
+    if (!options.definitionBlurFrequencyEnabled || !title
         || !Array.isArray(frequencyGroups) || !Array.isArray(dictionaries)) return unavailable;
-    const source = dictionaries.find(dictionary => dictionary?.title === options.definitionBlurFrequencyDictionary);
+    const source = dictionaries.find(dictionary => dictionary?.title === title);
     if (!source || source.enabled === false || source.frequencyCount === 0) return unavailable;
     const values = frequencyGroups
-      .filter(group => group?.dictionary === options.definitionBlurFrequencyDictionary
+      .filter(group => group?.dictionary === title
         && Array.isArray(group.frequencies))
       .flatMap(group => group.frequencies)
       .map(frequency => frequency?.value)
@@ -569,7 +591,7 @@
   function definitionBlurQualifies(options, lookupCount, ankiMature = false, frequencyQualified = false) {
     if (options.definitionBlurFrequencyEnabled && frequencyQualified === true) return true;
     if (options.definitionBlurAnkiMature && ankiMature === true) return true;
-    if (!options.definitionBlurEnabled || !Number.isSafeInteger(lookupCount) || lookupCount < 0) return false;
+    if (!options.definitionBlurCountEnabled || !Number.isSafeInteger(lookupCount) || lookupCount < 0) return false;
     return options.definitionBlurDirection === "below"
       ? lookupCount < options.definitionBlurThreshold
       : lookupCount >= options.definitionBlurThreshold;
@@ -585,10 +607,12 @@
     definitionBlurFrequencyOrder: new Set(DEFINITION_BLUR_FREQUENCY_ORDERS),
     definitionBlurDirection: new Set(DEFINITION_BLUR_DIRECTIONS),
     definitionBlurReveal: new Set(DEFINITION_BLUR_REVEALS),
+    imageHoverPreview: new Set(IMAGE_HOVER_PREVIEWS),
+    glossaryLayoutMode: new Set(GLOSSARY_LAYOUT_MODES),
+    pitchAccentFuriganaStyle: new Set(PITCH_ACCENT_FURIGANA_STYLES),
   };
 
   function normaliseField(key, value) {
-    if (key === "hoverDelayMs") return 0;
     if (Object.hasOwn(NUMBER_RANGES, key)) return clampOption(key, value);
     if (typeof DEFAULT_OPTIONS[key] === "boolean") {
       return typeof value === "boolean" ? value : DEFAULT_OPTIONS[key];
@@ -671,9 +695,22 @@
     return (group?.dictionaryIds || []).filter(id => titles.has(id)).map(id => titles.get(id));
   }
 
+  // Keys an older stored record or backup may still carry. `modifier` and
+  // `definitionBlurEnabled` migrate; `hoverDelayMs` was never adjustable and is dropped.
+  const RETIRED_OPTION_KEYS = ["modifier", "definitionBlurEnabled", "hoverDelayMs"];
+
+  // `definitionBlurEnabled` was renamed; the new key wins when both are present.
+  function legacyBlurCountOption(source, strict) {
+    if (!Object.hasOwn(source, "definitionBlurEnabled") || Object.hasOwn(source, "definitionBlurCountEnabled")) return {};
+    const value = source.definitionBlurEnabled;
+    if (typeof value === "boolean") return { definitionBlurCountEnabled: value };
+    if (strict) throw new Error("the options write request carried an invalid reader option");
+    return {};
+  }
+
   function projectOptions(value, strict) {
     const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
-    const result = legacyActivationOptions(source, strict);
+    const result = { ...legacyActivationOptions(source, strict), ...legacyBlurCountOption(source, strict) };
     for (const key of OPTION_KEYS) {
       if (!Object.hasOwn(source, key)) continue;
       const raw = source[key];
@@ -749,7 +786,7 @@
   globalThis.HDReaderOptions = {
     ANKI_FIELDS, ANKI_DUPLICATE_SCOPES, ANKI_DUPLICATE_BEHAVIORS, ANKI_OVERWRITE_MODES,
     ANKI_TEMPLATE_CONFIG_KEYS, DEFAULT_ANKI_TEMPLATE, STABLE_ID_MAX_LENGTH,
-    DEFAULT_OPTIONS, NUMBER_RANGES, LOOKUP_MODES, DEFINITION_LOOKUP_MODES, ACTIVATION_BUTTONS, ACTIVATION_KEYS, FREQUENCY_ORDERS,
+    DEFAULT_OPTIONS, RETIRED_OPTION_KEYS, NUMBER_RANGES, LOOKUP_MODES, DEFINITION_LOOKUP_MODES, ACTIVATION_BUTTONS, ACTIVATION_KEYS, FREQUENCY_ORDERS,
     POPUP_THEME_GROUPS, POPUP_RENDERER_IDS, popupRenderer, DESIGN_OPTION_KEYS,
     KEYBIND_ACTIONS, KEYBIND_ARGUMENT_DEFAULTS, KEYBIND_SCOPES, KEYBIND_MODIFIERS, KEYBIND_MODIFIER_CODES, KEYBIND_TOGGLE_OPTIONS,
     AUDIO_SOURCE_TYPES, AUDIO_SOURCE_LABELS,
@@ -757,8 +794,9 @@
     activationLabel, clampOption, normaliseActivationKey, normaliseKanjiSelection, normaliseOptions,
     normaliseAnkiConnectUrl, normaliseAnki,
     normaliseCustomButtons, normaliseExperimental, ankiTemplateConfig,
-    definitionBlurFrequencyEvidence, definitionBlurQualifies,
-    DEFINITION_BLUR_DIRECTIONS, DEFINITION_BLUR_REVEALS, DEFINITION_BLUR_FREQUENCY_ORDERS,
+    definitionBlurFrequencyDictionary, definitionBlurFrequencyEvidence, definitionBlurQualifies,
+    DEFINITION_BLUR_DIRECTIONS, DEFINITION_BLUR_REVEALS, DEFINITION_BLUR_FREQUENCY_ORDERS, IMAGE_HOVER_PREVIEWS,
+    GLOSSARY_LAYOUT_MODES, PITCH_ACCENT_FURIGANA_STYLES,
     projectStoredOptions, projectContentOptions, validateOptionsPatch,
     resolvePopupImageSources,
     resolveKanjiDictionary,

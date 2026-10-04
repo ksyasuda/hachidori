@@ -41,7 +41,7 @@
     const reply = active.replies.at(-1);
     const actual = current?.definitions ?? current?.expressions;
     // JL shows one block, so one headword, per result and dictionary.
-    const blocks = result => options.popupTheme === "jl"
+    const blocks = result => ["jl", "bee"].includes(options.popupTheme)
       ? [...new Set(result.term.glossaries.map(glossary => glossary.dictionary))].map(() => result.term.expression)
       : [result.term.expression];
     const expected = current?.definitions ? reply?.definitions : reply?.results.flatMap(blocks);
@@ -152,6 +152,22 @@
           return { length: text.length, perCallUs: time(text, length / 2, SENTENCE_SCAN_EXTENT) };
         }),
       };
+    },
+    // First hovers of a text field: each call builds a fresh imposter, which
+    // copies every computed property of the field. Null on a revision without
+    // text-field imposters.
+    fieldBuild(point, iterations = 200) {
+      if (typeof releaseFieldImposter !== 'function') return null;
+      hide();
+      let hits = 0, totalMs = 0;
+      for (let i = 0; i < iterations; i++) {
+        releaseFieldImposter();
+        const start = performance.now();
+        if (resolveCandidate(point.x, point.y)) hits++;
+        totalMs += performance.now() - start;
+      }
+      releaseFieldImposter();
+      return { iterations, hits, totalMs };
     },
     point(query, depth = 0) {
       const popup = levels[depth].popup;

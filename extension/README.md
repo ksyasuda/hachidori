@@ -27,8 +27,10 @@ those saved settings or other tabs.
 The popup action row is one non-wrapping keyboard and visual group: a nested
 Close or Back control first, then Anki, pronunciation, personal-dictionary
 edit, and custom buttons in saved order. A custom button opens a URL template
-or mines with a chosen Anki Template. Actions share a 36-pixel height and a
-5-pixel gap. At narrow popup widths the whole action row scrolls horizontally
+or mines with a chosen Anki Template. Actions share a 32-pixel height and a
+4-pixel gap. An icon-only row takes its natural width, so the compact summary
+sits beside the headword; a row with labelled custom buttons shares the line
+from a fixed basis and truncates the labels. At narrow popup widths the whole action row scrolls horizontally
 instead of wrapping, clipping, or overlapping controls. Browser mode opens link
 buttons in a Chrome tab; overlay mode asks its embedding host to open the same
 validated URL in the system browser.
@@ -129,7 +131,9 @@ the service worker and both engine runtimes run the same code.
   the Design preview from the images in `assets/` (see
   `assets/ATTRIBUTION.md`); `design-preview.js` renders the preview from
   `sample-meal.svg` and local sample data.
-- **Theme Store.** `theme-store.js` renders the experimental Design carousel.
+- **Theme Store.** `theme-store.js` renders the experimental Design carousel and
+  shows only the Design settings the selected theme declares in
+  `vendor/themes/index.json`.
   `theme-host.js` selects Default or a bundled Nazeka, Plain or JL view before constructing
   content and applies only its CSS. See the [renderer contract](../docs/themes/README.md).
 - **Renderer.** `render/` is the Default popup renderer ported from GameSentenceMiner,
@@ -146,7 +150,10 @@ the service worker and both engine runtimes run the same code.
   from `wasm/build.sh`, and `vendor/zip.js` the pinned zip.js runtime.
   `vendor/yomitan/structured-content-style.js` is Yomitan's
   `structured-content-style.json` as an ES module, its revision and checksum
-  in `vendor/yomitan/source.json`. They are
+  in `vendor/yomitan/source.json`. `vendor/kanjidic/kanji-readings.json` is
+  KANJIDIC2's kanji readings for the furigana split (CC BY-SA 4.0), which
+  `scripts/kanji-readings.mjs` regenerates from the archive pinned in
+  `vendor/kanjidic/source.json`. They are
   committed build output: update them with their source change and otherwise
   leave them alone.
 - `icons/` holds the extension's icons.

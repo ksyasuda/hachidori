@@ -139,6 +139,13 @@ struct WireStyle {
   std::string styles;
 };
 
+// A term dictionary's tag-bank rows (name, category, order, notes, score) as
+// the importer stored them in its index.json.
+struct WireTags {
+  std::string dictionary;
+  std::vector<SummaryTag> tags;
+};
+
 struct WireImportReport {
   bool success = false;
   std::string title;
@@ -148,6 +155,12 @@ struct WireImportReport {
   uint64_t pitchCount = 0;
   uint64_t kanjiCount = 0;
   uint64_t mediaCount = 0;
+  // What a successful MDX import left out (ImportResult::warnings); always 0
+  // for a Yomitan archive.
+  uint64_t skippedRecordCount = 0;
+  uint64_t unresolvedRedirectCount = 0;
+  uint64_t missingResourceCount = 0;
+  uint64_t unreadableResourceCount = 0;
   std::string error;
 };
 
@@ -160,9 +173,11 @@ void set_error(std::string message) { g_last_error = std::move(message); }
 
 // Anything thrown past here aborts the whole module and takes the extension's
 // offscreen document with it, so every ABI entry point funnels through this.
+// Each caller is a catch (...) handler; rethrowing the exception it is handling
+// recovers that exception's message.
 std::string describe_current_exception() {
   try {
-    throw;
+    std::rethrow_exception(std::current_exception());
   } catch (const std::exception& e) {
     return e.what();
   } catch (...) {
@@ -782,6 +797,10 @@ WireImportReport report_for(const ImportResult& result) {
   report.pitchCount = meta_count(counts.termMeta, "pitch") + meta_count(counts.termMeta, "ipa");
   report.kanjiCount = counts.kanji.total;
   report.mediaCount = counts.media.total;
+  report.skippedRecordCount = result.warnings.skippedRecords;
+  report.unresolvedRedirectCount = result.warnings.unresolvedRedirects;
+  report.missingResourceCount = result.warnings.missingResources;
+  report.unreadableResourceCount = result.warnings.unreadableResources;
   report.error = result.error;
   return report;
 }
@@ -915,7 +934,8 @@ EMSCRIPTEN_KEEPALIVE const char* hdw_import(const char* zip_path, const char* ou
   } catch (...) {
     set_error(describe_current_exception());
     out = R"({"success":false,"title":"","termCount":0,"metaCount":0,"frequencyCount":0,)"
-          R"("pitchCount":0,"kanjiCount":0,"mediaCount":0,"error":"report serialization failed"})";
+          R"("pitchCount":0,"kanjiCount":0,"mediaCount":0,"skippedRecordCount":0,"unresolvedRedirectCount":0,)"
+          R"("missingResourceCount":0,"unreadableResourceCount":0,"error":"report serialization failed"})";
   }
   return out.c_str();
 }
@@ -1145,6 +1165,25 @@ EMSCRIPTEN_KEEPALIVE const char* hdw_styles(void) {
     wire.reserve(styles.size());
     for (const auto& s : styles) {
       wire.push_back({s.dict_name, s.styles});
+    }
+    out = to_json(wire);
+  } catch (...) {
+    set_error(describe_current_exception());
+    out = "[]";
+  }
+  return out.c_str();
+}
+
+EMSCRIPTEN_KEEPALIVE const char* hdw_tags(void) {
+  static std::string out;
+  clear_error();
+
+  try {
+    const auto dictionaries = engine().query.get_tags();
+    std::vector<WireTags> wire;
+    wire.reserve(dictionaries.size());
+    for (const auto& d : dictionaries) {
+      wire.emplace_back(d.dict_name, d.tags);
     }
     out = to_json(wire);
   } catch (...) {

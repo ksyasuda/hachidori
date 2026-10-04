@@ -122,6 +122,20 @@ package is otherwise ordinary: its glossaries are structured content converted
 from the entry HTML, its MDD assets live under `mdict-media/`, and its revision is
 `mdx import`. There is no interactive duplicate review for MDX files: a same-title
 import replaces the installed package in place, as a re-import does.
+The import report also says what a successful MDX import left out, as Manabitan's
+MDict conversion notes do: `skippedRecordCount` (records in a corrupt `.mdx`
+block; the readable entries still import), `unresolvedRedirectCount`
+(`@@@LINK=` aliases that reach no entry), `missingResourceCount` (images and
+styles the entries refer to that no chosen `.mdd` provides) and
+`unreadableResourceCount` (`.mdd` resources in a corrupt block). A Yomitan ZIP
+reports zeros. `wasm/bindings.cpp` copies them from Hoshidicts'
+`ImportResult::warnings` and `normaliseReport` keeps them in the `hd_import`
+reply; they describe that run and are not stored with the package, its state or
+backups. Settings words each non-zero count as a note under the file's green
+`Imported …` line (`mdxImportNotes` in `dictionary-import.js`); a note never
+turns the import into a failure, and the final `#import-state` line counts the
+files `with notes`. With audio off, a `sound://` link refers to no file, so its
+file is not copied into the package.
 Recommended installation uses the same offscreen runner from both Settings and
 startup: either page attaches with `hd_setup_install`, and the run continues when
 that page closes. `recommended-install-client.js` observes ordered progress and
@@ -632,7 +646,8 @@ with No key and Child popups set to hold it, only a press over a popup is a
 scan press, and page presses keep their ordinary meaning. Otherwise No key and
 keyboard keys are unchanged, including a middle press closing the popup.
 
-There is no open delay: `hoverDelayMs` always normalises to 0, so a scan runs
+There is no open delay (the never-adjustable `hoverDelayMs` option was removed
+in #401 and is dropped from older records and backups), so a scan runs
 on the next timer turn at the pointer's latest position, and a key pressed over
 a stationary pointer scans at once. The hide/transfer delay defaults to the
 existing 160 ms, with the pinned source's 0–5,000 ms range. It is one global
@@ -663,10 +678,9 @@ then a separate press closes the popup. No page key is captured for activation.
 Key release, target/window departure, outside click, Escape, blur and scroll
 cancel delayed or unfinished pointer work immediately; the hide delay only
 retains an already-rendered popup for transfer. In `activationSticky` a rendered
-popup ignores key release, pointer movement without the key, an empty scan and
-window departure; outside click, Escape, blur, scrolling its source away, a
-failed lookup or a new lookup still close it. Its rendered children likewise
-outlive pointer movement through the chain (see
+popup ignores key release, pointer movement without the key and an empty scan;
+outside click, Escape, a failed lookup or a new lookup still close it. Its
+rendered children likewise outlive pointer movement through the chain (see
 [Definition popup chains](#definition-popup-chains)). Same-candidate hover,
 popup entry, keyboard focus and Note editing preserve the current view.
 Dispatching a different
@@ -676,6 +690,20 @@ or resume expired glossary/media callbacks. Interaction-only settings changes do
 not invalidate current rendered resources; result-affecting settings still do.
 Hidden retirement clears the DOM and owners immediately without a redundant
 scroll reset; every visible term, kanji or notice render still resets scrolling.
+
+As in Yomitan, leaving the tab, the window or the browser closes nothing in any
+lookup mode (#432). A window departure only forgets the pointer, so the next
+move applies the mode's usual rules, and a blur only releases the activation
+input, ends a selection drag or a resize and cancels unfinished work. The popup
+chain, its scroll positions and tabs, and a Note draft with focus in it wait
+for the reader's return. A blur that leaves `document.hasFocus()` true moved
+focus into one of the page's own frames, same-origin or cross-site, which is a
+click outside the popup and closes it. A popup inside a frame cannot tell a
+click on its parent page from leaving the tab, so, as in Yomitan, it stays
+until it is closed or replaced from within that frame. In [overlay
+mode](overlay-mode.md) the host's click-through and focus changes produce that
+blur and window departure, so there a blur closes nothing either and keeps a
+drag or held scan button (#403).
 
 **Hide popup on cursor exit** ports Yomitan's option of that name, off by
 default, with its own 0–5,000 ms delay (160 ms by default). It works in every
@@ -820,10 +848,40 @@ covering text cannot trigger distant lookups. This applies equally to horizontal
 and vertical text; exact selections and the reader's boxed-glyph drag keep their
 own selection rules.
 
+An `<input>` of type `text` or `search` (Chrome reports a missing or unknown
+type as `text`) or a `<textarea>` keeps its value in user-agent shadow DOM that
+no caret API enters. When the hit-tested element is such a field with a value,
+the reader scans an imposter, as Yomitan's `TextSourceGenerator` does: a `<div>`
+with the value and every computed property of the field, laid over it with its
+scroll offsets inside an invisible, unselectable, `aria-hidden` container
+appended to `<body>`. An input's copy is one unwrapped line, centred in the
+content box as the input centres its text, and narrowed by a search field's
+clear button or a datalist's picker. The glyph is bisected from the copy's
+client rects and must pass the two-pixel rule above and lie where the field
+shows text, so padding and text scrolled out of sight look up nothing. As for
+Google Docs, the copy is the scan root and its text node the only source: the
+match never runs past the value, a textarea's sentence ends at its line breaks,
+and the highlight falls on the invisible copy. One imposter exists at a time
+and is kept while its field keeps its value, scroll offsets and place, so moves
+over it share the pending lookup and the popup; it is removed once it neither
+anchors the root lookup nor lies under the pointer, and when the root popup
+closes. Page scans never enter it.
+
+Password and other input types, hidden fields and fields masked with
+`-webkit-text-security` are never read. Editing is untouched: the field keeps
+its focus, caret, selection, value and scroll, a click into it still dismisses
+the popup, and a selection inside it still starts no lookup. An activation key
+pressed while the pointer rests on the focused field it has clicked or typed in
+since it last moved scans nothing, so Shift for a capital letter does not cover
+the field; moving with the key held looks up as usual. A scan-button press on a
+word in a field looks it up without pasting or navigating; elsewhere in a field
+the press keeps its native action.
+
 Automatic scanning reads page text in DOM order regardless of layout, as
 Yomitan's default layout-unaware scan does: it crosses inline and block elements
 alike, including glyphs boxed one per absolutely positioned span by an overlay,
-and stops only at `<br>`, editing controls or contenteditable text. The
+and stops only at `<br>`, editing controls or contenteditable text; a text
+field's own value is read only through its imposter. The
 candidate's sources are the run of neighbouring text nodes around the hovered
 glyph, up to 200 characters each way, cut at a whitespace-only text node
 containing a line break (the separator between blocks in page source and in
@@ -839,8 +897,9 @@ The sentence is cut around the hovered glyph first and again around the whole
 matched word once the engine has answered. A focused page editor keeps printable
 activation keys available for typing. Pointer lookups and modifier activation
 still work over separate page text, including example links beside an
-autofocused search field. The live `onlyScanJapaneseText`
-option defaults to true; disabling it permits other scripts in automatic scans.
+autofocused search field, and over that field's own words. The live
+`onlyScanJapaneseText` option defaults to true; disabling it permits other
+scripts in automatic scans.
 Repeated pointer events for one pending candidate share its lookup, while a
 changed anchor/query or failed request can start fresh work.
 Retained selections are rechecked through the existing pointer throttle rather
@@ -874,7 +933,7 @@ engine scan window; a prefix-only result is not an exact match. A miss retains
 selection ownership until the selection changes or is dismissed, so pointer
 movement cannot silently replace it with a prefix. Its notice exposes the same
 personal-dictionary pencil as term and kanji results, prefilled with the
-selected word even when no dictionaries are installed. Reading → Personal
+selected word even when no dictionaries are installed. Library → Personal
 dictionary → **Show a popup when a selection has no definition**
 (`showNoResultNotice`, default on) owns that notice: switched off, a miss with
 loaded dictionaries hides the popup and still retains the selection, while the
@@ -884,7 +943,7 @@ Note append transaction and replays that exact request to show the new
 definition; publisher dictionaries remain unchanged.
 
 Automatic selection lookups are the personal dictionary's entry point, so
-Reading → Personal dictionary → **Use the personal dictionary**
+Library → Personal dictionary → **Use the personal dictionary**
 (`personalDictionaryEnabled`, default on) owns them. Switched off, the reader
 behaves like Yomitan: a selection change or drag release never looks anything
 up, in any lookup mode, and a live selection no longer outranks the pointer, so
@@ -904,7 +963,11 @@ back on shows the entries again without an engine reload.
 
 The visible query and raw DOM highlight span are stored separately: hidden text
 and block separators can make `Selection.toString()` differ from `Range.toString()`.
-Reverse/cross-inline ranges retain their exact source offsets. Selecting a
+Reverse/cross-inline ranges retain their exact source offsets. The selection's
+sentence is read as a hover over its first selected character reads one, from
+the scanned text nodes around it, so the furigana, scripts and hidden text of
+the element containing the selection stay out of it, and a selection that
+leaves that character's block is cut at the block's edge. Selecting a
 glossary inside our closed shadow root preserves the current view. Pending
 selection replies share pointer cancellation and are rejected after dismissal
 or relevant storage invalidation; that invalidation also releases completed hits
@@ -979,7 +1042,14 @@ built. A string pattern such as `"LHL"`, which hoshidicts delivers beside a
 placeholder position of 0, is read with Yomitan's `isMoraPitchHigh` and
 `getDownstepPositions`, so it shows `[2]` like the integer form, in the badges,
 the furigana contour and the Anki pitch markers alike. `reading [n]` stays in
-every accent's tooltip and accessibility label. Turning dictionary names off
+every accent's tooltip and accessibility label. **Furigana pitch style** picks
+the headword's notation. Contour, the default, draws a line over high morae,
+under low ones and a stroke at each rise and drop in the pitch colour. Overline
+builds the reading's morae once with the badges' `createPronunciationText` and
+shares them out to the furigana segments, so the headword shows the badges'
+line over high morae and downstep hook in the text colour, with the same levels;
+nasal and devoice marks, `[n]` and the graph stay in the badges. The style is
+disabled while the furigana pitch is off. Turning dictionary names off
 removes the tags. IPA shows transcriptions without source-name labels. Tooltips and
 accessibility labels retain source attribution, and visible pitch names and
 labels follow dictionary aliases in place. Unfilled tags, pitch names, pitch
@@ -992,7 +1062,10 @@ remains available; this is lazy presentation, not a source or data limit.
 Averages retain GSM PR #549's floored harmonic mean, with two corrections for
 the standalone contract: arithmetic uses the native positive numeric value, not
 its display label, and rank, occurrence and unspecified dictionaries aggregate
-separately. Each dictionary contributes its first usable value once. Type labels
+separately. Each dictionary contributes its first usable value once. Tags list
+a dictionary's values in its own order, as Yomitan does, without moving `㋕`
+values forward, so a positive first value is the first one shown and the one
+averaged. Type labels
 remain visible as concise `Avg rank`, `Avg count`, or `Avg frequency` text even
 with source names hidden, and each aggregate carries `data-frequency-average`
 (`rank-based`, `occurrence-based` or `unspecified`). As in Yomitan, every tag
@@ -1010,6 +1083,27 @@ The preferred pitch source is a soft canonical-title preference: unavailable or
 disabled sources fall back to another usable pitch source. A committed rename
 follows the stable package ID, and actual removal clears the selection in the
 same background options/state write. Turning contour off remembers the source.
+
+**Show pitch accent colours** (#458, off by default as in jp-mining-note)
+colours by accent group: 平板 heiban blue, 頭高 atamadaka red, 中高 nakadaka
+orange, 尾高 odaka green and 起伏 kifuku purple. `HDGlossary.pitchAccentCategory`
+ports Yomitan's `getPitchCategory` with `isNonNounVerbOrAdjective`, and
+`{pitch-accent-categories}` uses the same helper, so the popup and the card
+agree: a downstep on a `v1`, `v5`, `vk`, `vs`, `vz` or `adj-i` term that is not
+also `vs` and `n` is kifuku, and a pattern counts its first downstep. The
+headword's `.gsm-hoshidicts-expression` carries `data-pitch-category` from the
+pitch its furigana uses (the pitch accent dictionary first, then the first pitch
+that fits the reading), whether or not the contour is drawn, and each badge's
+`li.pronunciation` carries its own. The switch only sets
+`data-hoshidicts-pitch-colors` on the popup host: CSS then colours the headword,
+its kanji links and furigana lines (the contour, or the Overline style's line
+and hook), and each badge's overline, hook and graph.
+The reading kana, badge text and dictionary tag keep their colours. A headword
+waits for blurred definitions to be revealed, a focused kanji in a coloured
+headword shows a 2 px outline, and forced colours use system colours. The
+`--hoshidicts-pitch-{heiban,atamadaka,nakadaka,odaka,kifuku}` variables are
+`light-dark()` pairs that keep 3:1 on every palette's cards, header and popup
+body; Custom CSS may override them. Other renderers do not declare the setting.
 
 Live metadata changes replace only changed metadata rows or expression ruby,
 without another lookup, media request or glossary fill. Note drafts, full cards,
@@ -1029,7 +1123,8 @@ scans the statistics collection. See [lookup statistics](lookup-statistics.md)
 for local recording, revision adoption and backup behavior. Lookup counts never
 contact an external application; retired corpus connection settings are ignored.
 
-`definitionBlurEnabled` remains the count criterion and requires
+`definitionBlurCountEnabled` (stored as `definitionBlurEnabled` before #401,
+which still migrates from older records and backups) remains the count criterion and requires
 `showLookupCounts`. The independent, default-off
 `definitionBlurAnkiMature` and `definitionBlurFrequencyEnabled` criteria
 combine with it through the shared `definitionBlurQualifies` OR rule. Anki's
@@ -1097,11 +1192,28 @@ aggregate maturity and inserts a found row. A true miss creates no negative row.
 AnkiConnect polls its socket on a timer, so each request costs one poll interval
 and parallel requests serialise: discovery is one `multi` batch (`deckNames`,
 `modelNames`, `modelFieldNames`), and the live lookup batches its candidate and
-mature-subset `findNotes` searches before the single `notesInfo` stage. Both
+mature-subset `findNotes` searches before the single `notesInfo` stage. In deck
+and All of Anki scope, the lookup and the complete refresh first read
+`modelNamesAndIds`, then every other recognized note type's fields in one
+`multi`; note-type scope skips both. Both
 index paths judge maturity on the same scoped card search, so in deck scope a
 note is mature only through a mature card inside the configured deck.
 Other duplicate policies retain their full preflight because Add duplicate and
 Overwrite require live validation beyond membership.
+
+A popup asks for every pending result of one Template in a single
+`hd_anki_preflight_batch`, so its readiness costs a fixed number of requests
+however many results it shows. Snapshot hits still answer locally. The misses
+share one live lookup, deduplicated by word key: its search ORs every word
+under each recognized note type and direct field, and the deck filter wraps
+the whole union. `notesInfo` then narrows each word to the notes holding
+exactly its key, with that word's own maturity. One `canAddNotesWithErrorDetail`
+validates every result that needs Anki's add check: those without a duplicate,
+and all of them in Add duplicate. Each result receives exactly the reply a
+single preflight gives it, including refusals that belong to it alone, such as
+an empty first field or a cloze rule. Overwrite and a destination the index
+cannot key keep their per-result checks, because they need each target's
+`notesInfo` or Anki's own `dupe:` identity. Submission is unchanged.
 
 Clicking **View in Anki** forces that same scoped live lookup before opening the
 Browser. It replaces stale IDs in the canonical row, or removes an empty row and
@@ -1196,6 +1308,43 @@ onto the popup palette. Hachidori keeps its per-dictionary cards, the monochrome
 image mask, table scrolling, failed-image labels and 1em-per-pixel image boxes at
 its 16px text. The Anki export keeps Yomitan's own Anki shape (one element bare,
 several as a list) through the renderer's `layout: "anki"` option.
+
+Definition tags follow Yomitan's tag banks (#426). Tag, rule and kanji reading
+lists split on U+0020 only, as Yomitan's `_splitField` does, so Jitendex's
+`special reading` (U+00A0 inside) stays one tag. The importer keeps every
+`tag_bank_*.json` row in the imported `index.json`'s `tags`, and `hdw_tags`
+returns each term dictionary's rows. The engine service reads them once per
+generation and gives every `hd_lookup` and `hd_lookup_dictionary` glossary a
+`tags` array built as Yomitan's translator builds it: each name is looked up by
+its part before `:`, one the bank lacks is category `default`, a repeated name
+is listed once, and the list is sorted by `order`, then name. `definitionTags`
+stays as the engine wrote it. The renderer draws `glossary.tags` with
+`data-category` and the notes as `title`, `reader.css` colours `expression`,
+`partOfSpeech`, `popular`, `frequent` and `archaism` with palette roles, and
+the Anki `{glossary}` label and `{tags}` and the API's `definitions[].tags` read
+the same array. A reply without `tags`, from an older sharing host, is drawn
+from `definitionTags` as category `default`. A dictionary imported before the
+tags were stored has none until it is imported again, and looks as before.
+
+Headword furigana follow Yomitan's `distributeFurigana`: the kana in a
+headword anchor its reading and each run of other characters takes the share
+between them. Where the kana leave more than one split, `segmentFurigana`, like
+Yomitan, puts the reading over the whole word: 好き嫌い could be 好(す)き嫌(きら)い
+or 好(すき)き嫌(ら)い. For such a headword the engine service gives the
+`hd_lookup` and `hd_lookup_dictionary` result a `term.furigana` split when
+exactly one split reads by its kanji's KANJIDIC readings (#459). A kanji reads
+as an on'yomi, or as a kun'yomi's stem, stem and okurigana, or masu-stem (す.く:
+す, すく, すき), each also with rendaku and with a final つ, ち, く, き or り as
+っ; 々 reads as the kanji before it, and a digit or letter never reads. Every
+other reply is unchanged. `extension/vendor/kanjidic/kanji-readings.json` holds
+the readings; the worker imports it as a JSON module on its first such headword
+and derives each kanji's forms when it is first needed.
+`scripts/kanji-readings.mjs` regenerates the table from the KANJIDIC archive
+pinned in `source.json` beside it; point that pin at a newer jmdict-yomitan
+release to update it. The popup headword (plain ruby and pitch columns),
+`{furigana}`/`{furigana-plain}` and the API's scanning parser read the split
+through `termFurigana`, which falls back to the local split when a term carries
+none, as from an older sharing host, or one that does not spell its expression.
 
 Each node-limit rejection reports its exact attempted value and configured
 limit. Structural paths remain exact for ordinary content and elide the middle
@@ -1599,6 +1748,16 @@ and make a one-pixel-wide image millions of pixels tall. Ordinary dimensions
 and preferred/em sizing retain their previous geometry. This limits rendered
 geometry, not imported image bytes or native dimensions.
 
+A term bank's image `width` and `height` are Yomitan's preferred size, and
+Yomitan's importer stores the media's natural size beside them. hoshidicts
+keeps the raw bank, so an image that declares only one side (日本国語大辞典's
+accent labels give only `height: 1.2em`) keeps that side and takes the other
+from the decoded image's aspect ratio, within the same bounds. Until the image
+decodes it reserves a square of the declared side. The image layer's margin
+and padding are pinned inline: Yomitan paints that layer on a `<canvas>` that
+no dictionary `img` rule reaches, whereas such a rule would shift or grow
+Hachidori's `<img>` inside its clipped box.
+
 Preferred-height width calculation keeps its original finite positive result.
 Only an intermediate zero or infinity retries the other multiplication/division
 groupings before the existing display-width clamp. This recovers representable
@@ -1643,6 +1802,12 @@ messages already sent cannot be aborted: the deadline bounds logical ownership
 and waiting, not underlying native execution.
 
 Hovering or keyboard-focusing an image lazily opens one larger, fixed preview.
+Design → Definitions → Image hover preview (`imageHoverPreview`) chooses
+`large` (default), `off` or `all`. `large` skips inline glyphs, meaning images
+sized in `em` or at most 32px on both sides, such as dictionary brackets and
+labels drawn as SVG; `off` opens no preview on hover or focus. The view reads
+the option at each request, so a change applies to the next hover. Collapsed
+images still expand inline on hover and focus through CSS.
 It is a sibling of the popup inside the same closed shadow root, so it inherits
 the palette without being clipped by the glossary card or popup scrollport.
 The preview copies the original image's exact current source and alt text; it
@@ -1653,6 +1818,22 @@ text colour by a layer masked with the image, in the card and in the preview.
 Under forced colours the masked layers paint `CanvasText`, so Windows contrast
 themes keep the glyph visible in both places.
 Reduced motion disables the animation.
+
+Design → Definitions → Compact glossaries (`glossaryLayoutMode`) is Yomitan's
+`general.glossaryLayoutMode` with its stored values `default` and `compact`
+(Compact popup). `createPopupAppearance` sets
+`data-hoshidicts-glossary-layout="compact"` on the popup host, and
+`render/reader.css` applies Yomitan's compact rules to the unchanged glossary
+markup: a definition's plain glosses, with their tags, and the items of a
+structured `ul[data-sc-content="glossary"]` share one line. The grey
+`--compact-list-separator` (` | `) between them is generated content with empty
+alternative text, so screen readers read only the list items; the zero-size
+`.gloss-separator` space keeps copied and scanned plain glosses apart. Examples,
+notes, tables and structured tag rows keep their own lines. Where a palette's
+faint text is below 3:1 against the card, the bar uses its muted text colour.
+The reader and the Design preview relayout masonry on a change without
+re-rendering, so Note drafts and child popups survive it. Only Default's
+stylesheet has the rules, and Anki notes never load it.
 
 Each popup owns one requested preview image, including a still-loading image.
 A load may resume only that current intent: it cannot replace a newer
@@ -1696,7 +1877,10 @@ once: one `hd_kanji` when any member is native and one `hd_lookup_dictionary`
 per term member. The replies merge in group order, entries sharing an expression
 and reading combining their cards as an ordinary lookup does, and each native
 entry becomes one structured card (tags, On/Kun readings, ordered meanings and a
-Details table) through the renderer's `kanjiEntryGlossary`. The term view then
+Details table) through the renderer's `kanjiEntryGlossary`, wrapped by
+`kanjiEntryResult` in a complete engine term result (the character with an
+empty reading, rules and tags, no trace and a zero score) so Anki mining, lookup
+counts and blur treat it like any other term card. The term view then
 shows the members as tabs: All first, then every member with an entry, in group
 order, in place of the reader's group and favourite tabs; live presentation
 updates keep that scope. A group whose members all miss falls back to the
@@ -1936,14 +2120,20 @@ Fit/Actual transforms the outer stage, whose size follows the configured popup
 with room for the sample sentence; resizing does not rebuild the sample.
 
 `reader-options.js` owns AUTO plus the audited 42-palette grouped catalogue (18
-dark, 23 light, one high-contrast), strict option validation, and the 29 Design
+dark, 23 light, one high-contrast), strict option validation, and the 32 Design
 reset keys. Fresh installs use AUTO and follow the live browser colour scheme;
 sparse upgrade profiles and explicit Hachidori choices keep the Hachidori
 palette. Other defaults are 560 × 420 px, 85% background opacity,
 one column, Automatic toolbar placement, summary off with three snippets and automatic sources, pitch
-contour/pitch badges/pitch dictionary names/pitch text and position/source highlighting on, and frequency
-names/abbreviation/averages, the pitch graph and grammar tags off. Reset writes those keys through the existing sparse revision CAS;
+contour/pitch badges/pitch dictionary names/pitch text and position/source highlighting on, the Contour
+furigana pitch style, and frequency
+names/abbreviation/averages, the pitch graph, pitch accent colours and grammar tags off. Reset writes those keys through the existing sparse revision CAS;
 Reading preferences, dictionaries, groups, and update policy are untouched.
+The default renderer's density comes from `--hd-*` custom properties declared on
+`.gsm-hoshidicts-popup` in `render/reader.css` (spacing steps, header, content
+and card padding, 32 px control size, 28 px headword with 14 px furigana, 12 px
+labels, 16 px / 1.5 definitions), so a theme or custom CSS can override the
+scale in one place; multi-column masonry reads its gap from the same grid.
 The source-audited bounds are width 280–1,200 px, height 200–900 px, and opacity
 0–100%. Viewport clamping never changes the saved dimensions.
 
@@ -2079,6 +2269,15 @@ text opacity and the user's background setting are unchanged. Oversized toolbar
 content and the Note form scroll within their own bounds. Nested popup anchors
 and Back restoration follow the content scrollport.
 
+Like Yomitan, a root popup stays at the viewport position where it first
+opened (#402). Its placement reuses the source rect captured when that lookup
+was first shown, so scrolling the page or any element neither moves nor closes
+it, and neither does the source word leaving the viewport or the DOM. Resizing,
+popup size, toolbar, page zoom and fullscreen changes re-place and clamp it from
+that rect. Escape, an outside click, cursor exit, key release and a new lookup
+still close or replace it. Child popups keep following their link text inside
+the parent pane.
+
 The shared `resolveToolbarPosition` follows the pinned GSM PR #549 rule:
 Automatic places a horizontal toolbar at the bottom of an above-word popup, or
 the top of a below-word popup, for roots and nested panes alike. Vertical roots
@@ -2107,11 +2306,24 @@ are unresolved, the disabled button exposes its busy state and an Arrow
 Clockwise icon. It resolves to Add or the green View in Anki book action.
 Missing Template IDs remain visible as disabled errors and send no Anki
 request.
-The content controller preflights rendered candidates sequentially, retires
+The content controller preflights each Template's rendered candidates in one
+batch per binding pass (the popup renders its first result before the rest, so
+those usually arrive in a second batch), applies each reply only to a control
+still bound to it, retires
 detached actions after live tab/group projection, and creates no Anki controls
 or requests while unconfigured. Mining uses the selected projected result,
 current frequency units and audio choice, and the raw source span for
 sentence/cloze boundaries.
+
+A note field keeps its template's literal text, so a template such as
+`{cloze-prefix}{{c1::{cloze-body}}}{cloze-suffix}` still makes a real cloze
+deletion. Braces inside marker values, such as a dictionary definition's own
+`{{c1::…}}` example, reach Anki as `&#123;` and `&#125;`: they display
+unchanged but never form a deletion, so these entries stay addable to a
+non-Cloze note type (#398). Dictionary `<style>` CSS is left literal. Editing
+such a field later in Anki's editor may turn the entities back into braces.
+When Anki still refuses a deletion on a non-Cloze note type, the message says
+whether it came from the field's template or from its markers' content.
 
 Status, cached View, preflight, submit, screenshot and browse carry the selected
 Template identity. Per-Template configuration digests and status caches prevent
@@ -2190,8 +2402,11 @@ bold, italics, underline and strike-through become tags, newlines become `<br>`
 and block-level elements that directly hold content become `<div>`. Stylesheets,
 internal classes, `data-hoshidicts-*`, titles and link targets are dropped;
 `lang`, `rowspan`/`colspan`, `data-sc-content`, ruby, tables, image sizes and
-the outer Yomitan-compatible glossary structure are kept. Plain glossary
-markers and the relay's `ankiFields` API are unchanged.
+the outer Yomitan-compatible glossary structure are kept. The
+`small.yomitan-glossary-details` Rules/Deinflection footer of the uncompacted
+fields is not written, as Yomitan's `{glossary}` has none;
+`{part-of-speech}` and `{conjugation}` carry that information (#399). Plain
+glossary markers and the relay's `ankiFields` API are unchanged.
 
 First-field audio is resolved before the
 duplicate check without playback or uploads. Inside the authoritative write
@@ -2479,7 +2694,9 @@ Overlay clients keep Anki discovery, mining and the duplicate index local while
 linked; the host supplies dictionary data. For ordinary linked browsers,
 linked Anki mining keeps `hd_anki_screenshot`/discard local to the reading
 browser. Settings discovery, preflight, submit, browse and maturity go to the
-host. The reading browser transfers a request-owned JPEG through the validated
+host. A popup's preflight batch reaches the host as one `hd_anki_preflight`
+per result, sent together, each with its own browser-speech follow-up, so the
+sharing protocol is unchanged and an older host keeps answering. The reading browser transfers a request-owned JPEG through the validated
 `clientMedia` envelope when the user submits. The host uses its own AnkiConnect
 configuration and dictionary generation to validate and write the note. A
 confirmed or definitively refused write discards the pending screenshot; an
@@ -2571,6 +2788,7 @@ and in-flight dictionary commits when leaving Settings.
 | `hd_open_external` | Validate and open a user-activated HTTP(S) dictionary link in a browser tab, outside storage and engine queues |
 | `hd_status` | Report readiness, loading state, dictionary count, generation, storage backend, threading mode, and whether the worker is the low-memory one (`lowMemory`) that reads every package's entries from disk (`pagedDictionaries`); while the offscreen bridge runs an import, `updating: { id, phase, fallback }` names the replaced package and phase |
 | `hd_memory` | Report the engine heap size, the paged entries' cache (`pageCacheBytes`), and each loaded package's resident bytes (its index files and, unless it is `paged`, its entries, once however many native kinds it loads as); see [memory.md](memory.md) |
+| `hd_memory_total` | Answered by the offscreen document itself, outside the engine queue: `performance.measureUserAgentSpecificMemory()` over the document and its workers, with the engine heap (`heapBytes`, from `hd_memory`) counted once rather than once per engine thread; `bytes` is `null` where the API is unavailable; see [memory.md](memory.md) |
 | `hd_engine_config` | Read `options.lowMemoryMode` for the offscreen document (its sender only) before it creates the engine worker; the service worker pushes the same message to the document when the stored option changes |
 | `hd_reload` | Reload enabled dictionaries from persisted metadata |
 | `hd_remove` | Stage a package's files, commit its removal, then delete the staged copy |

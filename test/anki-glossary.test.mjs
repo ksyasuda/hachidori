@@ -6,11 +6,11 @@ import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { createAnkiDefinitionRenderer } from "../extension/anki-glossary.js";
 const require = createRequire(import.meta.url);
-const { JSDOM } = require(require.resolve("jsdom", { paths: [process.env.HACHIDORI_JSDOM
+const { JSDOM, VirtualConsole } = require(require.resolve("jsdom", { paths: [process.env.HACHIDORI_JSDOM
   || resolve(homedir(), ".cache/hachidori-e2e")] }));
 
-function fixture(t) {
-  const dom = new JSDOM("<!doctype html><html><body></body></html>");
+function fixture(t, options) {
+  const dom = new JSDOM("<!doctype html><html><body></body></html>", options);
   t.after(() => dom.window.close());
   const request = { term: { rules: "v1", glossaries: [
     { dictionary: "A", definitionTags: "common", termTags: "", glossary: '["first", "<script>literal</script>"]' },
@@ -38,6 +38,17 @@ test("Anki glossary export reuses the production structured renderer and preserv
   assert.match(holder.textContent, /Rules: v1/u);
   assert.match(holder.textContent, /Deinflection: polite/u);
   assert.equal(document.body.children.length, 0, "export does not mount a popup or load images into the live document");
+});
+
+test("Smaller Anki cards leaves out the Rules/Deinflection footer that Yomitan's glossary does not write (#399)", async t => {
+  // jsdom resolves no scoped CSS (test/chrome-e2e.mjs checks the cascade); a
+  // silent console drops its not-implemented notices.
+  const { document, request } = fixture(t, { virtualConsole: new VirtualConsole() });
+  request.term.rules = "vs";
+  const html = await createAnkiDefinitionRenderer(document, request, undefined, { compact: true })({});
+  assert.match(html, /<i class="yomitan-glossary-meta">/u);
+  assert.match(html, /<\/ol><\/div>$/u);
+  assert.doesNotMatch(html, /Rules:|Deinflection:|yomitan-glossary-details/u);
 });
 
 test("Anki first/brief/plain/dictionary variants keep their distinct source meanings", async t => {
@@ -81,7 +92,8 @@ test("each Anki glossary row is its own li[data-dictionary] with no nested list,
   request.term.glossaries = [
     { dictionary: "A", definitionTags: "", termTags: "", glossary: '["main entry"]' },
     { dictionary: "A", definitionTags: "子", termTags: "", glossary: '["compound list"]' },
-    { dictionary: "B", definitionTags: "", termTags: "", glossary: '["other entry"]' },
+    // Jitendex writes the spaces inside a tag name as U+00A0 (#426).
+    { dictionary: "B", definitionTags: "rarely\u00a0used\u00a0form ateji\u00a0form", termTags: "", glossary: '["other entry"]' },
   ];
   const render = createAnkiDefinitionRenderer(document, request);
   const holder = document.createElement("div");
@@ -92,9 +104,15 @@ test("each Anki glossary row is its own li[data-dictionary] with no nested list,
   const all = await items({});
   assert.deepEqual(all.map(item => item.dataset.dictionary), ["A", "A", "B"]);
   // Note types page by li[data-dictionary] and pad any other list, so the entry sits directly in its item.
+  // Yomitan's glossary-single writes each tag name, then the dictionary, separated by commas.
   assert.deepEqual(all.map(item => item.querySelector(":scope > div > .yomitan-glossary-meta")?.textContent),
-    ["(Alias <A>)", "(子, Alias <A>)", "(B)"]);
+    ["(Alias <A>)", "(子, Alias <A>)", "(rarely\u00a0used\u00a0form, ateji\u00a0form, B)"]);
   assert.deepEqual((await items({ dictionary: "A" })).map(item => item.dataset.dictionary), ["A", "A"]);
+  // The engine's tag-bank tags come in Yomitan's order (tag-bank order, then name).
+  request.term.glossaries[2].tags = [{ name: "ateji\u00a0form", category: "expression", order: 1, score: 0, notes: "" },
+    { name: "rarely\u00a0used\u00a0form", category: "archaism", order: 0, score: 1, notes: "" }];
+  assert.equal((await items({ dictionary: "B" }))[0].querySelector(".yomitan-glossary-meta").textContent,
+    "(ateji\u00a0form, rarely\u00a0used\u00a0form, B)");
 });
 
 test("plain Anki definitions omit decorative link icons and preferred image sizes retain the intrinsic ratio", async t => {

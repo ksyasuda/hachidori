@@ -50,9 +50,20 @@
   ]);
   const HAN_CHARACTER_PATTERN =
     /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u{20000}-\u{2fa1f}]/u;
-  const KANJI_SEGMENT_PATTERN =
-    /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u{20000}-\u{2fa1f}\u3005]+|[^\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u{20000}-\u{2fa1f}\u3005]+/gu;
-  const KANA_PATTERN = /[\u3040-\u30ff\uff66-\uff9f]/u;
+  // Yomitan's isCodePointKana: the Hiragana and Katakana blocks. Halfwidth
+  // katakana is not kana there, so it joins the characters beside it.
+  const KANA_PATTERN = /[\u3040-\u30ff]/u;
+  // The kana rendaku voices (箱 はこ, ばこ). Each voiced kana follows its base
+  // in Unicode, and the は row's half-voiced kana follows that (発 はつ, ぱつ).
+  const DAKUTEN_KANA = "かきくけこさしすせそたちつてとはひふへほ";
+  const HANDAKUTEN_KANA = "はひふへほ";
+  // A kun'yomi ending in an u-row kana has its masu-stem in the i row
+  // (す.く, すき; きら.う, きらい).
+  const U_ROW_KANA = "うくぐすつぬぶむる";
+  const I_ROW_KANA = "いきぎしちにびみり";
+  // The final kana a sokuon can replace (一 いち, いっ).
+  const SOKUON_KANA = "つちくきり";
+  const NO_KANJI_READINGS = new Set();
   const PITCH_SMALL_KANA = new Set(Array.from(
     "ゃゅょぁぃぅぇぉゎャュョァィゥェォヮ"
   ));
@@ -292,6 +303,22 @@
     return String(typeof positions === "string" ? getDownstepPositions(positions) : positions);
   }
 
+  // Yomitan's getPitchCategory (japanese.js at 67db60d) with its
+  // isNonNounVerbOrAdjective: a pattern's category is its first downstep and
+  // any downstep of a verb or i-adjective is kifuku. The popup and
+  // {pitch-accent-categories} share it.
+  function pitchAccentCategory(reading, pitch, wordClasses = []) {
+    const classes = new Set(wordClasses);
+    const inflected = ["v1", "v5", "vk", "vs", "vz", "adj-i"].some(rule => classes.has(rule))
+      && !(classes.has("vs") && classes.has("n"));
+    const position = Number(pitchAccentDownstep(pitch).split(",")[0]);
+    if (position === 0) return "heiban";
+    if (Number.isNaN(position) || position < 0) return null;
+    if (inflected) return "kifuku";
+    if (position === 1) return "atamadaka";
+    return position >= splitPitchAccentMorae(reading).length ? "odaka" : "nakadaka";
+  }
+
   // japanese.js DIACRITIC_MAPPING: the character a dakuten form is built on.
   const DAKUTEN_BASES = new Map();
   {
@@ -435,13 +462,17 @@
 
   // display-generator.js _createPronunciationPitchAccent with templates-display.html
   // "pronunciation": one pitch accent's li.pronunciation. A notation the
-  // options hide is not built. data-pronunciation is its `reading [n]` label.
-  function createPronunciationPitchAccent(documentRef, reading, pitch, { text = true, position = true, graph = false } = {}) {
+  // options hide is not built. data-pronunciation is its `reading [n]` label,
+  // and data-pitch-category its accent group from the term's word classes.
+  function createPronunciationPitchAccent(documentRef, reading, pitch,
+    { text = true, position = true, graph = false, wordClasses = [] } = {}) {
     const positions = pitchAccentPositions(pitch);
     const morae = splitPitchAccentMorae(reading);
     const node = documentRef.createElement("li");
     node.className = "pronunciation";
     node.dataset.pitchAccentDownstepPosition = `${positions}`;
+    const category = pitchAccentCategory(reading, pitch, wordClasses);
+    if (category) node.dataset.pitchCategory = category;
     node.dataset.pronunciationType = "pitch-accent";
     if (pitch.nasal.length > 0) node.dataset.nasalMoraPosition = pitch.nasal.join(" ");
     if (pitch.devoice.length > 0) node.dataset.devoiceMoraPosition = pitch.devoice.join(" ");
@@ -528,16 +559,79 @@
       state = nextState;
       start = index;
     }
+    // The reading runs on past this group; the last run ends with the group.
     newSegments.push(
       createFuriganaSegment(
         text.substring(start),
-        state ? "" : reading.substring(start)
+        state ? "" : reading.substring(start, text.length)
       )
     );
     return newSegments;
   }
 
-  function segmentizeFurigana(reading, normalizedReading, groups, groupStart) {
+  // The ways a kanji can be read inside a word, from its KANJIDIC readings
+  // (on'yomi in hiragana, kun'yomi with "." before the okurigana): each
+  // reading; a kun'yomi's stem, stem and okurigana, and masu-stem (す.く: す,
+  // すく, すき); each of those with rendaku; and each of all these with a final
+  // つ, ち, く, き or り as っ (いっ, ぱっ).
+  function kanjiReadingForms(readings) {
+    const forms = new Set();
+    for (const reading of readings.split(" ")) {
+      const [stem, okurigana = ""] = reading.split(".");
+      forms.add(stem).add(stem + okurigana);
+      const row = okurigana === "" ? -1 : U_ROW_KANA.indexOf(okurigana.at(-1));
+      if (row >= 0) forms.add(stem + okurigana.slice(0, -1) + I_ROW_KANA[row]);
+    }
+    for (const form of [...forms]) {
+      const codePoint = form.codePointAt(0);
+      if (DAKUTEN_KANA.includes(form[0])) forms.add(String.fromCodePoint(codePoint + 1) + form.slice(1));
+      if (HANDAKUTEN_KANA.includes(form[0])) forms.add(String.fromCodePoint(codePoint + 2) + form.slice(1));
+    }
+    for (const form of [...forms]) {
+      if (SOKUON_KANA.includes(form.at(-1))) forms.add(`${form.slice(0, -1)}っ`);
+    }
+    return forms;
+  }
+
+  // Each kanji's reading forms over a table of KANJIDIC readings
+  // ({ "好": "こう この.む す.く よ.い い.い", … }), for distributeFurigana. A
+  // kanji's forms are derived the first time it is asked for.
+  function createKanjiReadings(table) {
+    const cache = new Map();
+    return (character) => {
+      let forms = cache.get(character);
+      if (forms === undefined) {
+        forms = Object.hasOwn(table, character) ? kanjiReadingForms(table[character]) : NO_KANJI_READINGS;
+        cache.set(character, forms);
+      }
+      return forms;
+    };
+  }
+
+  // Whether a run of kanji reads as `reading`: one form per character, in
+  // order. 々 repeats the kanji before it; a character without readings (a
+  // digit, a letter, 、) never reads.
+  function readsAs(text, reading, kanjiReadings) {
+    // Where in the reading the characters so far can end.
+    let ends = new Set([0]);
+    let forms = NO_KANJI_READINGS;
+    for (const character of text) {
+      if (character !== "々") forms = kanjiReadings(character);
+      const next = new Set();
+      for (const end of ends) {
+        for (const form of forms) {
+          if (reading.startsWith(form, end)) next.add(end + form.length);
+        }
+      }
+      if (next.size === 0) return false;
+      ends = next;
+    }
+    return ends.has(reading.length);
+  }
+
+  // With kanjiReadings, a non-kana group takes only a share of the reading
+  // its kanji can be read as.
+  function segmentizeFurigana(reading, normalizedReading, groups, groupStart, kanjiReadings = null) {
     const groupCount = groups.length - groupStart;
     if (groupCount <= 0) {
       return reading.length === 0 ? [] : null;
@@ -553,7 +647,8 @@
           reading.substring(group.text.length),
           normalizedReading.substring(group.text.length),
           groups,
-          groupStart + 1
+          groupStart + 1,
+          kanjiReadings
         );
         if (segments !== null) {
           if (reading.startsWith(group.text)) {
@@ -569,12 +664,16 @@
 
     let result = null;
     for (let index = reading.length; index >= group.text.length; index -= 1) {
-      const segments = segmentizeFurigana(
-        reading.substring(index),
-        normalizedReading.substring(index),
-        groups,
-        groupStart + 1
-      );
+      const segments = kanjiReadings === null
+        || readsAs(group.text, normalizedReading.substring(0, index), kanjiReadings)
+        ? segmentizeFurigana(
+          reading.substring(index),
+          normalizedReading.substring(index),
+          groups,
+          groupStart + 1,
+          kanjiReadings
+        )
+        : null;
       if (segments !== null) {
         if (result !== null) {
           return null;
@@ -591,41 +690,69 @@
     return result;
   }
 
-  function segmentFurigana(expression, reading) {
+  // Yomitan's distributeFurigana, but null where Yomitan falls back to one
+  // ruby over the whole word: no split, or more than one, spells the reading.
+  // With kanjiReadings (createKanjiReadings), only the splits whose kanji runs
+  // read by their KANJIDIC readings count.
+  function distributeFurigana(expression, reading, kanjiReadings = null) {
     if (!reading || reading === expression) {
       return [{ text: expression, reading: "" }];
     }
 
+    // Yomitan's distributeFurigana: one group per run of kana or of other
+    // code points, so a digit or letter joins the kanji beside it.
     const groups = [];
-    const matches = String(expression).match(KANJI_SEGMENT_PATTERN) || [];
-    for (const text of matches) {
-      const isKana = KANA_PATTERN.test(text[0]);
-      groups.push({
-        isKana,
-        text,
-        normalizedText: isKana ? toHiragana(text) : null,
-      });
+    for (const character of String(expression)) {
+      const isKana = KANA_PATTERN.test(character);
+      const group = groups.at(-1);
+      if (group?.isKana === isKana) {
+        group.text += character;
+      } else {
+        groups.push({ isKana, text: character, normalizedText: null });
+      }
+    }
+    for (const group of groups) {
+      if (group.isKana) {
+        group.normalizedText = toHiragana(group.text);
+      }
     }
 
-    const segments = segmentizeFurigana(
+    return segmentizeFurigana(
       reading,
       toHiragana(reading),
       groups,
-      0
+      0,
+      kanjiReadings
     );
-    return segments === null
-      ? [{ text: expression, reading }]
-      : segments;
   }
 
+  function segmentFurigana(expression, reading) {
+    return distributeFurigana(expression, reading) ?? [{ text: expression, reading }];
+  }
+
+  // A term's furigana: the engine's split (term.furigana, from the kanji
+  // readings) when the term carries one that spells its expression, else the
+  // local split. A linked browser's term is untrusted, so a malformed or stale
+  // split falls back too.
+  function termFurigana({ expression, reading, furigana }) {
+    return Array.isArray(furigana) && furigana.length > 0
+      && furigana.every((segment) => typeof segment?.text === "string" && typeof segment.reading === "string")
+      && furigana.map((segment) => segment.text).join("") === expression
+      ? furigana
+      : segmentFurigana(expression, reading);
+  }
+
+  // `furigana` is the term's furigana from the engine, if any (termFurigana).
   function appendExpressionRuby(
     documentRef,
     parent,
     expression,
     reading,
     onKanjiClick,
-    pitchOptions = {}
+    pitchOptions = {},
+    furigana = null
   ) {
+    const furiganaSegments = termFurigana({ expression, reading, furigana });
     const appendText = (target, text) => {
       for (const character of Array.from(text)) {
         if (!HAN_CHARACTER_PATTERN.test(character) || typeof onKanjiClick !== "function") {
@@ -646,21 +773,23 @@
       }
     };
     const pitchReading = reading || expression;
-    const selectedPitch = pitchOptions.enabled === false
-      ? null
-      : selectPitchAccent(
-          pitchOptions.groups,
-          pitchOptions.dictionary,
-          splitPitchAccentMorae(pitchReading).length
-        );
-    const pitchedMorae = selectedPitch
+    // The furigana's pitch also gives the headword's group, contour or not.
+    const selectedPitch = selectPitchAccent(
+      pitchOptions.groups,
+      pitchOptions.dictionary,
+      splitPitchAccentMorae(pitchReading).length
+    );
+    const category = selectedPitch
+      ? pitchAccentCategory(pitchReading, selectedPitch.pitch, pitchOptions.wordClasses)
+      : null;
+    const pitchedMorae = selectedPitch && pitchOptions.enabled !== false
       ? buildPitchAccentMorae(pitchReading, pitchAccentPositions(selectedPitch.pitch))
       : null;
     if (pitchedMorae) {
       const downstep = pitchAccentDownstep(selectedPitch.pitch);
       // One column per furigana segment, so each reading sits over the text it
       // reads. Kana segments get a column too, keeping the contour unbroken.
-      let segments = segmentFurigana(expression, reading).map((segment) => ({
+      let segments = furiganaSegments.map((segment) => ({
         text: segment.text,
         moraCount: splitPitchAccentMorae(segment.reading || segment.text).length,
       }));
@@ -674,6 +803,15 @@
         selectedPitch.dictionary,
         `Pitch accent ${downstep}`,
       ].filter(Boolean).join(" · ");
+      // "overline": the pitch list's own Yomitan text, built once for the
+      // whole reading so each mora keeps its word-level pitch and next pitch
+      // (見る [1] hooks み at the segment boundary), then shared out to the
+      // segments. Nasal and devoice marks stay in the list: a nasal mark
+      // rewrites the kana.
+      const overlineMorae = pitchOptions.style === "overline"
+        ? [...createPronunciationText(documentRef, pitchedMorae.map((mora) => mora.text),
+            pitchAccentPositions(selectedPitch.pitch), [], []).children]
+        : null;
       let moraIndex = 0;
       for (const segment of segments) {
         const ruby = documentRef.createElement("ruby");
@@ -693,25 +831,30 @@
 
         const contour = documentRef.createElement("span");
         contour.className = "gsm-hoshidicts-pitch-contour";
-        for (const mora of pitchedMorae.slice(moraIndex, moraIndex + segment.moraCount)) {
-          const span = documentRef.createElement("span");
-          span.className = "gsm-hoshidicts-pitch-mora";
-          span.dataset.pitchLevel = mora.level;
-          if (mora.transition) {
-            span.dataset.pitchTransition = mora.transition;
+        if (overlineMorae) {
+          contour.dataset.pitchStyle = "overline";
+          contour.append(...overlineMorae.slice(moraIndex, moraIndex + segment.moraCount));
+        } else {
+          for (const mora of pitchedMorae.slice(moraIndex, moraIndex + segment.moraCount)) {
+            const span = documentRef.createElement("span");
+            span.className = "gsm-hoshidicts-pitch-mora";
+            span.dataset.pitchLevel = mora.level;
+            if (mora.transition) {
+              span.dataset.pitchTransition = mora.transition;
+            }
+            span.textContent = mora.text;
+            contour.appendChild(span);
           }
-          span.textContent = mora.text;
-          contour.appendChild(span);
         }
         moraIndex += segment.moraCount;
         rt.appendChild(contour);
         ruby.appendChild(rt);
         parent.appendChild(ruby);
       }
-      return;
+      return category;
     }
 
-    for (const segment of segmentFurigana(expression, reading)) {
+    for (const segment of furiganaSegments) {
       if (!segment.reading) {
         appendText(parent, segment.text);
         continue;
@@ -723,10 +866,21 @@
       ruby.appendChild(rt);
       parent.appendChild(ruby);
     }
+    return category;
   }
 
+  // Yomitan's DictionaryDatabase._splitField: tag, rule and reading lists are
+  // split on U+0020 only. Jitendex writes the spaces inside a tag name as
+  // U+00A0 ("special reading"), so each name stays one tag.
   function parseTagList(value) {
-    return String(value || "").split(/\s+/u).filter(Boolean);
+    return String(value || "").split(" ").filter(Boolean);
+  }
+
+  // A lookup glossary's definition tags: the engine's tag-bank tags, in
+  // Yomitan's order with their category and notes, or, from a sharing host
+  // that sends none, each name of definitionTags alone.
+  function definitionTagList(glossary) {
+    return Array.isArray(glossary?.tags) ? glossary.tags : parseTagList(glossary?.definitionTags).map((name) => ({ name }));
   }
 
   function languageFromText(text) {
@@ -819,12 +973,12 @@
       .some((key) => Object.prototype.hasOwnProperty.call(value, key))
       && value.sizeUnits !== "px"
       && value.sizeUnits !== "em";
-    const width = Number.isFinite(Number(value.width)) && Number(value.width) > 0
+    const declaredWidth = Number.isFinite(Number(value.width)) && Number(value.width) > 0
       ? Number(value.width)
-      : 100;
-    const height = Number.isFinite(Number(value.height)) && Number(value.height) > 0
+      : null;
+    const declaredHeight = Number.isFinite(Number(value.height)) && Number(value.height) > 0
       ? Number(value.height)
-      : 100;
+      : null;
     const preferredWidth = Number.isFinite(Number(value.preferredWidth)) &&
       Number(value.preferredWidth) > 0
       ? Number(value.preferredWidth)
@@ -833,6 +987,15 @@
       Number(value.preferredHeight) > 0
       ? Number(value.preferredHeight)
       : null;
+    // A bank's width/height are Yomitan's preferred size; its importer
+    // (_createImageData) stores the media's natural size beside them.
+    // hoshidicts hands over the raw bank, so one declared side alone
+    // (日本国語大辞典's accent labels give only `height: 1.2em`) reserves a
+    // square of that size, then takes the decoded image's aspect ratio.
+    const loneSide = preferredWidth === null && preferredHeight === null
+      && (declaredWidth === null) !== (declaredHeight === null);
+    const width = declaredWidth ?? (loneSide ? declaredHeight : 100);
+    const height = declaredHeight ?? (loneSide ? declaredWidth : 100);
     const aspectWidth = preferredWidth || width;
     const aspectHeight = preferredHeight || height;
     let usedWidth = preferredWidth || (
@@ -849,6 +1012,10 @@
     const units = value.sizeUnits === "em" ? "em" : "px";
     const maximumSize = units === "em" ? 64 : MAX_MEDIA_DISPLAY_SIZE;
     const displayWidth = Math.max(0.1, Math.min(maximumSize, usedWidth));
+    // Glyphs sized in em, or no larger than 32px on either side, sit in the
+    // text as brackets and labels; the "large" hover preview skips them.
+    const inlineGlyph = units === "em"
+      || (displayWidth <= 32 && displayWidth * Math.min(100, aspectHeight / aspectWidth) <= 32);
 
     const link = documentRef.createElement("a");
     link.className = "gloss-image-link gloss-sc-a";
@@ -908,6 +1075,11 @@
     image.draggable = false;
     image.style.width = "100%";
     image.style.height = "100%";
+    // Yomitan paints this layer on a <canvas>, which a dictionary's `img`
+    // rules never match. Inline values outrank such a rule's margin and
+    // padding, which would shift the layer inside its clipping container.
+    image.style.margin = "0";
+    image.style.padding = "0";
     container.append(sizer, background, overlay, image);
     link.appendChild(container);
     const linkText = documentRef.createElement("span");
@@ -951,7 +1123,7 @@
     let previewFocused = false;
     const showPreview = () => {
       if (!isCurrent()) return;
-      state.requestImagePreview?.(link, image);
+      state.requestImagePreview?.(link, image, inlineGlyph);
     };
     const hidePreview = () => {
       state.hideImagePreview?.(link);
@@ -1006,6 +1178,13 @@
           const naturalWidth = Math.max(0.1, Math.min(MAX_MEDIA_DISPLAY_SIZE, image.naturalWidth));
           container.style.width = `${naturalWidth}px`;
           sizer.style.paddingTop = `${Math.min(10_000, image.naturalHeight / image.naturalWidth * 100)}%`;
+        } else if (loneSide && image.naturalWidth > 0 && image.naturalHeight > 0) {
+          // Yomitan's preferredHeight / (height / width), in the same bounds.
+          const ratio = image.naturalHeight / image.naturalWidth;
+          if (declaredWidth === null) {
+            container.style.width = `${Math.max(0.1, Math.min(maximumSize, declaredHeight / ratio))}${units}`;
+          }
+          sizer.style.paddingTop = `${Math.min(10_000, ratio * 100)}%`;
         }
         link.dataset.imageLoadState = "loaded";
         onLayoutChange();
@@ -1748,10 +1927,13 @@
     boundedString,
     buildPitchAccentMorae,
     createFuriganaSegment,
+    createKanjiReadings,
     createPronunciationDownstepPosition,
     createPronunciationGraph,
     createPronunciationPitchAccent,
     createPronunciationText,
+    definitionTagList,
+    distributeFurigana,
     getDownstepPositions,
     getFuriganaKanaSegments,
     isMoraPitchHigh,
@@ -1759,6 +1941,7 @@
     normalizeMediaPath,
     parseStructuredLink,
     parseTagList,
+    pitchAccentCategory,
     pitchAccentDownstep,
     pitchAccentPositions,
     segmentFurigana,
@@ -1766,6 +1949,7 @@
     selectPitchAccent,
     splitPitchAccentMorae,
     structuredDataAttributeName,
+    termFurigana,
     toHiragana,
   };
 }));

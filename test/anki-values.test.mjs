@@ -21,6 +21,28 @@ test("Anki values escape literal data, reuse lookup furigana and preserve UTF-16
   assert.equal(await render(request(), "{sentence-furigana}|{sentence-furigana-plain}"), "🍵 <b>食べます</b>。|🍵 <b>食べます</b>。");
 });
 
+test("{furigana} uses the engine's kanji-reading split and ignores one that does not spell the expression", async () => {
+  const term = furigana => ({ ...request().term, expression: "好き嫌い", reading: "すききらい", furigana });
+  const split = [{ text: "好", reading: "す" }, { text: "き", reading: "" }, { text: "嫌", reading: "きら" }, { text: "い", reading: "" }];
+  assert.equal(await render(request({ term: term(split) }), "{furigana}|{furigana-plain}"),
+    "<ruby>好<rt>す</rt></ruby>き<ruby>嫌<rt>きら</rt></ruby>い|好[す]き 嫌[きら]い");
+  for (const furigana of [undefined, [], [{ text: "好き", reading: "すき" }], [{ text: "好き嫌い", reading: null }]]) {
+    assert.equal(await render(request({ term: term(furigana) }), "{furigana}|{furigana-plain}"),
+      "<ruby>好き嫌い<rt>すききらい</rt></ruby>|好き嫌い[すききらい]", JSON.stringify(furigana));
+  }
+});
+
+test("{url} links and {url-plain} writes the escaped page address; without one both are empty", async () => {
+  const pageUrl = `https://example.com/novel/56/?q=<a>&b="c"#'{scene}'`;
+  const escaped = "https://example.com/novel/56/?q=&lt;a&gt;&amp;b=&quot;c&quot;#&#x27;&#123;scene&#125;&#x27;";
+  assert.equal(await render(request({ pageUrl }), "{url}|{URL-plain}"), `<a href="${escaped}">${escaped}</a>|${escaped}`);
+  // The relay API and older linked browsers send no address. An empty marker
+  // drops its own break rather than writing an empty link.
+  for (const patch of [{}, { pageUrl: "" }, { pageUrl: null }, { pageUrl: { href: "https://example.com/" } }]) {
+    assert.equal(await render(request(patch), "{document-title}<br>{url}<br>{url-plain}"), "A &amp; B", JSON.stringify(patch));
+  }
+});
+
 test("note field rendering preserves literal whitespace, repeated markers and the source template", async () => {
   const value = " \tstart {expression}{expression} + {reading}\nend  ";
   const mapping = templates(value);
@@ -89,7 +111,8 @@ test("stable single-glossary markers survive dated title updates without changin
   const template = "{single-glossary-jitendex-plain-no-dictionary}|"
     + `{single-glossary-id--${id}-brief}`;
   const templatesBefore = templates(template);
-  const definition = options => JSON.stringify(options);
+  // Braces a value carries reach Anki encoded; this stub's output has none.
+  const definition = options => JSON.stringify(options).slice(1, -1);
   const dated = title => request({
     term: { ...request().term, glossaries: [
       { dictionary: title, glossary: '["to eat"]', definitionTags: "", termTags: "" },
@@ -101,11 +124,11 @@ test("stable single-glossary markers survive dated title updates without changin
   const newTitle = "Jitendex.org [2026-09-16]";
   const oldValue = (await buildAnkiFields(dated(oldTitle), templatesBefore, { definition })).Front;
   const newValue = (await buildAnkiFields(dated(newTitle), templatesBefore, { definition })).Front;
-  assert.equal(oldValue, `{"dictionary":"${oldTitle}","plain":true,"noDictionary":true}|{"dictionary":"${oldTitle}","brief":true}`);
-  assert.equal(newValue, `{"dictionary":"${newTitle}","plain":true,"noDictionary":true}|{"dictionary":"${newTitle}","brief":true}`);
+  assert.equal(oldValue, `"dictionary":"${oldTitle}","plain":true,"noDictionary":true|"dictionary":"${oldTitle}","brief":true`);
+  assert.equal(newValue, `"dictionary":"${newTitle}","plain":true,"noDictionary":true|"dictionary":"${newTitle}","brief":true`);
   assert.equal(templatesBefore.Front.value, template, "rendering never rewrites a saved field template");
   assert.equal(await render(dated(newTitle), "{single-glossary-jitendexorg-2026-09-16}", { definition }),
-    `{"dictionary":"${newTitle}"}`, "the current title marker remains compatible");
+    `"dictionary":"${newTitle}"`, "the current title marker remains compatible");
   assert.equal(await render(dated(newTitle), "{single-glossary-jitendexorg-2026-08-11}", { definition }), "",
     "Hachidori does not guess historical titles or silently migrate their templates");
 });
@@ -201,6 +224,16 @@ test("pitch, part-of-speech, tags and transcriptions keep source meanings and ma
   ] }];
   assert.equal(await render(source, "{pitch-position}|{pitch-accent-categories}|{part-of-speech}|{conjugation}"), "0, 2|heiban,kifuku|Ichidan verb|polite");
   assert.match(await render(source, "{tags}"), /data-details="common">common/u);
+  // Jitendex writes the spaces inside a tag name as U+00A0, so each name stays one tag (#426).
+  const jitendex = request({ term: { ...request().term, glossaries: [{ dictionary: "A", glossary: '["openly"]',
+    definitionTags: "rarely\u00a0used\u00a0form ateji\u00a0form", termTags: "" }] } });
+  assert.equal(await render(jitendex, "{tags}"), ["rarely\u00a0used\u00a0form", "ateji\u00a0form"]
+    .map(tag => `<span class="tag" data-details="${tag}">${tag}</span>`).join(", "));
+  // The engine's tag-bank tags come in Yomitan's order (tag-bank order, then name).
+  jitendex.term.glossaries[0].tags = [{ name: "ateji\u00a0form", category: "expression", order: 1, score: 0, notes: "" },
+    { name: "rarely\u00a0used\u00a0form", category: "archaism", order: 0, score: 1, notes: "" }];
+  assert.equal(await render(jitendex, "{tags}"), ["ateji\u00a0form", "rarely\u00a0used\u00a0form"]
+    .map(tag => `<span class="tag" data-details="${tag}">${tag}</span>`).join(", "));
   assert.match(await render(source, "{phonetic-transcriptions}"), /&lt;ipa&gt;/u);
   assert.equal(await render(source, "{pitch}"), "<b>Pitch</b>: LHH, LHL (nasal 1; devoice 2), &lt;ipa&gt;");
   assert.equal(await render(source, "{audio}", { audio: "[sound:chosen.mp3]" }), "[sound:chosen.mp3]");
@@ -216,4 +249,22 @@ test("the screenshot marker references only a stored picture and escapes its fil
     captureUnavailable: ["screenshot"] }), "{screenshot}"), "");
   assert.equal(await render(request({ screenshot: { filename: '"><script>' } }), "{screenshot}"),
     '<img src="&quot;&gt;&lt;script&gt;">');
+});
+
+test("cloze syntax inside marker values cannot become an Anki deletion, while template deletions and CSS stay literal", async () => {
+  const deletion = /\{\{c\d+::|\}\}/u;
+  const css = "<style>.x { color: red; } .x > .y { margin: 0 }</style>";
+  const definition = options => `${options.plain ? "" : css}<li>例: {{c1::猫}}がいる</li>`;
+  const source = request({ sentence: "{{c1::より}}食べます。", matchOffset: 10 });
+  for (const marker of ["{glossary}", "{glossary-plain}", "{single-glossary-a}", "{sentence}"]) {
+    const value = await render(source, marker, { definition });
+    assert.doesNotMatch(value, deletion, marker);
+  }
+  const glossary = await render(source, "{glossary}", { definition });
+  assert.equal(glossary, `${css}<li>例: &#123;&#123;c1::猫&#125;&#125;がいる</li>`, "dictionary CSS is emitted unchanged");
+  assert.equal(await render(source, "{sentence}"), "&#123;&#123;c1::より&#125;&#125;<b>食べます</b>。");
+  const cloze = await render(request({ matched: "食べ}}ます", sentence: "🍵 食べ}}ます。" }),
+    "{cloze-prefix}{{c1::{cloze-body}}}{cloze-suffix}");
+  assert.equal(cloze, "🍵 {{c1::食べ&#125;&#125;ます}}。", "the template's own deletion survives; the body's braces cannot close it");
+  assert.equal([...cloze.matchAll(/\{\{c1::/gu)].length, 1);
 });

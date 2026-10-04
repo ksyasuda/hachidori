@@ -132,10 +132,12 @@ const YOMITAN_GLOSS_LISTS = [
 // resolves internal links itself rather than through a search-page href.
 // Yomitan draws popup images on a canvas sized by width/height attributes, and
 // writes image boxes in em where Hachidori writes px (both containers make
-// 1em one pixel). Its DisplayGenerator labels a glossary string with the
-// profile language ("ja") even when it has no Japanese, so English glosses
-// would read as Japanese to assistive technology; here glossary strings get
-// the same detection as structured-content text.
+// 1em one pixel). Hachidori's image layer is an <img> that a dictionary's
+// `img` rules can reach, so it pins that layer's margin and padding inline.
+// Yomitan's DisplayGenerator labels a glossary string with the profile
+// language ("ja") even when it has no Japanese, so English glosses would read
+// as Japanese to assistive technology; here glossary strings get the same
+// detection as structured-content text.
 const JAPANESE_OR_CHINESE = /[\u3000-\u30ff\u3100-\u312f\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff01-\uffee]/u;
 function canonical(element, side) {
   if (element.nodeType === element.TEXT_NODE) return element.nodeValue;
@@ -155,6 +157,9 @@ function canonical(element, side) {
       } else if (name === "rel") value = value.split(" ").sort().join(" ");
       else if (name === "style") value = value.replace(/(\d)em;/gu, (match, digit) =>
         element.matches(".gloss-image-link:not([data-size-units=em]) > .gloss-image-container") ? `${digit}px;` : match);
+      if (side === "hachidori" && name === "style" && element.localName === "img") {
+        value = value.replace(/ margin: 0px; padding: 0px;$/u, "");
+      }
       return `${name}=${JSON.stringify(value)}`;
     }).sort();
   return `<${element.localName}${attributes.map(attribute => ` ${attribute}`).join("")}>${children()}</${element.localName}>`;
@@ -195,17 +200,121 @@ test("each term-bank row is a definition-item that carries its dictionary and ta
     rules: "", frequencies: [], pitches: [], glossaries: [
       { dictionary: "D", glossary: JSON.stringify(["to fix"]), definitionTags: "v5s vt", termTags: "" },
       { dictionary: "D", glossary: JSON.stringify(["to cure", "to heal"]), definitionTags: "", termTags: "" },
+      // Jitendex writes the spaces inside a tag name as U+00A0 (#426).
+      { dictionary: "D", glossary: JSON.stringify(["openly"]), definitionTags: "rarely\u00a0used\u00a0form ateji\u00a0form",
+        termTags: "" },
     ] } }], { anchor: source, query: "直す", sentence: "直す", sourceElements: [source], matchOffset: 0 },
   HDReaderOptions.normaliseOptions({}));
   const list = popup.querySelector(".gsm-hoshidicts-glossary-card > ol.definition-list");
-  assert.equal(list.dataset.count, "2");
+  assert.equal(list.dataset.count, "3");
   const items = [...list.children];
   assert.deepEqual(items.map(item => [item.className, item.dataset.dictionary, item.dataset.index]),
-    [["definition-item", "D", "0"], ["definition-item", "D", "1"]]);
-  assert.deepEqual([...items[0].querySelectorAll(".definition-tag-list > *")].map(tag => tag.textContent), ["v5s", "vt"]);
+    [["definition-item", "D", "0"], ["definition-item", "D", "1"], ["definition-item", "D", "2"]]);
+  const tagNames = item => [...item.querySelectorAll(".definition-tag-list > *")].map(tag => tag.textContent);
+  assert.deepEqual(tagNames(items[0]), ["v5s", "vt"]);
   assert.equal(items[1].querySelector(".definition-tag-list"), null);
-  assert.deepEqual(items.map(item => item.querySelector(".gloss-list").dataset.count), ["1", "2"]);
+  // DictionaryDatabase._splitField splits on U+0020 only.
+  assert.deepEqual(tagNames(items[2]), ["rarely\u00a0used\u00a0form", "ateji\u00a0form"]);
+  assert.deepEqual(items.map(item => item.querySelector(".gloss-list").dataset.count), ["1", "2", "1"]);
   assert.equal(popup.querySelector(".gsm-hoshidicts-expression").lang, "ja");
+});
+
+// Tag-bank rows [name, category, order, notes, score]: Jitendex.org
+// [2026-08-11]'s tag bank (abridged) and test/make-fixture.mjs's.
+const NBSP = "\u00a0";
+const TAG_BANKS = {
+  Jitendex: [
+    ["★", "popular", 2, "high priority entry", 2],
+    [`priority${NBSP}form`, "frequent", 1, "high priority spelling or reading of this term", 1],
+    [`rarely${NBSP}used${NBSP}form`, "archaism", 0, "rarely used form of this term", 1],
+    [`ateji${NBSP}form`, "expression", 1, "ateji (phonetic) reading", 0],
+    [`special${NBSP}reading`, "expression", 1,
+      "jukujikun (idiomatic reading of a kanji compound) or gikun (idiosyncratic reading of a particular kanji)", 0],
+  ],
+  Fixture: [
+    ["vt", "expression", 0, "transitive verb", 0], ["col", "dictionary", 0, "colloquial", 0],
+    ["n", "partOfSpeech", 0, "noun", 0], ["uk", "dictionary", 0, "usually written using kana alone", 0],
+    ["common", "frequent", 0, "common word", 1],
+  ],
+};
+// Translator._expandTagGroupsAndGroup (_getNameBase, _createTag,
+// _mergeSimilarTags, _groupTags) on [dictionary, definitionTags], with
+// findTagMetaBulk answering from TAG_BANKS ("None" has no bank):
+// [name, category, order, score, content.join("\n")] per tag.
+const YOMITAN_TAGS = [
+  ["Jitendex", `★ priority${NBSP}form special${NBSP}reading`, [
+    [`priority${NBSP}form`, "frequent", 1, 1, "high priority spelling or reading of this term"],
+    [`special${NBSP}reading`, "expression", 1, 0,
+      "jukujikun (idiomatic reading of a kanji compound) or gikun (idiosyncratic reading of a particular kanji)"],
+    ["★", "popular", 2, 2, "high priority entry"]]],
+  ["Jitendex", `rarely${NBSP}used${NBSP}form ateji${NBSP}form`, [
+    [`rarely${NBSP}used${NBSP}form`, "archaism", 0, 1, "rarely used form of this term"],
+    [`ateji${NBSP}form`, "expression", 1, 0, "ateji (phonetic) reading"]]],
+  ["Fixture", "vt uk col vt n:1 missing common Zz", [
+    ["col", "dictionary", 0, 0, "colloquial"], ["common", "frequent", 0, 1, "common word"],
+    ["missing", "default", 0, 0, ""], ["n:1", "partOfSpeech", 0, 0, "noun"],
+    ["uk", "dictionary", 0, 0, "usually written using kana alone"], ["vt", "expression", 0, 0, "transitive verb"],
+    ["Zz", "default", 0, 0, ""]]],
+  ["Fixture", "", []],
+  ["None", "vt v1", [["v1", "default", 0, 0, ""], ["vt", "default", 0, 0, ""]]],
+];
+
+test("definition tags expand from the tag bank as Yomitan's translator does and render its category and notes", async t => {
+  const { expandDefinitionTags } = await import("../extension/engine-service.js");
+  const banks = new Map(Object.entries(TAG_BANKS).map(([dictionary, rows]) => [dictionary,
+    new Map(rows.map(([name, category, order, notes, score]) => [name, { name, category, order, notes, score }]))]));
+  const expanded = YOMITAN_TAGS.map(([dictionary, definitionTags]) => expandDefinitionTags(definitionTags, banks.get(dictionary)));
+  assert.deepEqual(expanded.map(tags => tags.map(({ name, category, order, score, notes }) => [name, category, order, score, notes])),
+    YOMITAN_TAGS.map(([, , tags]) => tags));
+
+  const { window } = new JSDOM('<p>今日</p><div id="popup"></div>',
+    { pretendToBeVisual: true, runScripts: "outside-only", url: "https://extension.test/" });
+  for (const file of ["reader-options.js", "external-links.js", "render/glossary.js", "render/popup.js"]) {
+    window.eval(readFileSync(new URL(`../extension/${file}`, import.meta.url), "utf8"));
+  }
+  const { document, HDGlossary, HDPopup, HDReaderOptions } = window;
+  const popup = document.getElementById("popup");
+  const view = HDPopup.createPopupView({ document, window, popup, positionPopup() {},
+    appendExpressionRuby: HDGlossary.appendExpressionRuby, appendTextOnlyGlossary: HDGlossary.appendTextOnlyGlossary,
+    parseTagList: HDGlossary.parseTagList, createPronunciationPitchAccent: HDGlossary.createPronunciationPitchAccent });
+  t.after(() => { view.destroy(); window.close(); });
+  const source = document.querySelector("p");
+  view.renderResults([{ matched: "今日", deinflected: "今日", trace: [], term: { expression: "今日", reading: "きょう",
+    rules: "", frequencies: [], pitches: [], glossaries: YOMITAN_TAGS.map(([dictionary, definitionTags], index) =>
+      ({ dictionary: "D", glossary: JSON.stringify([dictionary]), definitionTags, termTags: "", tags: expanded[index] })),
+  } }], { anchor: source, query: "今日", sentence: "今日", sourceElements: [source], matchOffset: 0 },
+  HDReaderOptions.normaliseOptions({}));
+  // DisplayGenerator._createTag: the name, data-category and the notes as title.
+  assert.deepEqual([...popup.querySelectorAll(".definition-item")].map(item =>
+    [...item.querySelectorAll(".definition-tag-list > *")].map(tag => [tag.textContent, tag.dataset.category, tag.title])),
+  YOMITAN_TAGS.map(([, , tags]) => tags.map(([name, category, , , notes]) => [name, category, notes])));
+});
+
+// distributeFurigana (ja/japanese.js) on [term, reading]: each segment as
+// [text, reading], or [text] when it is read as written. A digit or letter
+// joins the kanji beside it, and halfwidth katakana is not kana.
+const YOMITAN_FURIGANA = [
+  ["ゴミ箱", "ごみばこ", [["ゴミ", "ごみ"], ["箱", "ばこ"]]],
+  ["バカ野郎", "ばかやろう", [["バカ", "ばか"], ["野郎", "やろう"]]],
+  ["くすくす笑う", "クスクスわらう", [["くすくす", "クスクス"], ["笑", "わら"], ["う"]]],
+  ["１つ星", "ひとつぼし", [["１", "ひと"], ["つ"], ["星", "ぼし"]]],
+  ["２人とも", "ふたりとも", [["２人", "ふたり"], ["とも"]]],
+  ["逆２乗の法則", "ぎゃくにじょうのほうそく", [["逆２乗", "ぎゃくにじょう"], ["の"], ["法則", "ほうそく"]]],
+  ["Ｔリンパ球", "ティーリンパきゅう", [["Ｔ", "ティー"], ["リンパ"], ["球", "きゅう"]]],
+  ["ｱﾆﾒを見る", "あにめをみる", [["ｱﾆﾒ", "あにめ"], ["を"], ["見", "み"], ["る"]]],
+  ["聞き取り", "ききとり", [["聞", "き"], ["き"], ["取", "と"], ["り"]]],
+  ["好き嫌い", "すききらい", [["好き嫌い", "すききらい"]]],
+];
+
+test("furigana segments match Yomitan's distributeFurigana", () => {
+  const { segmentFurigana } = require("../extension/render/glossary.js");
+  const pairs = segments => segments.map(({ text, reading }) => (reading ? [text, reading] : [text]));
+  for (const [term, reading, expected] of YOMITAN_FURIGANA) {
+    assert.deepEqual(pairs(segmentFurigana(term, reading)), expected, term);
+  }
+  // The documented difference: Yomitan reads ー as あ after か and falls back
+  // to one ruby, [["高ーい", "たかーい"]]; Hachidori keeps ー and splits.
+  assert.deepEqual(pairs(segmentFurigana("高ーい", "たかーい")), [["高", "たか"], ["ーい"]]);
 });
 
 // PronunciationGenerator.createPronunciationText / createPronunciationDownstepPosition /

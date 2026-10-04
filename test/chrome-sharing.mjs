@@ -13,6 +13,7 @@ import { createServer } from "node:http";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 import { ANKI_ADDON_FILE_NAME, ANKI_ADDON_URL, ANKI_ADDON_VERSION } from "../extension/anki-addon.js";
 import { CUSTOM_DICTIONARY_ID, CUSTOM_DICTIONARY_SOURCE_KEY, CUSTOM_DICTIONARY_TITLE } from "../extension/custom-dictionary.js";
 import { BlobReader, TextWriter, ZipReader } from "../extension/vendor/zip.js";
@@ -84,16 +85,17 @@ const puppeteer = await import(`file://${PUPPETEER}`);
 const CHECKS = [
   "the host's Sharing page saves the pinned Anki release as a valid archive while Anki is not yet connected",
   "the host imports the fixture and shares through Anki's relay on the chosen port",
-  "the relay's Yomitan-compatible API answers lookups, Anki fields, tokenizing and a dictionary download from the host, which does not list the relay as a linked browser",
+  "the relay's Yomitan-compatible API answers lookups, Anki fields, card formats, tokenizing and a dictionary download from the host, which does not list the relay as a linked browser",
   "the second browser's startup page offers the shared Hachidori, and one click links it and completes setup",
   "an options edit made on the linked browser is committed by the host and pushed back",
   "a personal dictionary save made on the linked browser lands in the host's source and answers lookups",
-  "the linked browser discovers and mines through the host, stale results fail, and local Anki stays unused",
+  "the linked browser discovers and mines through the host with its page address, forwards a popup batch as single preflights, stale results fail, and local Anki stays unused",
   "closing the host fails linked lookups, and relaunching it reconnects the linked browser by itself",
   "unlinking restores the linked browser's own empty state",
   "sharing with other computers lets the second browser link through this computer's network address, and turning it off disconnects it",
   "a failed add-on download reports the error, saves no file, and enables retry",
   "overlapping Sharing actions from two Settings tabs preserve local personal entries, settings and dictionary files",
+  "the relay's /ankiCardFormats answers the host's saved Anki Template without its AnkiConnect address or key, and /ankiFields renders every marker it names",
   "a real linked overlay keeps local preferences through host edits, disconnection, restart and Unlink and explains mining capabilities",
 ];
 const results = [];
@@ -191,7 +193,7 @@ function configureAnki(page, url, apiKey) {
       captureScreenshot: true,
       fieldTemplates: {
         Front: template("{expression}"),
-        Back: template("{sentence}"),
+        Back: template("{sentence}<br>{url-plain}"),
         Picture: template("{screenshot}"),
       },
     };
@@ -684,6 +686,7 @@ try {
   const apiTerms = await api("/termEntries", { term: "食べたかった" });
   const apiKanji = await api("/kanjiEntries", { character: "食" });
   const apiFields = await api("/ankiFields", { text: "食べる", type: "term", markers: ["expression", "reading", "glossary-first", "furigana"], maxEntries: 1, includeMedia: true });
+  const apiFormats = await api("/ankiCardFormats", {});
   const apiTokens = await api("/tokenize", { text: "猫が食べたかった", scanLength: 10 });
   const apiDictionaries = await api("/dictionaries");
   const fixtureEntry = apiDictionaries.body?.dictionaries?.find(entry => entry.title === "hachidori-fixture");
@@ -707,6 +710,8 @@ try {
       && typeof apiFields.body.fields[0]["glossary-first"] === "string" && apiFields.body.fields[0]["glossary-first"].includes("to eat")
       && apiFields.body.fields[0].furigana === "<ruby>食<rt>た</rt></ruby>べる"
       && Array.isArray(apiFields.body.dictionaryMedia) && Array.isArray(apiFields.body.audioMedia)
+      && apiFormats.status === 200 && Array.isArray(apiFormats.body) && apiFormats.body.length === 1
+      && apiFormats.body[0].name === "Default" && apiFormats.body[0].type === "term"
       && apiTokens.status === 200 && JSON.stringify(apiTokens.body?.[0]?.content) === JSON.stringify([[{ text: "猫が", reading: "" }, { text: "食", reading: "た" }, { text: "べたかった", reading: "" }]])
       && apiDictionaries.status === 200 && fixtureEntry?.fileName === "hachidori-fixture.hachidori.zip"
       && apiDownload.status === 200 && downloadFiles.includes("hachidori-backup.json") && downloadFiles.some(name => name.startsWith("dictionaries/0/"))
@@ -714,7 +719,7 @@ try {
       && hostWithApiClient.sharing.clients.some(client => client.origin === "relay://yomitan-api")
       && hostClientsText === "No other browser is linked yet.",
     JSON.stringify({ apiVersion, apiTerms: apiTerms.body?.dictionaryEntries?.[0]?.headwords, apiKanji: apiKanji.body?.[0]?.character, apiFields: apiFields.body?.fields,
-      apiTokens: apiTokens.body, apiDictionaries: apiDictionaries.body, download: [apiDownload.status, downloadFiles], apiMissing: apiMissing.status,
+      apiFormats, apiTokens: apiTokens.body, apiDictionaries: apiDictionaries.body, download: [apiDownload.status, downloadFiles], apiMissing: apiMissing.status,
       clients: hostWithApiClient.sharing?.clients, hostClientsText }));
 
   clientBrowser = await launch(CLIENT_PROFILE);
@@ -828,6 +833,25 @@ try {
 
   const configuredAnki = await configureAnki(hostPage, hostAnki.url, "host-secret");
   if (!configuredAnki?.ok) throw new Error(`the host Anki configuration could not be saved: ${configuredAnki?.error}`);
+  // A Yomitan-API miner reads the host's card formats, then asks /ankiFields
+  // for the markers they name, as it would ask Yomitan.
+  const configuredFormats = await api("/ankiCardFormats", { profileIndex: 0 });
+  const formatMarkers = [...new Set(Object.values(configuredFormats.body?.[0]?.fields ?? {})
+    .flatMap(field => [...field.value.matchAll(/\{([^{}]+)\}/gu)].map(match => match[1])))];
+  const formatValues = await api("/ankiFields", { text: "食べる", type: "term", markers: formatMarkers, maxEntries: 1 });
+  const overwrite = value => ({ value, overwriteMode: "overwrite" });
+  // chrome.storage hands objects back with sorted keys, so fields compare as a map.
+  check(CHECKS[12],
+    configuredFormats.status === 200 && isDeepStrictEqual(configuredFormats.body, [{
+      name: "Default", icon: "big-circle", deck: "Default", model: "Basic",
+      fields: { Front: overwrite("{expression}"), Back: overwrite("{sentence}<br>{url-plain}"), Picture: overwrite("{screenshot}") },
+      type: "term",
+    }])
+      && !JSON.stringify(configuredFormats.body).includes("host-secret") && !JSON.stringify(configuredFormats.body).includes(hostAnki.url)
+      && formatMarkers.length === 4 && formatValues.status === 200
+      && JSON.stringify(Object.keys(formatValues.body?.fields?.[0] ?? {})) === JSON.stringify(formatMarkers)
+      && formatValues.body.fields[0].expression === "食べる",
+    JSON.stringify({ configuredFormats, formatMarkers, formatValues: formatValues.body?.fields }));
   const mirroredAnki = await until(async () => {
     const value = (await stored(clientPage, ["options"])).options?.anki;
     return value?.url === hostAnki.url && value.apiKey === "host-secret" ? value : null;
@@ -862,6 +886,7 @@ try {
     popupSelectionText: "",
     searchQuery: "食べたかった",
     documentTitle: "Linked browser mining",
+    pageUrl: "https://example.com/novel/56/?view=1#scene",
     dictionaryAliases: {},
     frequencyDictionaries: [],
     configKey: ankiStatus.configKey,
@@ -872,6 +897,10 @@ try {
     anki: { url: clientAnki.url, apiKey: "client-secret" },
   };
   const preflight = await message(startup, "hachidori-anki", "hd_anki_preflight", { request });
+  // A popup batch reaches the host as single preflights, one per result.
+  const batchStart = hostAnki.state.calls.length;
+  const batch = await message(startup, "hachidori-anki", "hd_anki_preflight_batch", { requests: [request, request] });
+  const batchChecks = hostAnki.state.calls.slice(batchStart).filter(call => call.action === "canAddNotesWithErrorDetail");
   await startup.setViewport({ width: 640, height: 480, deviceScaleFactor: 1 });
   await startup.evaluate(() => {
     const proof = document.createElement("div");
@@ -931,9 +960,13 @@ try {
       && JSON.stringify(ankiDiscovery.fields) === JSON.stringify(["Front", "Back", "Picture"])
       && ankiStatus?.ok === true && ankiStatus.available === true && typeof ankiStatus.configKey === "string"
       && preflight?.ok === true && preflight.state === "addable" && preflight.canAdd === true && preflight.screenshot === true
+      && batch?.ok === true && batch.replies?.length === 2
+      && batch.replies.every(reply => reply.state === "addable" && reply.canAdd === true && reply.screenshot === true)
+      && batchChecks.length === 2 && batchChecks.every(call => call.params.notes.length === 1)
       && captured?.ok === true && /^hachidori-screenshot-[0-9a-f-]{36}\.jpg$/u.test(captured.filename ?? "")
       && submitted?.ok === true && submitted.state === "added" && Number.isInteger(submitted.noteId)
-      && note?.fields?.Front === request.term.expression && note.fields.Back.includes("食べたかった")
+      && note?.fields?.Front === request.term.expression
+      && note.fields.Back === `<b>食べたかった</b>。<br>${request.pageUrl}`
       && screenshotFilename === captured.filename && typeof screenshotData === "string"
       && Buffer.from(screenshotData, "base64").subarray(0, 3).toString("hex") === "ffd8ff"
       && screenshotProof?.width === 640 && screenshotProof.height === 480
@@ -961,6 +994,8 @@ try {
       setup: ankiSetup,
       discovery: ankiDiscovery,
       preflight,
+      batch,
+      batchChecks,
       captured: { ok: captured?.ok, filename: captured?.filename },
       submitted,
       note: note?.fields,

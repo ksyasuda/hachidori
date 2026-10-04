@@ -54,6 +54,7 @@ import {
   describeRevisionComparison,
   dictionaryImportMatches,
   dictionaryImportTarget,
+  mdxImportNotes,
 } from "./dictionary-import.js";
 
 const TARGET = "hoshidicts-offscreen";
@@ -69,12 +70,14 @@ const OPTION_SECTIONS = {
   anki: "Anki",
   keybinds: "Keybinds",
   advanced: "Advanced",
+  // Library → Personal dictionary owns its lookup switches.
+  "custom-dictionary": "Personal dictionary",
 };
 const LIBRARY_SECTIONS = new Set(["dictionaries", "add-dictionaries", "updates", "dictionary-groups", "custom-dictionary"]);
 const {
   DEFAULT_OPTIONS, DEFINITION_LOOKUP_MODES, FREQUENCY_ORDERS,
   POPUP_THEME_GROUPS, POPUP_RENDERER_IDS, popupRenderer, DESIGN_OPTION_KEYS, DEFINITION_BLUR_DIRECTIONS, DEFINITION_BLUR_REVEALS,
-  DEFINITION_BLUR_FREQUENCY_ORDERS, EXPERIMENTAL_FEATURES,
+  DEFINITION_BLUR_FREQUENCY_ORDERS, EXPERIMENTAL_FEATURES, definitionBlurFrequencyDictionary,
   activationLabel, clampOption, normaliseCustomButtons, normaliseKanjiSelection, normaliseOptions,
 } = globalThis.HDReaderOptions;
 const STATUS_POLL_MS = 1000;
@@ -104,6 +107,7 @@ const METADATA_FIELDS = [
   { key: "compactFrequencyNumbers", id: "opt-frequency-compact" },
   { key: "averageFrequency", id: "opt-average-frequency" },
   { key: "showPitchAccentFurigana", id: "opt-pitch-furigana" },
+  { key: "showPitchAccentColors", id: "opt-pitch-colors" },
   { key: "showPitchAccentBadge", id: "opt-pitch-badge" },
   { key: "showPitchAccentDictionaryNames", id: "opt-pitch-names" },
   { key: "showPitchAccentText", id: "opt-pitch-text" },
@@ -114,6 +118,9 @@ const METADATA_FIELDS = [
 const APPEARANCE_CHOICES = [
   { key: "popupTheme", id: "opt-popup-theme" },
   { key: "popupToolbarPosition", id: "opt-popup-toolbar" },
+  { key: "imageHoverPreview", id: "opt-image-hover-preview" },
+  { key: "glossaryLayoutMode", id: "opt-glossary-layout" },
+  { key: "pitchAccentFuriganaStyle", id: "opt-pitch-furigana-style" },
   { key: "definitionBlurDirection", id: "opt-blur-direction", values: DEFINITION_BLUR_DIRECTIONS },
   { key: "definitionBlurFrequencyOrder", id: "opt-blur-frequency-order", values: DEFINITION_BLUR_FREQUENCY_ORDERS },
   { key: "definitionBlurReveal", id: "opt-blur-reveal", values: DEFINITION_BLUR_REVEALS },
@@ -124,7 +131,7 @@ const numberFormat = new Intl.NumberFormat();
 let dictionaryState = { schemaVersion: 1, revision: -1, dictionaries: [], groups: [] };
 let dictionaries = dictionaryState.dictionaries;
 let options = normaliseOptions({});
-const themeStore = createThemeStore({ root: document.getElementById("theme-store"), onSelect(slug) {
+const themeStore = createThemeStore({ root: document.getElementById("theme-store"), design: document.getElementById("design"), onSelect(slug) {
   options.popupTheme = slug;
   renderThemeChoices();
   writeOptions();
@@ -342,7 +349,7 @@ function showSettingsSection(focus = false) {
   updateKeybindSettings();
   updateBackupSettings();
   updateSharingSettings();
-  if (activeSection === "advanced") refreshMemorySettings();
+  if (activeSection === "advanced") refreshAdvancedMemory();
   if (activeSection === "design") {
     customButtonController ??= createCustomButtonSettings({ document,
       readButtons: () => options.customButtons,
@@ -484,7 +491,8 @@ function renderLowMemoryMode() {
 }
 
 function memorySettings() {
-  memoryController ??= createMemorySettings({ document, numberFormat, readMemory: () => send("hd_memory") });
+  memoryController ??= createMemorySettings({ document, numberFormat, readMemory: () => send("hd_memory"),
+    readExtensionTotal: () => send("hd_memory_total") });
   return memoryController;
 }
 
@@ -494,6 +502,12 @@ function memorySettings() {
 // on: a rebuilt row shows the last reading.
 function refreshMemorySettings() {
   void memorySettings().refresh();
+}
+
+// Advanced also measures the whole extension; a row's Details does not.
+function refreshAdvancedMemory() {
+  refreshMemorySettings();
+  void memorySettings().refreshExtensionTotal();
 }
 
 // With the MDX dictionaries flag on, the picker and drop zone also take .mdx
@@ -868,7 +882,8 @@ function selectedFrequencyDictionary(title = options.frequencyDictionary) {
     && isAvailableFrequencyDictionary(dictionary));
 }
 
-function selectedDefinitionBlurFrequencyDictionary(title = options.definitionBlurFrequencyDictionary) {
+// The dictionary the blur threshold reads: its own choice, or "Same as sorting".
+function selectedDefinitionBlurFrequencyDictionary(title = definitionBlurFrequencyDictionary(options)) {
   return dictionaries.find((dictionary) => dictionary.title === title
     && isAvailableFrequencyDictionary(dictionary));
 }
@@ -1301,7 +1316,7 @@ function scheduleStatusPoll(delay = STATUS_POLL_MS) {
   }
   statusTimer = setTimeout(() => {
     statusTimer = null;
-    refreshStatus();
+    void refreshStatus();
   }, delay);
 }
 
@@ -1335,7 +1350,7 @@ async function refreshStatus() {
   renderUpdatingRows(previousUpdating, reply.updating?.id ?? null);
   renderLowMemoryMode();
   if (activeSection === "advanced" && reply.ready && !reply.loading && reply.generation !== previousGeneration) {
-    refreshMemorySettings();
+    refreshAdvancedMemory();
   }
   if (!reply.ready || reply.loading || updating) {
     scheduleStatusPoll();
@@ -1414,7 +1429,8 @@ function renderDefinitionBlurFrequencyChoices() {
   if (select === document.activeElement) return;
   const previous = options.definitionBlurFrequencyDictionary;
   select.disabled = !options.definitionBlurFrequencyEnabled;
-  select.replaceChildren(new Option("Choose an enabled frequency dictionary", ""));
+  const sorting = selectedFrequencyDictionary();
+  select.replaceChildren(new Option(sorting ? `Same as sorting (${dictionaryLabel(sorting)})` : "Same as sorting", ""));
   const available = dictionaries.filter(isAvailableFrequencyDictionary);
   for (const dictionary of available) select.add(new Option(dictionaryLabel(dictionary), dictionary.title));
   if (previous !== "" && !available.some(dictionary => dictionary.title === previous)) {
@@ -1457,7 +1473,7 @@ function renderCompactSummaryControls() {
 // All blur rules use the shared reveal controls. The delay field shows
 // seconds, fractions allowed, for the stored milliseconds.
 function renderDefinitionBlurControls() {
-  const countEnabled = options.definitionBlurEnabled;
+  const countEnabled = options.definitionBlurCountEnabled;
   const ankiEnabled = options.definitionBlurAnkiMature;
   const frequencyEnabled = options.definitionBlurFrequencyEnabled;
   const enabled = countEnabled || ankiEnabled || frequencyEnabled;
@@ -1494,8 +1510,8 @@ function renderDefinitionBlurControls() {
   frequencyHelp.hidden = !frequencyEnabled;
   if (frequencyEnabled) {
     const selected = selectedDefinitionBlurFrequencyDictionary();
-    if (!options.definitionBlurFrequencyDictionary) {
-      frequencyHelp.textContent = "Choose one enabled frequency dictionary. Missing frequency data leaves this condition unqualified.";
+    if (!definitionBlurFrequencyDictionary(options)) {
+      frequencyHelp.textContent = "Sorting compares every frequency dictionary, so choose one here. Missing frequency data leaves this condition unqualified.";
     } else if (!selected) {
       frequencyHelp.textContent = "The saved frequency dictionary is unavailable. This condition fails open until it is enabled or reinstalled.";
     } else {
@@ -1535,8 +1551,15 @@ function renderMetadataControls() {
     element(field.id).checked = field.inverted ? !options[field.key] : options[field.key];
   }
   renderDefinitionBlurControls();
+  // The dictionary picks the furigana's pitch, which also gives the headword's colour.
   renderPreferredDictionary("opt-pitch-dictionary", options.pitchAccentFuriganaDictionary,
-    "pitch", "Automatic — first available pitch", options.showPitchAccentFurigana);
+    "pitch", "Automatic — first available pitch", options.showPitchAccentFurigana || options.showPitchAccentColors);
+  // Like the dictionary picker, a focused style keeps its draft until blur.
+  const furiganaStyle = element("opt-pitch-furigana-style");
+  if (furiganaStyle !== document.activeElement) {
+    furiganaStyle.disabled = !options.showPitchAccentFurigana;
+    furiganaStyle.value = options.pitchAccentFuriganaStyle;
+  }
 }
 
 function renderPopupImageSources() {
@@ -1758,6 +1781,10 @@ function renderOptions() {
   customButtonController?.render();
   const toolbar = element("opt-popup-toolbar");
   if (toolbar !== document.activeElement) toolbar.value = options.popupToolbarPosition;
+  const imageHoverPreview = element("opt-image-hover-preview");
+  if (imageHoverPreview !== document.activeElement) imageHoverPreview.value = options.imageHoverPreview;
+  const glossaryLayout = element("opt-glossary-layout");
+  if (glossaryLayout !== document.activeElement) glossaryLayout.value = options.glossaryLayoutMode;
   renderActivationControls();
   renderFrequencyOrder();
   renderKanjiChoices();
@@ -2240,7 +2267,7 @@ function renderDictionaryRow(template, entry, index) {
     remove.hidden = true;
   } else {
     remove.addEventListener("click", () => {
-      removeDictionary(entry.id, entry.title);
+      void removeDictionary(entry.id, entry.title);
     });
   }
   return row;
@@ -2803,11 +2830,15 @@ async function importArchive(request, index, total, label, started) {
     const reply = await send("hd_import", request);
     const report = reply.report ?? {};
     if (reply.ok && report.success) {
+      // What an MDX import left out. Notes never turn a success into a
+      // failure: the dictionary is installed and counts as imported.
+      const notes = mdxImportNotes(report, numberFormat);
       updateImportResult(index, {
         text: `Imported ${report.title} in ${importDuration(started)}: ${summariseReport(report)}.`,
         tone: "ok",
+        notes,
       });
-      return "imported";
+      return notes.length > 0 ? "imported-with-notes" : "imported";
     }
     const reason = reply.error ?? report.error ?? "The engine gave no reason.";
     updateImportResult(index, {
@@ -2871,12 +2902,14 @@ async function runImportBatch(items, importOne, singular, plural, describeItem) 
   })));
 
   let imported = 0;
+  let withNotes = 0;
   let cancelled = 0;
   try {
     for (const [index, item] of items.entries()) {
       const outcome = await importOne(item, index, items.length);
-      if (outcome === "imported") {
+      if (outcome === "imported" || outcome === "imported-with-notes") {
         imported += 1;
+        if (outcome === "imported-with-notes") withNotes += 1;
         // A later archive in the same batch must decide against the state the
         // previous archive actually committed, not a delayed storage event.
         await reloadDictionaries();
@@ -2884,8 +2917,12 @@ async function runImportBatch(items, importOne, singular, plural, describeItem) 
     }
     const failed = items.length - imported - cancelled;
     const itemLabel = items.length === 1 ? singular : plural;
+    // #import-state is the polite live region, so it announces the notes.
+    const importedLabel = withNotes === 0
+      ? `${imported} imported`
+      : `${imported} imported (${withNotes} with notes)`;
     const outcomes = [
-      `${imported} imported`,
+      importedLabel,
       ...(cancelled === 0 ? [] : [`${cancelled} cancelled`]),
       `${failed} failed`,
     ].join(", ");
@@ -3275,7 +3312,7 @@ function attachHandlers() {
       writeOptions();
     });
   }
-  for (const [id, key] of [["opt-blur-count", "definitionBlurEnabled"],
+  for (const [id, key] of [["opt-blur-count", "definitionBlurCountEnabled"],
     ["opt-blur-anki", "definitionBlurAnkiMature"],
     ["opt-blur-frequency", "definitionBlurFrequencyEnabled"]]) {
     element(id).addEventListener("change", (event) => {
@@ -3423,6 +3460,8 @@ function attachHandlers() {
       return;
     }
     options.frequencyDictionary = event.target.value;
+    // Blur set to "Same as sorting" follows this choice.
+    renderDefinitionBlurControls();
     applyFrequencyDirection();
   });
   element("opt-frequency-auto").addEventListener("click", applyFrequencyDirection);
@@ -3453,7 +3492,7 @@ function attachHandlers() {
       if (event.target.id === "opt-blur-frequency-dictionary") renderDefinitionBlurFrequencyChoices();
       if (event.target.id === "opt-image-source") renderPopupImageSources();
       if (event.target.id === "opt-kanji-dictionary") renderKanjiChoices();
-      if (event.target.id === "opt-pitch-dictionary") renderMetadataControls();
+      if (event.target.id === "opt-pitch-dictionary" || event.target.id === "opt-pitch-furigana-style") renderMetadataControls();
       if (event.target.closest("#definition-blur-settings")) {
         renderDefinitionBlurControls();
       }
@@ -3724,4 +3763,4 @@ async function start() {
   void recommendedInstallation.request();
 }
 
-start();
+await start();

@@ -32,6 +32,7 @@ import {
   compactSummaryFixture,
   dictionaryTabsFixture,
   kanjiGroupFixture,
+  kanjiReadingFuriganaFixture,
   externalLinksFixture,
   frequencyRankingFixture,
   gaijiSizingFixture,
@@ -51,6 +52,7 @@ import { RECOMMENDED_DICTIONARIES as RECOMMENDED_CATALOGUE } from "../extension/
 import { BACKUP_CHROME_CHECKS, backupChromeScenarios } from "./chrome-backup-scenarios.mjs";
 import { checkPopupResize } from "./chrome-popup-resize.mjs";
 import { checkCompactSummaryLayout } from "./chrome-compact-summary.mjs";
+import { COMPACT_GLOSSARIES_CHECK, checkCompactGlossaries } from "./chrome-glossary-layout.mjs";
 import { ACTION_ROW_CHECK, checkActionRow } from "./chrome-action-row.mjs";
 import { SETTINGS_FEEDBACK_CHECK, checkSettingsFeedback } from "./chrome-settings-feedback-scenarios.mjs";
 import { dictionaryManagementScenarios, REORDER_CHECKS } from "./chrome-dictionary-management-scenarios.mjs";
@@ -58,6 +60,7 @@ import { DICTIONARY_RANK_CHECK, checkDictionaryRankLayout } from "./chrome-dicti
 import { LIBRARY_NAVIGATION_CHECK, LIBRARY_TAB_GEOMETRY_CHECK, SETTINGS_NAVIGATION_CHECK, checkLibraryNavigation } from "./chrome-library-navigation.mjs";
 import { SETTINGS_FIRST_FRAME_THEME_CHECK, checkSettingsFirstFrameTheme } from "./chrome-settings-first-frame.mjs";
 import { AnkiConnectError, answerAnkiConnect } from "./anki-connect-fake.mjs";
+import { applyAnkiPreset } from "../extension/anki-templates.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(HERE, "..");
@@ -306,7 +309,8 @@ const PLANNED = [
   "Anki reader controls stay absent until configured and keep ruby context without its reading through one confirmed Add and View",
   "a mined screenshot is the reading page without Hachidori's overlays and its upload cannot fail the note",
   "a screenshot upload that Anki refuses is a warning on a note that is still added",
-  "a note mined from a texthooker line carries that one line as its sentence and highlights only the word",
+  "a note mined from a texthooker line carries that one line as its sentence and its full page address, and highlights only the word",
+  "a note mined from a selection takes the hover's sentence without the hidden text inside it",
   "Popup audio is silent by default and manually falls back through enabled sources and playable candidates",
   "Popup pronunciation choices preserve source identity and warm replay reuses native cached media",
   "Popup autoplay is optional and does not replay after presentation updates or Back",
@@ -332,7 +336,7 @@ const PLANNED = [
   "hide popup on cursor exit hides a sticky popup the pointer left despite mouse focus, but not keyboard focus",
   "Press to set records the middle button, which opens a stationary lookup and releases it like a key",
   "a middle scan press on a Japanese link looks it up without a new tab while other links still open",
-  "a Back scan press on a word looks it up without going back, while one on a field still does",
+  "a Back scan press on a word, in page text or a text field, looks it up without going back, while one on an empty field still does",
   "Settings persists frequency directions and applies them to real-WASM lookup results",
   "Japanese-only selections leave English text alone and the notice setting propagates to open readers",
   "turning off the personal dictionary stops highlight lookups, the pencil and personal entries until it is on",
@@ -349,8 +353,8 @@ const PLANNED = [
   "fallback source paint follows sibling layout changes inside fixed-size ancestors",
   "fallback source paint stays beneath page headers and overlays",
   "fallback source paint refreshes after stylesheet loading and CSSOM edits",
-  "editable controls preserve normal editing and suppress pointer and selection lookups",
-  "autofocused search fields allow hover and stationary Shift lookup of Japanese example links",
+  "text fields look up their words without disturbing editing, while other editors suppress pointer and selection lookups",
+  "autofocused search fields allow hover and stationary Shift lookup of their own words and Japanese example links",
   "Japanese-only preferences change automatic scanning in an already-open tab",
   "Japanese-only mixed numeral lookups retain native matches and exact source highlights",
   "dictionary CSS stays scoped with malformed braces, escaped titles, and nested rules",
@@ -420,6 +424,9 @@ const PLANNED = [
   "hovering an inflected verb shows a popup",
   "the reader opens a popup for Japanese text inside a same-origin iframe",
   "the popup paints above a fullscreen player and returns to body on exit",
+  "the popup stays in place while a chat feed or the page scrolls and after its source is removed",
+  "switching to another tab and back keeps the popup, its Note draft and keyboard focus until Escape",
+  "a click into one of the page's frames, same-origin or cross-site, still closes the popup",
   "the content script attached its open-shadow host to the page",
   "the popup deinflects 食べたかった to 食べる",
   "deinflection disclosure exposes the real ordered trace and remains keyboard reachable",
@@ -438,13 +445,17 @@ const PLANNED = [
   "Saved popup columns reflow complete cards after expansion, media load and resize",
   "a clicked-kanji group shows each member with an entry as its own tab in group order",
   "the clicked-kanji chooser saves a group by its stable ID and resets when the group is removed",
+  "a clicked-kanji group's native kanji card keeps a ready Anki mining control and mines as the character",
   "Compact summaries persist Settings, share leading media and update live without replacing definitions or Note drafts",
   "Compact summaries wrap without clipping and retain narrow toolbar access",
+  COMPACT_GLOSSARIES_CHECK,
   ACTION_ROW_CHECK,
   "compact definition text opens a nested lookup with the same close contract",
   "Live image sources recover missing thumbnails, preserve owners and resolve groups per path with accurate aliases",
   "Live metadata Settings preserve Note and dictionary content while independently controlling frequency pitch grammar and IPA",
   "external dictionary Enter activation creates one safe browser tab through the extension",
+  "a custom link's %s is the hovered or selected word's sentence without ruby readings",
+  "an ambiguous headword's furigana is split by its kanji's KANJIDIC readings in the engine worker and the popup",
   "the popup renders the glossary",
   "the popup renders the frequency tag from term_meta_bank",
   "a grouped favourite uses only its group tab",
@@ -849,6 +860,12 @@ async function popupReader(page, depth = 0) {
         // its outer corner is notched: its border image fills the mora's
         // padding box and reaches out by its own borders, the lines' width.
         const transitions = [...(expression?.querySelectorAll(".gsm-hoshidicts-pitch-mora[data-pitch-transition]") ?? [])];
+        // The overline furigana style draws the pitch list's Yomitan text
+        // instead: a line over each high mora and a hook where the pitch
+        // drops, both in the popup's text colour.
+        const overlines = [...(expression?.querySelectorAll('[data-pitch-style="overline"]'
+          + ' > .pronunciation-mora[data-pitch="high"] > .pronunciation-mora-line') ?? [])]
+          .map(line => view.getComputedStyle(line));
         return {
           hidden: this.hasAttribute("hidden"),
           height: this.getBoundingClientRect().height,
@@ -922,6 +939,10 @@ async function popupReader(page, depth = 0) {
               return stroke.top === "0px" && stroke.bottom === "0px" && stroke.borderImageOutset === "1 0"
                 && stroke.borderTopWidth === style.borderTopWidth && stroke.borderBottomWidth === style.borderBottomWidth;
             }),
+            overlines: overlines.length,
+            hooks: overlines.filter(line => line.borderRightStyle === "solid").length,
+            overlinesInTextColour: overlines.every(line => line.borderTopStyle === "solid"
+              && line.borderTopColor === view.getComputedStyle(this).color),
           },
         };
       }`,
@@ -1169,6 +1190,7 @@ async function popupReader(page, depth = 0) {
                 .map(attribute => [attribute.name, attribute.value])),
               filter: view.getComputedStyle(image).filter,
               margin: view.getComputedStyle(link).margin,
+              imageRect: image.getBoundingClientRect().toJSON(),
               overflow: content ? { clientWidth: content.clientWidth, scrollWidth: content.scrollWidth } : null,
               display: { width: rect.width, height: rect.height, rect: rect.toJSON(), inlineWidth: container.style.width,
                 fontSize: Number.parseFloat(view.getComputedStyle(container).fontSize) } };
@@ -1555,6 +1577,8 @@ async function popupReader(page, depth = 0) {
               .filter(tag => tag.getClientRects().length === 0).map(tag => tag.dataset.dictionary),
             pitch: this.querySelectorAll(".gsm-hoshidicts-tag-pitch").length,
             ruby: [...this.querySelectorAll(".gsm-hoshidicts-pitch-reading")].map(node => node.dataset.pitchDictionary),
+            rubyStyles: [...this.querySelectorAll(".gsm-hoshidicts-pitch-contour")]
+              .map(node => node.dataset.pitchStyle ?? "contour"),
             ipa: [...this.querySelectorAll(".gsm-hoshidicts-ipa-body")].map(node => node.textContent),
             ipaFits: [...this.querySelectorAll(".gsm-hoshidicts-ipa-body")].every(node => {
               const body = node.getBoundingClientRect();
@@ -1591,6 +1615,7 @@ async function popupReader(page, depth = 0) {
           rect: this.getBoundingClientRect().toJSON(), viewport: { width: innerWidth, height: innerHeight },
           grids: [...this.querySelectorAll(".gsm-hoshidicts-glossary-grid")].map(grid => ({
             width: grid.clientWidth, rect: grid.getBoundingClientRect().toJSON(), height: grid.style.height,
+            gap: Number.parseFloat(getComputedStyle(grid).columnGap),
             masonry: grid.classList.contains("gsm-hoshidicts-glossary-grid-masonry"),
             cards: [...grid.children].map(card => ({ rect: card.getBoundingClientRect().toJSON(),
               offsetHeight: card.offsetHeight, width: card.style.width, transform: card.style.transform,
@@ -1963,6 +1988,155 @@ async function checkFrameAndFullscreenPopups(tab, popup, pageUrl) {
   await hoverForPopup(tab, popup, "#verb");
 }
 
+// Like Yomitan (#402): once shown, the popup keeps the viewport position it
+// opened at while a live chat scrolls its comment away, the page scrolls, and
+// the comment leaves the DOM. Only the usual paths, here Escape, close it.
+async function checkPopupStaysInPlace(tab, popup) {
+  await tab.keyboard.press("Escape");
+  await popup.waitForHidden();
+  await tab.evaluate(() => {
+    const feed = document.createElement("div");
+    feed.id = "chat-feed";
+    feed.style.cssText = "height: 160px; width: 480px; overflow: auto; font: 24px serif";
+    feed.innerHTML = '<p id="chat-comment"><span id="chat-verb">食べたかった</span></p>'
+      + "<p>コメント</p>".repeat(40);
+    document.body.firstElementChild.before(feed);
+    document.body.style.minHeight = "6000px";
+  });
+  const box = () => tab.evaluate(() => {
+    const panel = document.querySelector("hachidori-host")?.shadowRoot?.querySelector(".gsm-hoshidicts-popup");
+    const rect = panel?.getBoundingClientRect();
+    return rect && !panel.hidden ? { left: rect.left, top: rect.top, width: rect.width, height: rect.height } : null;
+  });
+  // Two frames let any scroll listener, observer or rAF placement run.
+  const settle = () => tab.evaluate(() => new Promise(done =>
+    requestAnimationFrame(() => requestAnimationFrame(done))));
+  const steps = {};
+  let closed = false;
+  try {
+    const opened = await hoverForPopup(tab, popup, "#chat-verb");
+    const start = opened && await box();
+    if (start) {
+      // Read the popup, as a user would, while the feed moves underneath.
+      await tab.mouse.move(start.left + start.width / 2, start.top + start.height / 2);
+      await settle();
+      steps.entered = await box();
+      await tab.evaluate(() => { document.getElementById("chat-feed").scrollTop += 30; });
+      await settle();
+      steps.feedNudged = await box();
+      await tab.evaluate(() => {
+        const feed = document.getElementById("chat-feed");
+        feed.scrollTop = feed.scrollHeight;
+      });
+      await settle();
+      steps.feedScrolledPast = await box();
+      await tab.evaluate(() => window.scrollBy(0, 2000));
+      await settle();
+      steps.pageScrolled = await box();
+      steps.sourceOffscreen = await tab.evaluate(() =>
+        document.getElementById("chat-verb").getBoundingClientRect().bottom < 0);
+      await tab.evaluate(() => document.getElementById("chat-comment").remove());
+      await settle();
+      steps.sourceRemoved = await box();
+    }
+    await tab.keyboard.press("Escape");
+    closed = await popup.waitForHidden();
+    const same = rect => rect !== null && rect !== undefined && start && ["left", "top", "width", "height"]
+      .every(key => rect[key] === start[key]);
+    check("the popup stays in place while a chat feed or the page scrolls and after its source is removed",
+      Boolean(start) && same(steps.entered) && same(steps.feedNudged) && same(steps.feedScrolledPast)
+        && same(steps.pageScrolled) && steps.sourceOffscreen === true && same(steps.sourceRemoved) && closed,
+      JSON.stringify({ start, ...steps, closed }));
+  } finally {
+    await tab.evaluate(() => {
+      document.getElementById("chat-feed")?.remove();
+      document.body.style.minHeight = "";
+      window.scrollTo(0, 0);
+    });
+  }
+  await hoverForPopup(tab, popup, "#verb");
+}
+
+// Like Yomitan (#432): with the default Shift key, whose popup outlives its
+// release, switching to another tab and back keeps the popup, its view and a
+// Note draft with keyboard focus in it. A click into one of the page's own
+// frames, same-origin or cross-site, is still a click outside the popup.
+async function checkTabSwitchKeepsPopup(settings, tab, popup, pageUrl) {
+  const original = await readSettingsControls(settings, ["opt-activation-key", "opt-lookup-sticky"]);
+  await tab.keyboard.press("Escape");
+  await popup.waitForHidden();
+  await tab.mouse.move(2, 2);
+  await updateSettingsControls(settings, { "opt-activation-key": "Shift", "opt-lookup-sticky": true });
+  const openSticky = async () => {
+    const box = await (await tab.$("#verb")).boundingBox();
+    await tab.mouse.move(2, 2);
+    await tab.mouse.move(box.x + box.width * 0.15, box.y + box.height / 2);
+    await tab.keyboard.down("Shift");
+    const shown = await popup.waitForVisible();
+    await tab.keyboard.up("Shift");
+    return shown;
+  };
+  const draft = "a draft typed before leaving";
+  const away = {};
+  const frames = {};
+  try {
+    away.opened = await openSticky() !== null && await popup.click(".gsm-hoshidicts-note-button")
+      && (await popup.writeNote({ definition: draft }))?.definition === draft;
+    const before = await popup.retainedControls("remember");
+    await settings.bringToFront();
+    await new Promise(done => setTimeout(done, 600));
+    await tab.bringToFront();
+    const after = await popup.retainedControls();
+    away.kept = popup.visible(await popup.state()) && after?.sameForm && after.mounted && after.inputFocused
+      && after.draft === draft && after.selection.join() === before?.selection.join() && !after.replaced
+      && after.scrollTop === before.scrollTop;
+    await tab.keyboard.press("End");
+    await tab.keyboard.type(" and more");
+    away.typed = (await popup.retainedControls())?.draft;
+    await tab.keyboard.press("Escape");
+    const noteClosed = await popup.state();
+    away.noteFirst = popup.visible(noteClosed) && !noteClosed.noteOpen;
+    await tab.keyboard.press("Escape");
+    away.closed = await popup.waitForHidden();
+
+    const port = new URL(pageUrl).port;
+    for (const [kind, src] of [["same-origin", `http://127.0.0.1:${port}/frame`], ["cross-site", `http://localhost:${port}/frame`]]) {
+      await tab.evaluate(source => {
+        const frame = document.createElement("iframe");
+        frame.id = "click-frame";
+        frame.src = source;
+        frame.style.cssText = "width: 760px; height: 420px";
+        document.body.firstElementChild.before(frame);
+      }, src);
+      try {
+        await (await (await tab.$("#click-frame")).contentFrame()).waitForSelector("#frame-verb");
+        const opened = await openSticky() !== null;
+        const box = await (await tab.$("#click-frame")).boundingBox();
+        // The frame's empty corner, beside the popup above the pushed-down word.
+        const point = { x: box.x + box.width - 20, y: box.y + box.height - 20 };
+        const rect = opened ? (await popup.dictionaryTabs())?.rect : null;
+        const outside = Boolean(rect) && (point.x > rect.right || point.x < rect.left
+          || point.y > rect.bottom || point.y < rect.top);
+        await tab.mouse.click(point.x, point.y);
+        frames[kind] = { opened, outside, closed: await popup.waitForHidden() };
+      } finally {
+        await tab.$eval("#click-frame", element => element.remove());
+      }
+    }
+  } finally {
+    // A failure can leave the Note and then the popup open.
+    for (let press = 0; press < 2; press += 1) await tab.keyboard.press("Escape");
+    await updateSettingsControls(settings, original);
+  }
+  check("switching to another tab and back keeps the popup, its Note draft and keyboard focus until Escape",
+    away.opened && away.kept && away.typed === `${draft} and more` && away.noteFirst && away.closed,
+    JSON.stringify(away));
+  check("a click into one of the page's frames, same-origin or cross-site, still closes the popup",
+    ["same-origin", "cross-site"].every(kind => frames[kind]?.opened && frames[kind].outside && frames[kind].closed),
+    JSON.stringify(frames));
+  await hoverForPopup(tab, popup, "#verb");
+}
+
 async function checkDeinflectionDisclosure(settings, tab, popup) {
   const native = await settings.evaluate(() => chrome.runtime.sendMessage({
     target: "hoshidicts-offscreen", type: "hd_lookup", requestId: "e2e-deinflection-trace",
@@ -2150,6 +2324,120 @@ async function checkExternalLinks(browser, settings, tab, popup) {
       && evidence.afterInvalid === 1 && evidence.sourceUnchanged && evidence.restored, JSON.stringify(evidence));
 }
 
+// 好き嫌い's kana allow two splits of すききらい (#459). The engine worker reads
+// its kanji's KANJIDIC readings and sends the one that reads; the popup draws it.
+async function checkKanjiReadingFurigana(settings, tab, popup) {
+  const fixture = kanjiReadingFuriganaFixture();
+  const originalVerb = await tab.$eval("#verb", element => element.innerHTML);
+  await installMediaArchive(settings, fixture.archive);
+  let evidence;
+  try {
+    const reply = await settings.evaluate(text => chrome.runtime.sendMessage({ target: "hoshidicts-offscreen",
+      type: "hd_lookup", requestId: "e2e-kanji-reading-furigana", text, maxResults: 1 }), fixture.query);
+    await tab.$eval("#verb", (element, query) => { element.textContent = query; }, fixture.query);
+    await tab.bringToFront();
+    await tab.keyboard.press("Escape");
+    const shown = await hoverForPopup(tab, popup, "#verb", { accept: state => state.plain.includes(fixture.query) });
+    evidence = { furigana: reply?.results?.[0]?.term?.furigana, rubies: shown?.furiganaAlignment.rubies,
+      headword: shown?.text.includes("好すき嫌きらい") };
+  } catch (error) {
+    evidence = { error: error.message };
+  } finally {
+    await tab.keyboard.press("Escape");
+    const removed = await settings.evaluate(title => chrome.runtime.sendMessage({
+      target: "hoshidicts-offscreen", type: "hd_remove", title,
+    }), fixture.title);
+    if (!removed.ok) throw new Error(removed.error);
+    await tab.$eval("#verb", (element, html) => { element.innerHTML = html; }, originalVerb);
+  }
+  check("an ambiguous headword's furigana is split by its kanji's KANJIDIC readings in the engine worker and the popup",
+    JSON.stringify(evidence) === JSON.stringify({ furigana: [{ text: "好", reading: "す" }, { text: "き", reading: "" },
+      { text: "嫌", reading: "きら" }, { text: "い", reading: "" }], rubies: 2, headword: true }),
+    JSON.stringify(evidence));
+}
+
+// Issue #430: a custom link's %s is the sentence Anki gets, read the same way
+// for a hover and for a selection inside an inline element or across ruby.
+// The worker's tab creation is recorded instead of opening the URL.
+async function checkCustomLinkSentence(browser, settings, tab, popup) {
+  const writeButtons = customButtons => settings.evaluate(async buttons => {
+    const { options } = await chrome.storage.local.get("options");
+    const reply = await chrome.runtime.sendMessage({ target: "hoshidicts-worker", type: "hd_options_write",
+      baseRevision: options.revision, options: { customButtons: buttons } });
+    if (!reply.ok) throw new Error(reply.error);
+  }, customButtons);
+  const { options } = await settings.evaluate(() => chrome.storage.local.get("options"));
+  const worker = await activeExtensionWorker(browser, settings, "custom link sentence");
+  const opened = {};
+  try {
+    await worker.evaluate(() => {
+      const probe = { urls: [], create: chrome.tabs.create };
+      chrome.tabs.create = async properties => { probe.urls.push(properties.url); return { id: -1 }; };
+      globalThis.__customLinkProbe = probe;
+    });
+    await writeButtons([{ id: "e2e-sentence-link", type: "link", label: "Sentence",
+      url: "https://example.test/?w=%w&r=%r&s=%s" }]);
+    await tab.bringToFront();
+    await tab.keyboard.press("Escape");
+    await popup.waitForHidden();
+    await tab.evaluate(() => {
+      const lines = document.createElement("div");
+      lines.id = "link-sentences";
+      lines.innerHTML = '<p>昨日、<span id="link-verb">食べたかった</span>。とてもおいしかった。</p>'
+        + '<p>彼は<ruby id="link-ruby">漢字<rt>かんじ</rt></ruby>を読む。</p>';
+      document.body.prepend(lines);
+    });
+    const clickLink = async () => {
+      const count = await worker.evaluate(() => globalThis.__customLinkProbe.urls.length);
+      await popup.click(".gsm-hoshidicts-external-link-button");
+      const url = await worker.evaluate(async before => {
+        const { urls } = globalThis.__customLinkProbe;
+        for (let attempt = 0; attempt < 50 && urls.length <= before; attempt++) {
+          await new Promise(done => setTimeout(done, 100));
+        }
+        return urls.at(-1) ?? null;
+      }, count);
+      await tab.keyboard.press("Escape");
+      await popup.waitForHidden();
+      const params = new URL(url).searchParams;
+      return Object.fromEntries(["w", "r", "s"].map(marker => [marker, params.get(marker)]));
+    };
+    const selectLink = async (selector, end, expression) => {
+      await tab.$eval(selector, (element, offset) => {
+        getSelection().setBaseAndExtent(element.firstChild, 0, element.firstChild, offset);
+      }, end);
+      await popup.waitForVisible(10_000, state => state.plain.includes(expression));
+      return clickLink();
+    };
+    await hoverForPopup(tab, popup, "#link-verb", { accept: state => state.plain.includes("食べる") });
+    opened.hover = await clickLink();
+    opened.inline = await selectLink("#link-verb", 3, "食べる");
+    opened.ruby = await selectLink("#link-ruby", 2, "漢字");
+  } catch (error) {
+    opened.error = error.message;
+  } finally {
+    await tab.evaluate(() => {
+      getSelection().removeAllRanges();
+      document.getElementById("link-sentences")?.remove();
+    });
+    await writeButtons(options.customButtons);
+    try {
+      await worker.evaluate(() => {
+        chrome.tabs.create = globalThis.__customLinkProbe.create;
+        delete globalThis.__customLinkProbe;
+      });
+    } finally {
+      await worker.detach?.();
+    }
+  }
+  check("a custom link's %s is the hovered or selected word's sentence without ruby readings",
+    JSON.stringify(opened) === JSON.stringify({
+      hover: { w: "食べる", r: "たべる", s: "昨日、食べたかった。" },
+      inline: { w: "食べた", r: "", s: "昨日、食べたかった。" },
+      ruby: { w: "漢字", r: "かんじ", s: "彼は漢字を読む。" },
+    }), JSON.stringify(opened));
+}
+
 async function installMediaArchive(page, archive) {
   return page.evaluate(async (base64) => {
     const blobUrl = URL.createObjectURL(new Blob([
@@ -2227,11 +2515,13 @@ async function checkDictionaryTabsColumns(settings, tab, popup, browser) {
     const near = (a, b) => Math.abs(a - b) <= 1;
     return value.grids.every(grid => {
       const columns = Math.min(requested, grid.cards.length), heights = Array(columns).fill(0);
-      const width = (grid.width - 8 * (columns - 1)) / columns;
+      // The stylesheet's grid gap, which masonry must reuse between columns.
+      const { gap } = grid;
+      const width = (grid.width - gap * (columns - 1)) / columns;
       if (grid.width <= 0 || grid.masonry !== (columns > 1)) return false;
       for (const [index, card] of grid.cards.entries()) {
         const column = heights.indexOf(Math.min(...heights));
-        const x = column * (width + 8), y = heights[column];
+        const x = column * (width + gap), y = heights[column];
         if (!near(card.rect.width, width) || !near(card.rect.left - grid.rect.left, x)
             || !near(card.rect.top - grid.rect.top, y) || card.rect.right > grid.rect.right + 1) return false;
         if (columns === 1 && (card.width !== "" || card.transform !== "" || card.visibility !== "")) return false;
@@ -2240,10 +2530,10 @@ async function checkDictionaryTabsColumns(settings, tab, popup, browser) {
           if (Math.min(card.rect.right, other.rect.right) - Math.max(card.rect.left, other.rect.left) > 1
               && Math.min(card.rect.bottom, other.rect.bottom) - Math.max(card.rect.top, other.rect.top) > 1) return false;
         }
-        heights[column] += (columns === 1 ? card.rect.height : card.offsetHeight) + 8;
+        heights[column] += (columns === 1 ? card.rect.height : card.offsetHeight) + gap;
       }
       return columns === 1 ? grid.height === ""
-        : near(Number.parseFloat(grid.height), Math.max(...heights) - 8);
+        : near(Number.parseFloat(grid.height), Math.max(...heights) - gap);
     });
   }
   async function openChild() {
@@ -2632,16 +2922,38 @@ async function checkDictionaryTabsColumns(settings, tab, popup, browser) {
     JSON.stringify({ css: evidence.css, child: evidence.cssChild }));
 }
 
-async function checkKanjiGroup(settings, tab, popup) {
+async function checkKanjiGroup(settings, tab, popup, browser) {
   const fixture = kanjiGroupFixture();
   const [first, terms, second] = fixture.dictionaries.map(dictionary => dictionary.title);
   const groupId = "e2e-kanji-group";
   const groupValue = JSON.stringify({ kind: "tabGroup", id: groupId });
   const original = await settings.evaluate(() => chrome.storage.local.get(["options", "dictionaryState"]));
-  const installed = [], evidence = {};
+  const installed = [], evidence = {}, sessions = [];
   let failure;
   const require = (condition, message) => { if (!condition) throw new Error(message); };
   const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  // A Kiku note type behind a mocked AnkiConnect (#333): the group's native
+  // card is mined through the real preflight, field builder and submission.
+  const kikuFields = ["Expression", "ExpressionFurigana", "ExpressionReading", "ExpressionAudio", "RelatedExpression",
+    "SelectionText", "MainDefinition", "DefinitionPicture", "Sentence", "SentenceFurigana", "SentenceTranslation",
+    "SentenceAudio", "Picture", "Glossary", "Hint", "IsWordAndSentenceCard", "IsClickCard", "IsSentenceCard",
+    "IsAudioCard", "PitchPosition", "PitchCategories", "Frequency", "FreqSort", "MiscInfo"];
+  const ankiCalls = [], ankiNotes = [];
+  const ankiRoute = { requests: 0, async respond(request) {
+    const reply = await answerAnkiConnect(JSON.parse(request.postData), async (action, params) => {
+      ankiCalls.push(action);
+      if (action === "deckNames") return ["Default"];
+      if (action === "modelNames") return ["Kiku"];
+      if (action === "modelNamesAndIds") return { Kiku: 1 };
+      if (action === "modelFieldNames") return kikuFields;
+      if (action === "canAddNotesWithErrorDetail") return params.notes.map(() => ({ canAdd: true, error: null }));
+      if (action === "findNotes" || action === "notesInfo" || action === "getMediaFilesNames") return [];
+      if (action === "storeMediaFile") return params.filename;
+      if (action === "addNote") { ankiNotes.push(params.note.fields); return ankiNotes.length; }
+      throw new AnkiConnectError(`Unexpected Anki action ${action}`);
+    });
+    return { body: JSON.stringify(reply), status: 200, contentType: "application/json" };
+  } };
   async function until(read, predicate, description) {
     const deadline = Date.now() + 10_000;
     for (;;) {
@@ -2723,6 +3035,33 @@ async function checkKanjiGroup(settings, tab, popup) {
     await until(() => popup.state(), value => value && !value.hidden && value.text.includes("to eat"), "kanji group: Back restores the verb");
     evidence.passed = true;
 
+    // With Anki configured, the native card's mining control settles to ready
+    // and Add mines the character with the kanji dictionary's card.
+    for (const url of ["/background.js", "/offscreen.html"]) {
+      const target = await browser.waitForTarget(candidate => candidate.url().endsWith(url));
+      sessions.push(await interceptFetches(target, new Map([["http://127.0.0.1:8765/", ankiRoute]]), "kanji-group-anki"));
+    }
+    const diagnosticsStart = diagnostics.length;
+    await optionsWrite({ anki: applyAnkiPreset({ ...original.options.anki, deck: "Default", model: "Kiku" }, kikuFields, "kiku") });
+    await tab.bringToFront();
+    await tab.keyboard.press("Escape");
+    await hoverForPopup(tab, popup, "#verb");
+    require(await popup.click(".gsm-hoshidicts-kanji-link"), "kanji group Anki: clicked-kanji control");
+    await until(view, value => visible(value) && value.entries.length === 2, "kanji group Anki: group view");
+    const settledAnki = await until(() => popup.anki(), value => value?.controls.length === 2
+      && value.controls.every(control => !["checking", undefined].includes(control.state)), "kanji group Anki: settled controls");
+    evidence.anki = { controls: settledAnki.controls.map(control => [control.state, control.title]), feedback: settledAnki.feedback };
+    require(await popup.click(".gsm-hoshidicts-mine-button"), "kanji group Anki: Add");
+    await until(() => ankiNotes.length, count => count === 1, "kanji group Anki: addNote");
+    const [note] = ankiNotes;
+    evidence.anki.note = { Expression: note.Expression, ExpressionReading: note.ExpressionReading,
+      PitchCategories: note.PitchCategories, PitchPosition: note.PitchPosition, FreqSort: note.FreqSort,
+      glossary: note.Glossary.includes("kanji-group first meaning") && note.Glossary.includes("ショク · ジキ"),
+      mainDefinition: note.MainDefinition.includes("kanji-group first meaning") };
+    evidence.anki.exceptions = diagnostics.slice(diagnosticsStart).filter(line => /exception|TypeError/u.test(line));
+    require(await popup.click(".gsm-hoshidicts-kanji-back"), "kanji group Anki: Back");
+    await optionsWrite({ anki: original.options.anki });
+
     // Removing the group resets the option, in the worker and in the open Settings page.
     await groups(original.dictionaryState.groups ?? []);
     evidence.reset = await until(async () => ({ stored: (await storedOptions()).kanjiClickDictionary, chooser: await chooser() }),
@@ -2732,7 +3071,8 @@ async function checkKanjiGroup(settings, tab, popup) {
   } finally {
     const errors = [];
     const clean = async operation => { try { await operation(); } catch (error) { errors.push(error); } };
-    await clean(() => optionsWrite({ kanjiClickDictionary: original.options.kanjiClickDictionary }));
+    await clean(() => optionsWrite({ kanjiClickDictionary: original.options.kanjiClickDictionary, anki: original.options.anki }));
+    for (const session of sessions) await clean(() => session.detach());
     for (const title of installed) await clean(async () => {
       const reply = await settings.evaluate(title => chrome.runtime.sendMessage({ target: "hoshidicts-offscreen", type: "hd_remove", title }), title);
       if (!reply.ok) throw new Error(reply.error);
@@ -2758,6 +3098,12 @@ async function checkKanjiGroup(settings, tab, popup) {
     evidence.passed && evidence.chooser.groups.some(([label, value]) => label === "Kanji group" && value === groupValue)
       && evidence.reset?.stored === "" && evidence.reset.chooser.value === "",
     JSON.stringify({ chooser: evidence.chooser, reset: evidence.reset }));
+  check("a clicked-kanji group's native kanji card keeps a ready Anki mining control and mines as the character",
+    evidence.anki?.controls.every(([state]) => state === "ready") && evidence.anki.feedback?.hidden === true
+      && equal(evidence.anki.note, { Expression: fixture.character, ExpressionReading: "", PitchCategories: "",
+        PitchPosition: "", FreqSort: "9999999", glossary: true, mainDefinition: true })
+      && evidence.anki.exceptions.length === 0,
+    JSON.stringify(evidence.anki));
 }
 
 async function checkCompactSummaries(settings, tab, popup, browser) {
@@ -2997,7 +3343,13 @@ async function checkCompactSummaries(settings, tab, popup, browser) {
       && groupOriginal.images.every(image => Buffer.from(image.src.split(",")[1], "base64").equals(makePng())),
       "E11 group incorrectly retained one global supplier across paths");
     await popup.dictionaryTabs("remember");
-    await popup.imagePreview(1, "focus");
+    // These 16px fixture images are inline glyphs to the default "large"
+    // preview mode; preview every image while checking preview refresh.
+    await write({ imageHoverPreview: "all" });
+    await until(async () => {
+      await popup.imagePreview(1, "blur");
+      return popup.imagePreview(1, "focus");
+    }, value => value.focusedImage === 1 && value.preview !== null, "E11 the reader adopted the all-images preview mode");
     await worker.evaluate(() => { globalThis.__ownedMediaProbe.holdNext = true; });
     await write({ popupImageSource: { kind: "dictionary", title: fixture.plain } });
     await until(() => worker.evaluate(() => globalThis.__ownedMediaProbe.held.length), count => count === 1, "E11 focused alternate image");
@@ -3017,6 +3369,7 @@ async function checkCompactSummaries(settings, tab, popup, browser) {
     const blurredFailure = await popup.imagePreview(0, "blur");
     require(blurredFailure.images[0].tabStop === null, "E11 failed image retained a noninteractive tab stop after blur");
     await write({ popupImageSource: null });
+    await write({ imageHoverPreview: "large" });
     await until(() => popup.dictionaryTabs(), value => !value.hidden && value.images.length === 2 && value.imageSources.length === 0
       && value.images[1].same
       && value.images.every(image => image.complete && Buffer.from(image.src.split(",")[1], "base64").equals(makePng())),
@@ -4278,8 +4631,12 @@ async function gaijiSizingChrome({ page, tab, popup }) {
     const expectedSources = {
       [fixture.path]: `data:image/png;base64,${fixture.bytes.toString("base64")}`,
       [fixture.svgPath]: `data:image/svg+xml;base64,${fixture.svgBytes.toString("base64")}`,
+      [fixture.widePath]: `data:image/svg+xml;base64,${fixture.wideBytes.toString("base64")}`,
     };
     // Yomitan's .gloss-image-link has no margin, so a gaiji leaves no gap in its word.
+    // The dictionary's img margin/padding must not move the image layer out
+    // of its clipping container (#423).
+    const sameRect = (a, b) => ["x", "y", "width", "height"].every(key => Math.abs(a[key] - b[key]) <= 1 / 64);
     check("Meikyo-compatible gaiji use natural inline geometry and dictionary CSS hooks without overflow",
       state?.theme === "dark" && state.images.length === fixture.cases.length
         && state.images.every((image, index) => {
@@ -4295,6 +4652,7 @@ async function gaijiSizingChrome({ page, tab, popup }) {
             && image.display.inlineWidth === (expected.inlineWidth ?? `${image.width}px`)
             && Math.abs(image.display.width - expected.width) <= 1 / 64
             && Math.abs(image.display.height - expected.height) <= 1 / 64
+            && sameRect(image.imageRect, image.display.rect)
             && image.overflow?.clientWidth > 0
             && image.overflow.scrollWidth <= image.overflow.clientWidth + 1;
         }), JSON.stringify(state));
@@ -5287,11 +5645,13 @@ async function checkAnkiSubmission(settings, browser, tab, popup) {
   const screenshotDictionary = "screenshot-mining-layout";
   let screenshotDictionaryInstalled = false;
   const notes = new Map(), calls = [], files = new Map();
-  const queryExpression = query => {
+  // The values a search names: Anki's dupe: identity, or every "front:…"
+  // term, which a popup's batched lookup ORs together.
+  const queryExpressions = query => {
     const duplicate = /^"dupe:1,(.*)"$/u.exec(query);
-    const indexed = /\("note:Basic" "front:((?:\\.|[^"])*)"\)/iu.exec(query);
-    const value = duplicate?.[1] ?? indexed?.[1];
-    return value === undefined ? null : value.replace(/\\(.)/gu, "$1");
+    const values = duplicate ? [duplicate[1]]
+      : [...query.matchAll(/"front:((?:\\.|[^"])*)"/giu)].map(match => match[1]);
+    return values.map(value => value.replace(/\\(.)/gu, "$1"));
   };
   // Flags the checks below flip to make the mock refuse specific work.
   const control = { failScreenshotUpload: false, preflightGate: null };
@@ -5312,11 +5672,10 @@ async function checkAnkiSubmission(settings, browser, tab, popup) {
       }
       if (action === "addNote") { const noteId = notes.size + 1; notes.set(noteId, params.note.fields); return noteId; }
       if (action === "findNotes") {
-        const expression = queryExpression(params.query);
+        const expressions = queryExpressions(params.query);
         const matched = params.query === '"note:Basic"'
           ? [...notes.keys()]
-          : expression === null ? [] : [...notes]
-            .filter(([, fields]) => fields.Front === expression).map(([noteId]) => noteId);
+          : [...notes].filter(([, fields]) => expressions.includes(fields.Front)).map(([noteId]) => noteId);
         // The mock schedules nothing, so no note is mature.
         return params.query.endsWith(" is:review -is:learn prop:ivl>=21") ? [] : matched;
       }
@@ -5857,10 +6216,16 @@ async function checkScreenshotMining({ tab, popup, configure, calls, notes, file
 async function checkSentenceMining({ tab, popup, configure, calls, notes, settled }) {
   const template = value => ({ value, overwriteMode: "overwrite" });
   const line = "三行目で本を読む。";
+  const original = tab.url();
   try {
-    await configure(false, { fieldTemplates: { Front: template("{expression} sentence"), Back: template("{sentence}"), Audio: template("") } });
+    await configure(false, { fieldTemplates: { Front: template("{expression} sentence"), Back: template("{sentence}<br>{url-plain}"), Audio: template("") } });
     await tab.keyboard.press("Escape");
     await popup.waitForHidden();
+    // {url-plain} is the page's whole address, query and fragment included (#435).
+    const address = await tab.evaluate(() => {
+      history.replaceState(null, "", "?chapter=56&view=1#scene");
+      return location.href;
+    });
     const point = await tab.evaluate(line => {
       const main = document.createElement("main");
       main.id = "hooked-lines";
@@ -5897,17 +6262,42 @@ async function checkSentenceMining({ tab, popup, configure, calls, notes, settle
     await tab.keyboard.press("Enter");
     const saved = await settled(state => state?.controls.some(control => control.state === "success"));
     const note = [...notes.values()].at(-1);
-    check("a note mined from a texthooker line carries that one line as its sentence and highlights only the word",
+    check("a note mined from a texthooker line carries that one line as its sentence and its full page address, and highlights only the word",
       shown !== null && highlight.text === "読む" && highlight.inLine
         && ready.controls[0].action === "add" && focused
         && saved.controls[0].state === "success"
         && calls.filter(call => call.action === "addNote").length === addsBefore + 1
         && note.Front === "読む sentence"
-        && note.Back === "三行目で本を<b>読む</b>。",
-      JSON.stringify({ shown: shown?.plain, highlight, ready: ready.controls[0], focused, saved: saved.controls[0], note }));
+        && address.endsWith("/?chapter=56&view=1#scene")
+        && note.Back === `三行目で本を<b>読む</b>。<br>${address.replaceAll("&", "&amp;")}`,
+      JSON.stringify({ shown: shown?.plain, highlight, ready: ready.controls[0], focused, saved: saved.controls[0], address, note }));
+
+    // Issue #430: a selection's note takes the sentence a hover would, so text
+    // hidden inside the selection stays out of the sentence and its cloze.
+    await tab.keyboard.press("Escape");
+    await popup.waitForHidden();
+    await tab.evaluate(() => {
+      const selected = document.createElement("p");
+      selected.innerHTML = '「どうも、あり<span style="display:none">隠し</span>がとう。」と言った。';
+      document.getElementById("hooked-lines").append(selected);
+      getSelection().setBaseAndExtent(selected.firstChild, 5, selected.lastChild, 3);
+    });
+    const selection = await popup.waitForVisible(10_000, state => state.plain.includes("ありがとう"));
+    await settled(state => state?.controls.some(control => !control.hidden && !control.disabled));
+    const selectionFocused = await popup.focusAnki();
+    await tab.keyboard.press("Enter");
+    await settled(state => state?.controls.some(control => control.state === "success"));
+    const selectionNote = [...notes.values()].at(-1);
+    check("a note mined from a selection takes the hover's sentence without the hidden text inside it",
+      selection !== null && selectionFocused && selectionNote.Front === "ありがとう sentence"
+        && selectionNote.Back === `どうも、<b>ありがとう</b>。<br>${address.replaceAll("&", "&amp;")}`,
+      JSON.stringify({ shown: selection?.plain, selectionFocused, selectionNote }));
   } finally {
     await tab.keyboard.press("Escape");
-    await tab.evaluate(() => document.getElementById("hooked-lines")?.remove());
+    await tab.evaluate(original => {
+      document.getElementById("hooked-lines")?.remove();
+      history.replaceState(null, "", original);
+    }, original);
   }
 }
 
@@ -6029,7 +6419,7 @@ async function checkAnkiGlossaryExport(page) {
     check("Smaller Anki cards export resolves scoped CSS into compact glossary HTML without styles, internal markup or media loads",
       compact.same && compact.mounted === 0 && !compact.internal && !compact.hidden
         && compact.root === "text-align: left;" && compact.meta === "(★, Compact <Dictionary>)"
-        && compact.details === "Rules: v1<br>Deinflection: polite"
+        && compact.details === undefined && compact.html.endsWith("</ol></div>")
         && compact.groups[0] === "ja" && compact.groups[1] === '"＊"'
         && JSON.stringify(compact.lists) === JSON.stringify(["li:null", "ol:null", 'li:list-style-type: "①";', "ul:list-style-type: none;", "li:null"])
         && compact.line === "1-dan transitive to eat" && compact.marker === "△"
@@ -6671,6 +7061,9 @@ async function checkAnkiSettings(page, browser) {
     await page.waitForFunction(() => document.getElementById("anki-status").textContent.includes("HTTP 503"));
     const failed = await status();
     offline = false;
+    // The Audio view before this leaves the page scrolled, clipping the button
+    // at the top edge where a click misses it; bring it fully into view first.
+    await page.$eval("#anki-refresh", node => node.scrollIntoView({ block: "center" }));
     await page.click("#anki-refresh");
     await settled();
     check("Anki discovery is lazy and refresh recovers an offline connection through the real service worker",
@@ -7423,7 +7816,7 @@ async function checkAnkiMatureDefinitionBlur({ browser, settings, tab, popup, wa
       await reloadedSettings.waitForFunction(() => document.getElementById("opt-blur-anki").checked);
       persisted = await reloadedSettings.evaluate(async () => {
         const { options } = await chrome.storage.local.get("options");
-        return { enabled: options.definitionBlurAnkiMature, counts: options.showLookupCounts, countBlur: options.definitionBlurEnabled,
+        return { enabled: options.definitionBlurAnkiMature, counts: options.showLookupCounts, countBlur: options.definitionBlurCountEnabled,
           checked: document.getElementById("opt-blur-anki").checked,
           revealDisabled: document.getElementById("opt-blur-reveal").disabled };
       });
@@ -8209,7 +8602,7 @@ async function checkFrequencyDirection(browser, settings, tab, popup) {
 
 async function checkPopupMetadata(browser, settings, tab, popup) {
   const controls = ["opt-frequency-names", "opt-frequency-compact", "opt-average-frequency", "opt-pitch-furigana",
-    "opt-pitch-dictionary", "opt-pitch-badge", "opt-grammar-tags", "opt-popup-width",
+    "opt-pitch-dictionary", "opt-pitch-furigana-style", "opt-pitch-badge", "opt-grammar-tags", "opt-popup-width",
     "opt-popup-toolbar"];
   const original = await readSettingsControls(settings, controls);
   const originalAlias = await settings.evaluate(async () => (await chrome.storage.local.get("dictionaryState"))
@@ -8316,6 +8709,22 @@ async function checkPopupMetadata(browser, settings, tab, popup) {
       && contourState.furiganaAlignment.contourTopSpread < 0.5 && contourState.furiganaAlignment.baseTextSpread < 0.5
       && contourState.furiganaAlignment.transitions === 2 && contourState.furiganaAlignment.transitionsCoverLines
       && JSON.stringify(await counts()) === JSON.stringify(beforeRequests));
+    // 食べる [2] in Overline: one line, over べ, ending in the downstep hook.
+    const furiganaStyle = style => expectMetadata(value => value.rubyStyles.length === 2
+      && value.rubyStyles.every(current => current === style));
+    await editSettingsControls(settings, { "opt-pitch-furigana-style": "overline" });
+    const overline = await furiganaStyle("overline");
+    const overlineState = (await popup.state())?.furiganaAlignment;
+    await editSettingsControls(settings, { "opt-pitch-furigana-style": "contour" });
+    const contourAgain = await furiganaStyle("contour");
+    const overlineKept = await popup.retainedControls();
+    evidence.push(overline.sameCards && contourAgain.sameCards && overline.metadata.ruby.includes("hachidori-fixture")
+      && overlineState?.pitchRubies === 2 && overlineState.transitions === 0
+      && overlineState.overlines === 1 && overlineState.hooks === 1 && overlineState.overlinesInTextColour
+      && overlineState.pitchCentring <= 1 && overlineState.contourGap <= 1
+      && overlineState.contourTopSpread < 0.5 && overlineState.baseTextSpread < 0.5
+      && overlineKept.sameForm && overlineKept.mounted && overlineKept.draft === "Keep the metadata draft"
+      && JSON.stringify(await counts()) === JSON.stringify(beforeRequests));
     if (process.env.HACHIDORI_METADATA_POPUP_SCREENSHOT) {
       await editSettingsControls(settings, { "opt-average-frequency": false });
       await expectMetadata(value => value.frequencyTagsUniform);
@@ -8348,7 +8757,7 @@ async function checkPopupMetadata(browser, settings, tab, popup) {
     await tab.keyboard.press("Escape");
   }
   check("Live metadata Settings preserve Note and dictionary content while independently controlling frequency pitch grammar and IPA",
-    evidence.length === 7 && evidence.every(Boolean), JSON.stringify(evidence));
+    evidence.length === 8 && evidence.every(Boolean), JSON.stringify(evidence));
 }
 
 async function checkHoverHitTesting(tab, popup) {
@@ -8635,7 +9044,27 @@ async function checkReaderActivation(settings, tab, popup) {
     await popup.waitForHidden();
     await pause(300);
     const onWord = await tab.evaluate(() => ({ pops: window.__scanButtonPops, state: history.state }));
-    // Over an editing field the same press is not cancelled, so Chrome still
+    // A word in a text field is looked up the same way (#425).
+    await tab.evaluate(() => {
+      const field = document.createElement("input");
+      field.id = "scan-button-word";
+      field.value = "食べたかった";
+      field.style.cssText = "font: 20px/1 serif; padding: 4px; border: 1px solid";
+      document.body.prepend(field);
+    });
+    const wordField = await (await tab.$("#scan-button-word")).boundingBox();
+    await tab.mouse.move(2, 2);
+    await tab.mouse.move(wordField.x + 15, wordField.y + 15);
+    await tab.mouse.down({ button: "back" });
+    const fieldActivated = await popup.waitForVisible();
+    await tab.mouse.up({ button: "back" });
+    await popup.waitForHidden();
+    await pause(300);
+    const onFieldWord = await tab.evaluate(() => {
+      document.getElementById("scan-button-word").remove();
+      return { pops: window.__scanButtonPops, state: history.state };
+    });
+    // Over an empty field the same press is not cancelled, so Chrome still
     // goes back, which also drops the entry pushed above.
     await tab.evaluate(() => {
       const field = document.createElement("input");
@@ -8653,10 +9082,13 @@ async function checkReaderActivation(settings, tab, popup) {
       offText = await tab.evaluate(() => ({ pops: window.__scanButtonPops, state: history.state }));
     }
     await tab.evaluate(() => document.getElementById("scan-button-field").remove());
-    check("a Back scan press on a word looks it up without going back, while one on a field still does",
+    check("a Back scan press on a word, in page text or a text field, looks it up without going back, while one on an empty field still does",
       backActivated !== null && onWord.pops === 0 && onWord.state?.scanButton === true
+        && fieldActivated?.plain.includes("食べる") === true && onFieldWord.pops === 0
+        && onFieldWord.state?.scanButton === true
         && offText.pops === 1 && offText.state?.scanButton !== true,
-      JSON.stringify({ backActivated: backActivated !== null, onWord, offText }));
+      JSON.stringify({ backActivated: backActivated !== null, onWord, fieldActivated: fieldActivated !== null,
+        onFieldWord, offText }));
   } finally {
     await tab.keyboard.up("k");
     for (const button of ["middle", "back"]) await tab.mouse.up({ button }).catch(() => {});
@@ -9104,25 +9536,65 @@ async function checkReaderSelection(browser, settings, tab, popup) {
       JSON.stringify({ hoverPopup: Boolean(hoverPopup), hoverDrag, hoverSelected: Boolean(hoverSelected),
         hoverEditorOpened, hoverEditor, clickPopup: Boolean(clickPopup), clickDismissed }));
     await dismiss();
+    // A text field's words are looked up through an imposter (#425) while its
+    // focus, selection, value and scroll stay the field's own; the input is
+    // scrolled to 食べたかった and the textarea down to its third line.
     await tab.$eval("#verb", (element) => {
-      element.innerHTML = '<input value="食べたかった"><textarea>食べたかった</textarea>'
+      const style = "font: 20px/1 serif; padding: 4px; border: 1px solid; width: 160px";
+      element.innerHTML = `<input style="${style}" value="あいうえおかきくけこ食べたかったさしすせそ">`
+        + `<textarea style="${style}; height: 40px">一行目\n二行目\n食べたかった</textarea>`
+        + `<input type="password" style="${style}" value="食べたかった">`
+        + `<input style="${style}; -webkit-text-security: disc" value="食べたかった">`
         + '<b contenteditable="true"><i>食べたかった</i></b><button class="vn-next" type="button">→</button>';
     });
-    const editingStart = (await lookups()).length;
-    const edits = [];
-    for (const selector of ["#verb input", "#verb textarea", "#verb [contenteditable]"]) {
+    const fieldState = (selector) => tab.$eval(selector, (element) => ({
+      focused: document.activeElement === element, start: element.selectionStart, end: element.selectionEnd,
+      value: element.value, scrollLeft: element.scrollLeft, scrollTop: element.scrollTop,
+    }));
+    const imposters = () => tab.evaluate(() => [...document.body.children]
+      .filter((child) => child.getAttribute("aria-hidden") === "true").length);
+    const fields = [];
+    for (const selector of ["#verb input", "#verb textarea"]) {
       await tab.focus(selector);
-      await moveTo(selector);
+      await tab.$eval(selector, (element) => {
+        element.setSelectionRange(1, 3);
+        element.scrollLeft = 200;
+        element.scrollTop = 20;
+      });
+      const before = await fieldState(selector);
+      const box = await (await tab.$(selector)).boundingBox();
+      // 食 is the first visible glyph, on the input's line and the textarea's second visible one.
+      const shown = await hoverForPopup(tab, popup, selector,
+        { point: { x: box.x + 15, y: box.y + (selector.endsWith("input") ? 15 : 35) } });
+      const during = await fieldState(selector);
+      const selectStart = (await lookups()).length;
+      await tab.$eval(selector, (element) => element.select());
+      await pause();
+      const selectQuiet = (await lookups()).length === selectStart;
       await tab.keyboard.press("End");
       await tab.keyboard.type("k");
-      edits.push(await tab.$eval(selector, (element) => (element.value ?? element.textContent).endsWith("k")));
-      await tab.$eval(selector, (element) => {
-        if ("select" in element) element.select();
-        else window.getSelection().selectAllChildren(element);
-      });
-      await pause();
+      const typed = (await fieldState(selector)).value.endsWith("k");
       await dismiss();
+      fields.push({ selector, looked: shown?.plain.includes("食べる") === true, before, during,
+        undisturbed: before.focused && JSON.stringify(before) === JSON.stringify(during),
+        selectQuiet, typed, removed: await imposters() === 0 });
     }
+    const editingStart = (await lookups()).length;
+    // A password and a masked field are never read.
+    for (const selector of ['#verb input[type="password"]', "#verb input[style*=security]"]) {
+      const box = await (await tab.$(selector)).boundingBox();
+      await tab.mouse.move(2, 2);
+      await tab.mouse.move(box.x + 15, box.y + 15);
+      await pause();
+    }
+    await tab.focus("#verb [contenteditable]");
+    await moveTo("#verb [contenteditable]");
+    await tab.keyboard.press("End");
+    await tab.keyboard.type("k");
+    const edits = [await tab.$eval("#verb [contenteditable]", (element) => element.textContent.endsWith("k"))];
+    await tab.$eval("#verb [contenteditable]", (element) => window.getSelection().selectAllChildren(element));
+    await pause();
+    await dismiss();
     // A webpage cannot use the startup arrow's class to scan a button's text.
     await tab.focus("#verb .vn-next");
     await moveTo("#verb .vn-next");
@@ -9179,41 +9651,81 @@ async function checkReaderSelection(browser, settings, tab, popup) {
     const hiddenPointerAccepted = await hoverForPopup(tab, popup, "#verb");
     await selectVerb('食べ<span style="display:none"><button>隠し</button></span>たかった');
     const hiddenControlAccepted = await popup.waitForVisible();
-    check("editable controls preserve normal editing and suppress pointer and selection lookups",
-      edits.every(Boolean) && editingQuiet && blockBoundary && hiddenControlAccepted?.plain.includes("食べる")
+    check("text fields look up their words without disturbing editing, while other editors suppress pointer and selection lookups",
+      fields.every((field) => field.looked && field.undisturbed && field.selectQuiet && field.typed && field.removed)
+        && edits.every(Boolean) && editingQuiet && blockBoundary && hiddenControlAccepted?.plain.includes("食べる")
         && hiddenPointerAccepted?.plain.includes("食べる"),
-      JSON.stringify({ edits, editingQuiet, blockBoundary, hiddenControlAccepted: hiddenControlAccepted !== null,
+      JSON.stringify({ fields, edits, editingQuiet, blockBoundary, hiddenControlAccepted: hiddenControlAccepted !== null,
         hiddenPointerAccepted: hiddenPointerAccepted !== null }));
 
     await dismiss();
     await editSettingsControls(settings, { "opt-activation-key": "" });
     await tab.$eval("#verb", (element) => {
-      element.innerHTML = '<input id="jisho-search" autofocus aria-label="Search Japanese">'
+      element.innerHTML = '<input id="jisho-search" autofocus aria-label="Search Japanese" value="食べました"'
+        + ' style="font: 20px/1 serif; padding: 4px; border: 1px solid">'
         + '<span>Text reading assistance: <a href="/search/example">昨日すき焼きを'
         + '<span id="jisho-example-word">食べました</span></a></span>';
     });
+    const search = await (await tab.$("#jisho-search")).boundingBox();
+    // The pointer rests on 食, the field's first glyph.
+    const toField = async (dx = 0) => {
+      await tab.mouse.move(2, 2);
+      await tab.mouse.move(search.x + 15 + dx, search.y + 15);
+      await pause();
+    };
+    const searchFocused = () => tab.$eval("#jisho-search", element => document.activeElement === element);
     await tab.focus("#jisho-search");
     await moveTo("#jisho-example-word");
     const hoveredLink = await popup.waitForVisible();
-    const hoverKeepsSearch = await tab.$eval("#jisho-search", element => document.activeElement === element);
+    const hoverKeepsSearch = await searchFocused();
+    await dismiss();
+    await tab.focus("#jisho-search");
+    await toField();
+    const hoveredField = await popup.waitForVisible();
+    const fieldHoverKeepsSearch = await searchFocused();
     await dismiss();
     await editSettingsControls(settings, { "opt-activation-key": "Shift", "opt-lookup-sticky": false });
     await tab.focus("#jisho-search");
     const beforeModifier = (await lookups()).length;
     await moveTo("#jisho-example-word");
     const modifierGated = (await lookups()).length === beforeModifier;
-    let activatedLink;
-    try {
-      await tab.keyboard.down("Shift");
-      activatedLink = await popup.waitForVisible();
-    } finally { await tab.keyboard.up("Shift"); }
-    const modifierKeepsSearch = await tab.$eval("#jisho-search", element => document.activeElement === element);
-    check("autofocused search fields allow hover and stationary Shift lookup of Japanese example links",
+    const holdShift = async (whileHeld) => {
+      try {
+        await tab.keyboard.down("Shift");
+        return await whileHeld();
+      } finally { await tab.keyboard.up("Shift"); }
+    };
+    const activatedLink = await holdShift(() => popup.waitForVisible());
+    const modifierKeepsSearch = await searchFocused();
+    await popup.waitForHidden();
+    await toField();
+    const activatedField = await holdShift(() => popup.waitForVisible());
+    const fieldText = (await lookups()).at(-1)?.text;
+    await popup.waitForHidden();
+    // After a click into the field and typing, the Shift of a capital letter
+    // does not cover it; moving with Shift held looks up again.
+    await tab.mouse.down();
+    await tab.mouse.up();
+    await tab.keyboard.press("End");
+    await tab.keyboard.type("x");
+    const beforeTyping = (await lookups()).length;
+    const typing = await holdShift(async () => {
+      await pause();
+      const quiet = (await lookups()).length === beforeTyping && !popup.visible(await popup.state());
+      await tab.mouse.move(search.x + 16, search.y + 15);
+      return { quiet, moved: await popup.waitForVisible() };
+    });
+    const typedText = (await lookups()).at(-1)?.text;
+    const typedKeepsSearch = await searchFocused();
+    check("autofocused search fields allow hover and stationary Shift lookup of their own words and Japanese example links",
       hoveredLink?.plain.includes("食べる") && activatedLink?.plain.includes("食べる")
-        && modifierGated && hoverKeepsSearch && modifierKeepsSearch
-        && (await lookups()).at(-1)?.text === "食べました",
+        && hoveredField?.plain.includes("食べる") && activatedField?.plain.includes("食べる") && fieldText === "食べました"
+        && typing.quiet && typing.moved?.plain.includes("食べる") && typedText === "食べましたx"
+        && modifierGated && hoverKeepsSearch && fieldHoverKeepsSearch && modifierKeepsSearch && typedKeepsSearch,
       JSON.stringify({ hoveredLink: Boolean(hoveredLink), activatedLink: Boolean(activatedLink),
-        modifierGated, hoverKeepsSearch, modifierKeepsSearch }));
+        hoveredField: Boolean(hoveredField), activatedField: Boolean(activatedField), fieldText,
+        typingQuiet: typing.quiet, typingMoved: Boolean(typing.moved), typedText,
+        modifierGated, hoverKeepsSearch, fieldHoverKeepsSearch, modifierKeepsSearch, typedKeepsSearch }));
 
     await dismiss();
     await editSettingsControls(settings, { "opt-activation-key": "" });
@@ -12921,14 +13433,20 @@ async function main() {
   await checkDefinitionBlur({ settings: page, tab, popup });
   await checkAnkiMatureDefinitionBlur({ browser, settings: page, tab, popup, watchedServiceWorkers });
   await checkFrameAndFullscreenPopups(tab, popup, pageUrl);
+  await checkPopupStaysInPlace(tab, popup);
+  await checkTabSwitchKeepsPopup(page, tab, popup, pageUrl);
   await checkDeinflectionDisclosure(page, tab, popup);
   await checkGlossaryCardsOpen(tab, popup);
   await checkExternalLinks(browser, page, tab, popup);
+  await checkCustomLinkSentence(browser, page, tab, popup);
+  await checkKanjiReadingFurigana(page, tab, popup);
   await checkNestedLinks(page, tab, popup, browser);
   await checkDictionaryTabsColumns(page, tab, popup, browser);
-  await checkKanjiGroup(page, tab, popup);
+  await checkKanjiGroup(page, tab, popup, browser);
   await checkCompactSummaryLayout(browser);
   check("Compact summaries wrap without clipping and retain narrow toolbar access", true);
+  await checkCompactGlossaries(browser);
+  check(COMPACT_GLOSSARIES_CHECK, true);
   await checkActionRow(browser);
   check(ACTION_ROW_CHECK, true);
   await checkCompactSummaries(page, tab, popup, browser);
@@ -14480,6 +14998,15 @@ async function main() {
       && (previous === null || status.generation < previous) ? status : false;
   }, { timeout: 30_000, polling: 250 }, lowMemory, generation).then((handle) => handle.jsonValue());
   await showSettingsSection(page, "advanced");
+  // The extension total arrives on its own once the browser has measured the
+  // offscreen document and its workers; the engine heap is counted once, not
+  // once per engine thread as the raw measurement reports it.
+  const extensionTotal = await page.waitForFunction(async () => {
+    const text = document.getElementById("memory-extension-total").textContent;
+    if (!/^Extension total: [\d.]+ (KB|MB|GB) \([\d.]+ (KB|MB|GB) outside the engine heap\)$/u.test(text)) return false;
+    const reply = await chrome.runtime.sendMessage({ target: "hoshidicts-offscreen", type: "hd_memory_total", requestId: "e2e-memory-total" });
+    return { text, reply };
+  }, { timeout: 90_000, polling: 250 }).then((handle) => handle.jsonValue()).catch(() => null);
   const lowMemoryBefore = await page.evaluate(async () => {
     const status = await chrome.runtime.sendMessage({ target: "hoshidicts-offscreen", type: "hd_status", requestId: "e2e-lm-status" });
     const memory = await chrome.runtime.sendMessage({ target: "hoshidicts-offscreen", type: "hd_memory", requestId: "e2e-lm-memory" });
@@ -14501,11 +15028,15 @@ async function main() {
       && lowMemoryBefore.memory.ok === true && Number.isInteger(lowMemoryBefore.memory.heapBytes)
       && lowMemoryBefore.memory.dictionaries.length === 0
       && /^Engine memory: [\d.]+ (KB|MB|GB) across 0 dictionaries$/u.test(lowMemoryBefore.total)
+      && extensionTotal?.reply.ok === true && Number.isFinite(extensionTotal.reply.bytes)
+      && extensionTotal.reply.heapBytes === lowMemoryBefore.memory.heapBytes
+      && extensionTotal.reply.bytes >= extensionTotal.reply.heapBytes
+      && extensionTotal.reply.bytes - extensionTotal.reply.heapBytes < extensionTotal.reply.heapBytes
       && lowMemoryBefore.status.pagedDictionaries === false
       && lowMemoryOptions?.lowMemoryMode === true
       && lowMemoryStatus?.threaded === true && lowMemoryStatus.storageBackend === "opfs"
       && lowMemoryStatus.pagedDictionaries === true,
-    JSON.stringify({ before: lowMemoryBefore, after: lowMemoryStatus, lowMemoryMode: lowMemoryOptions?.lowMemoryMode }),
+    JSON.stringify({ before: lowMemoryBefore, extensionTotal, after: lowMemoryStatus, lowMemoryMode: lowMemoryOptions?.lowMemoryMode }),
   );
 
   await showSettingsSection(page, "add-dictionaries");

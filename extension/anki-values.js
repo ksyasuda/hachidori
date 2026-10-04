@@ -6,7 +6,9 @@ import { ankiTemplateMarkerNames, renderAnkiTemplate, escapeAnkiHtml as escape }
 // Browser-native port of GSM PR #549's hoshidicts_mining.py marker values.
 // DOM glossary rendering and resource preparation remain separate; only values
 // actually used by the selected templates are built here.
-const uniqueTokens = values => [...new Set(values.flatMap(value => value.split(/[\s,]+/u).filter(Boolean)))];
+// Tags split on U+0020 as in HDGlossary.parseTagList, so a U+00A0 inside a
+// Jitendex tag name ("rarely used form") stays one tag.
+const uniqueTokens = values => [...new Set(values.flatMap(value => value.split(/[ ,]+/u).filter(Boolean)))];
 // Keep this sanitizer unchanged: frequency and existing title-based glossary
 // marker mappings depend on its exact output.
 const dictionaryMarker = name => name.replace(/[_\s]/gu, "-").replace(/[^\p{L}\p{N}-]/gu, "")
@@ -30,7 +32,7 @@ const alias = (request, dictionary) => Object.hasOwn(request.dictionaryAliases, 
   ? request.dictionaryAliases[dictionary] : dictionary;
 
 function expressionFurigana(term, plain) {
-  return globalThis.HDGlossary.segmentFurigana(term.expression, term.reading).map(({ text, reading }, index) => {
+  return globalThis.HDGlossary.termFurigana(term).map(({ text, reading }, index) => {
     if (!reading) return escape(text);
     const prefix = index ? " " : "";
     return plain ? `${prefix}${escape(text)}[${escape(reading)}]`
@@ -90,19 +92,10 @@ function pitchHtml(term) {
 }
 
 function pitchCategories(term) {
-  const classes = new Set(uniqueTokens([term.rules]));
-  const inflected = ["v1", "v5", "vk", "vs", "vz", "adj-i"].some(rule => classes.has(rule))
-    && !(classes.has("vs") && classes.has("n"));
-  const morae = globalThis.HDGlossary.splitPitchAccentMorae(term.reading || term.expression).length;
-  // Yomitan's getPitchCategory: a pattern's category is its first downstep.
-  const categories = term.pitches.flatMap(group => group.pitches.map(pitch => {
-    const position = Number(globalThis.HDGlossary.pitchAccentDownstep(pitch).split(",")[0]);
-    if (position === 0) return "heiban";
-    if (Number.isNaN(position) || position < 0) return null;
-    if (inflected) return "kifuku";
-    if (position === 1) return "atamadaka";
-    return position >= morae ? "odaka" : "nakadaka";
-  }));
+  const reading = term.reading || term.expression;
+  const wordClasses = uniqueTokens([term.rules]);
+  const categories = term.pitches.flatMap(group => group.pitches.map(pitch =>
+    globalThis.HDGlossary.pitchAccentCategory(reading, pitch, wordClasses)));
   return [...new Set(categories.filter(Boolean))].join(",");
 }
 
@@ -210,6 +203,10 @@ export async function buildAnkiFields(request, templates, { definition, audio = 
     request.sentence.slice(request.matchOffset + request.matched.length)].map(escape);
   const sentence = () => { const [prefix, body, suffix] = parts(); return `${prefix}<b>${body}</b>${suffix}`; };
   const firstDictionary = () => term.glossaries[0]?.dictionary || "";
+  // The relay API and older linked browsers send no address. Like Yomitan's
+  // anki-note-data-creator.js, a missing or non-string one is blank.
+  const pageUrl = () => typeof request.pageUrl === "string" ? escape(request.pageUrl) : "";
+  const pageLink = () => { const address = pageUrl(); return address && `<a href="${address}">${address}</a>`; };
   const table = {
     expression: () => escape(term.expression), reading: () => escape(term.reading),
     furigana: () => expressionFurigana(term, false), "furigana-plain": () => expressionFurigana(term, true),
@@ -223,7 +220,8 @@ export async function buildAnkiFields(request, templates, { definition, audio = 
     conjugation: () => request.trace.map(step => escape(step.name)).join(" « ") || escape(term.rules),
     "part-of-speech": () => uniqueTokens([term.rules, ...term.glossaries.map(glossary => glossary.termTags)])
       .map(tag => escape(Object.hasOwn(PARTS_OF_SPEECH, tag) ? PARTS_OF_SPEECH[tag] : tag)).join(", ") || "Unknown",
-    tags: () => uniqueTokens(term.glossaries.flatMap(glossary => [glossary.definitionTags, glossary.termTags]))
+    tags: () => uniqueTokens(term.glossaries.flatMap(glossary =>
+      [...globalThis.HDGlossary.definitionTagList(glossary).map(tag => tag.name), glossary.termTags]))
       .map(tag => `<span class="tag" data-details="${escape(tag)}">${escape(tag)}</span>`).join(", "),
     "phonetic-transcriptions": () => {
       const items = term.pitches.flatMap(group => group.transcriptions).filter(Boolean).map(value =>
@@ -231,7 +229,7 @@ export async function buildAnkiFields(request, templates, { definition, audio = 
       return items.length ? `<ul>${items.join("")}</ul>` : "";
     },
     "popup-selection-text": () => escape(request.popupSelectionText), "search-query": () => escape(request.searchQuery),
-    "document-title": () => escape(request.documentTitle), sentence,
+    "document-title": () => escape(request.documentTitle), url: pageLink, "url-plain": pageUrl, sentence,
     // GSM falls back to highlighted text when its optional native tokenizer is
     // unavailable. There is no MeCab/native-helper dependency in the extension.
     "sentence-furigana": sentence, "sentence-furigana-plain": sentence,

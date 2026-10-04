@@ -98,7 +98,17 @@ sentence of a three-sentence text node and a collapsed line wrap through the
 real content script, and checks that the engine reply refines the sentence
 around the whole matched word. The Chrome suite mines a texthooker line through
 the real popup and the fake AnkiConnect and requires that one line as the note's
-sentence.
+sentence, with the page's full address, query and fragment included, as its
+`{url-plain}`.
+
+A highlighted or dragged selection reads its sentence as a hover over its first
+character does (issue #430). The extension smoke suite selects inside an inline
+element and a ruby base, one overlay glyph box, and across two overlay blocks
+with page script and hidden text beside them. The Chrome suite clicks a custom
+link's `%s` after a hover and after selections in an inline element and a ruby
+base, and mines a selection with hidden text inside it.
+`chrome-overlay.mjs` clicks the link with the mouse after a hover, a drag over
+one or several glyph boxes, and a drag on into the next OCR block.
 
 `node --test test/settings-search.test.mjs test/toolbar.test.mjs` checks global
 settings search, keyboard navigation, disclosure focus and draft preservation,
@@ -116,7 +126,8 @@ cancels on Escape.
 
 `node --test test/frequency-presentation.test.mjs` checks full Yomitan-style
 frequency values by default and opt-in abbreviated numbers, the primary result's frequency tags sharing the later
-entries' tag structure, visible kana markers, tabs-only lower chrome, concise typed harmonic averages that keep each
+entries' tag structure, visible kana markers, values in each dictionary's own order with the first one averaged, as in
+Yomitan, tabs-only lower chrome, concise typed harmonic averages that keep each
 dictionary's tag hidden in the DOM outside the pitch-badge budget through live toggles and alias renames, preserved
 explicit display choices, source details, and live grammar/name/abbreviation controls without
 replacing definitions or Note drafts. It uses the same external jsdom dependency.
@@ -126,9 +137,24 @@ in the real popup view: one `li.pronunciation-group` per pitch dictionary with
 its `pronunciation-dictionary` tag, each accent's mora levels, `[n]` notation and
 `reading [n]` tooltip and accessibility label; the engine's `{position: 0,
 pattern: "LHL"}` reading as `[2]` in the badge and the furigana contour; the
+Overline furigana pitch style drawing the headword with the badges' Yomitan
+text, with the list's levels, a hook at a segment-boundary drop and a live
+switch back to the contour; the
 text, position and graph switches updating an open popup without replacing
 definitions; the nasal and devoice marks; and alias renames and the dictionary
-name switch applied live.
+name switch applied live. It also pins each headword's and badge's
+`data-pitch-category` (jp-mining-note's 平板, 頭高, 中高, 尾高 and 起伏 examples,
+the `v5` kifuku rule and an `LHL` pattern), the headword following the pitch
+accent dictionary while each badge keeps its own group, and the group staying
+set and live with the furigana contour off.
+
+`node --test test/pitch-accent-colors.test.mjs` parses `reader.css` and checks
+the five **Show pitch accent colours** groups against every registered palette:
+3:1 against base-100 and base-200, and against the popup body and the header at
+the default 85% opacity over a white or a black page, plus an RGB distance of at
+least 45 between the groups in each colour scheme and the 2 px focus outline on
+a coloured kanji. `oklch()` palette values are converted with CSS Color 4's
+OKLab matrices. It needs no external dependency.
 
 `node --test test/yomitan-parity.test.mjs` checks the renderer against
 Yomitan's own output at yomidevs/yomitan@67db60d, written inline with the
@@ -154,6 +180,13 @@ suite also verifies that selected missing
 words refresh into their personal definition after the save, including when no
 dictionaries were installed. It uses the same external jsdom dependency.
 
+`node --test test/settings-labels.test.mjs` parses `settings.html` and fails
+when two controls share a visible label, when a keybind-toggleable option lacks
+a Toggle option label, or when that label's leading word (Show, Hide, Blur…)
+differs from the Settings checkbox it flips, so an inverted option cannot read
+with opposite polarity. It also rejects a sidebar item without a link. It uses
+the same external jsdom dependency.
+
 `node --test test/keybind-settings.test.mjs` checks Yomitan's default keybinds for
 supported actions, keybind normalisation and strict option patches, key
 combination capture, action/argument/scope editing, Clear, Reset, Remove, Add and
@@ -178,7 +211,9 @@ the pure recycle scheduler (no restart while busy, the two-second idle window,
 one restart for back-to-back mutations, a restart on option mismatch in either
 direction), the Settings → Advanced → Memory readout and each Library row's
 *In memory* line from a stubbed `hd_memory` reply (an em dash when the engine
-is busy or unreachable, a refresh on a new engine generation while Advanced is
+is busy or unreachable, the *Extension total* line from a stubbed
+`hd_memory_total` reply, a dash where it cannot be measured and never holding
+the engine line, a refresh on a new engine generation while Advanced is
 shown and when a row's Details opens, the switch saving
 through the ordinary options queue, and the switch hidden with
 the single-thread engine, and a paged row's *(entries read from disk)*), and the
@@ -196,7 +231,8 @@ runs a worker configured as the low-memory one (every add paged, identical
 lookups, smaller rows, a filled page cache) and, with `hdw_add_dict` refusing a
 package the way a full heap does, checks that the package loads paged, and that
 one refused paged too is reported in `failedDictionaries` while the others load.
-`chrome-e2e.mjs` turns the mode on in a real Chrome, watches the worker recycle
+`chrome-e2e.mjs` first requires the real extension total, with the engine
+heap counted once, then turns the mode on in a real Chrome, watches the worker recycle
 (the generation restarts from zero), imports in the strict two-thread pool,
 and checks that the heap dropped, lookups still hit, the package's row counts
 only its index files as sized in OPFS, the page cache filled within its budget
@@ -350,7 +386,7 @@ read it.
 | `term_bank_1.json` | plain string glossary; a `structured-content` glossary with nested tags, a `ul`, a `table` and an `img`; an inflected-verb target (`食べる`, `rules: "v1"`); a kana-only entry with an empty reading; `definition_tags` and `term_tags` on every row; two rows sharing one (expression, reading) so the term has two glossaries |
 | `term_meta_bank_1.json` | `freq` in both accepted shapes (nested `{"frequency":{…}}` and flat `{"value":…}`), a `pitch` entry exercising int position, string position (pattern), bare-int `nasal` and array `devoice`, and an `ipa` entry |
 | `kanji_bank_1.json` | `食` with onyomi, kunyomi, tags, three definitions and three stats |
-| `tag_bank_1.json` | seven tags across four categories |
+| `tag_bank_1.json` | seven tags across four categories; they end up in the imported `index.json`'s `tags`, which is what `hdw_tags` returns |
 | `styles.css` | ends up in the imported `index.json`'s `styles`, which is what `hdw_styles` returns |
 | `media/kanji.png` | a real 16×16 PNG, the target of the `img` path above |
 | `media/` | a bare directory record; `get_files()` has to skip it or `mediaCount` is wrong |
@@ -490,10 +526,17 @@ What it proves, in order:
    half-width kana, decomposed dakuten, and supported kanji variants retaining
    the raw matched input while counting preprocessing; and two misses. Glossaries are asserted
    byte-for-byte against the raw JSON in the term bank, which is what pins down
-   "the renderer parses it, nobody else".
+   "the renderer parses it, nobody else". Frequencies are checked in both object
+   shapes the fixture carries and as text: a frequency-only archive storing
+   `"324/37459"` bare and `"five (5)"` under a reading reports the text as
+   written with its first number as the value, as Yomitan does, and applies the
+   reading-scoped row to that reading only.
 5. **`hdw_kanji`** (including the `{"character":"","entries":[]}` miss sentinel and
-   the binding's sort of `stats` by name), **`hdw_styles`**, and **`hdw_media`**
-   (byte length, PNG signature, and the full bytes equal to the fixture file).
+   the binding's sort of `stats` by name), **`hdw_styles`**, **`hdw_tags`** (every
+   tag-bank row in bank order, again after a reset and reload and after a
+   re-import; none for a directory the previous engine imported), and
+   **`hdw_media`** (byte length, PNG signature, and the full bytes equal to the
+   fixture file).
 6. **Error paths.** An uncaught C++ exception aborts the wasm instance and takes
    the extension's offscreen document with it, so these matter as much as the
    happy path: importing a text file and an index-less zip and a missing path;
@@ -556,11 +599,24 @@ What it proves, in order:
     alias, duplicate headwords, a StyleSheet substitution, and an MDD holding a
     PNG, CSS files and a traversal key; committed here because the smoke suites
     run without the submodule) go through `hdw_import` from a MEMFS directory: the title comes from the
-    MDX header, eight term rows and four media entries are reported, the
+    MDX header, eight term rows and three media entries are reported (a
+    disabled `sound://` link imports nothing), the report counts one
+    unresolved alias and one missing resource (the traversal key) and the same
+    `.mdx` without its `.mdd` two missing resources, the
     package loads and answers `食べる`, the alias is a headword and the missing
     alias is dropped, the MDD CSS is the dictionary stylesheet, the PNG comes
     back through `hdw_media` while the traversal key does not, and the `.mdd`
-    on its own is refused without leaving staging debris.
+    on its own is refused without leaving staging debris. Yomitan archives
+    report all four MDX loss counts as zero. Four more engine
+    fixtures cover issue #437. `key_rules.mdx` has no `KeyCaseSensitive` or
+    `StripKey` attribute, so MDict's defaults apply: `ティーシャツ →
+    @@@LINK=tシャツ`, `ワイファイ → @@@LINK=WiFi` and the two-hop `AliasOne`
+    reach their targets in seven rows. `key_rules_exact.mdx` declares exact keys
+    and keeps the first two unresolved in five rows. `css_charsets.mdx` and
+    `.mdd` import with their Shift_JIS (with and without `@charset`) and
+    windows-1252 stylesheets decoded, without `@charset` or U+FFFD.
+    `legacy_font.mdx` turns `<font size>` into `medium` and `x-large`, and its
+    inline `font-size` wins over `size="5"`.
 
 Two behaviours worth knowing, both asserted so they cannot drift silently:
 
@@ -631,6 +687,14 @@ What it proves, in order:
    stationary keydown, physical-code release and repeats, transfer/Note ownership,
    interaction-only resource retention, focused-control pointer protection, and
    cancellation of the first pending popup on departure/click/Escape/blur/scroll.
+   Leaving the tab or the window keeps a rendered popup and its Note draft in
+   every lookup mode, with no hide timer, until Escape closes the Note and then
+   the popup; it also keeps a selection's popup, a sticky child and a kanji
+   view whose request is in flight. A blur that moves focus into one of the
+   page's frames still closes the popup (#432).
+   In overlay mode a window blur or window-exit keeps a rendered popup in every
+   lookup mode, a selection drag and a held scan button without publishing
+   `hachidori-popup-hidden`, while a window-exit still cancels a pending scan.
    Scan mouse buttons are held through `MouseEvent.buttons`: a middle or Back
    press claims the host window before any bubble listener, scans at once and
    while moving, follows each mode on release, and ends at a move after a lost
@@ -693,6 +757,7 @@ What it proves, in order:
    across newer options and capability changes. Alias writes retain frequency
    mode metadata.
    Metadata controls cover strict options, focused preferred-pitch drafts,
+   the furigana pitch style following its switch and focus,
    stable-ID source rename/removal, numeric unit-separated harmonic averages,
    independent IPA and grammar, metadata-only storage updates, and focused ruby
    deferral without replacing Note, cards, definitions or unchanged metadata.
@@ -726,9 +791,13 @@ What it proves, in order:
    retained outcome and revoked object URL per file, a cleared picker, and one
    final dictionary-state/status refresh. An `.mdx` with its `.mdd` travels as
    `hd_import` with a `resources` list: the package carries the MDX title, its
-   MDD media and stylesheet answer `hd_media` and `hd_styles`, the `/.hdw-mdx`
+   MDD media and stylesheet answer `hd_media` and `hd_styles`, the reply
+   carries the MDX loss counts the package does not store, the `/.hdw-mdx`
    staging directory is gone afterwards, and a ZIP import carrying resources
-   is refused before staging. The recommendation stage separately
+   is refused before staging. In Settings, an MDX import whose reply has loss
+   counts keeps its green `Imported …` line, lists one note per count beneath
+   it, and is counted `with notes` in the final status line; a ZIP row lists
+   none. The recommendation stage separately
    pins the five catalogue entries and publisher links, download/import phases,
    atomic source validation, immediate starter-card hiding, failure continuation,
    and a retry containing only missing entries.
@@ -847,6 +916,9 @@ What it proves, in order:
    admission. Invalidation and teardown settle every job before more dispatch.
    LRU checks accept 64 entries and exactly 16 MiB of decoded media, promote hits,
    evict on one extra entry/byte, and reset byte accounting on invalidation.
+   The Image hover preview modes are pinned: `large` opens no preview for an
+   `em`-sized or 16px image but does for a 64px one, `off` opens none on hover
+   or focus, and `all` previews every image.
    Preview checks cover lazy closed-shadow ownership, exact source reuse without
    another media request, viewport corners, unchanged inline dimensions,
    combined hover/focus retention and failure cleanup, tab/clear/destroy, and
@@ -1173,7 +1245,14 @@ and clicked-kanji navigation, and hovers real
 text with a real mouse on a page served over `http://127.0.0.1` (content scripts do not run on
 `chrome-extension://`, `about:blank`, or `file://` without a per-extension
 opt-in). A wrapped cross-inline match proves the popup sits outside the complete
-matched range rather than positioning against only the hovered glyph. The test
+matched range rather than positioning against only the hovered glyph. A
+fixed-height scrolling chat feed proves the popup keeps its exact rectangle
+while the feed and then the page scroll the word out of view, and after the
+comment is removed, until Escape closes it (#402). In the default Shift mode,
+switching to another tab and back keeps the popup and its Note draft with the
+same selection and keyboard focus, so typing continues, until Escape closes the
+Note and then the popup; a click into a same-origin or cross-site (`localhost`)
+iframe still closes it (#432). The test
 then relaunches against the same profile and hovers again with no
 re-import — which is the only test that proves direct OPFS persistence through a
 full Chrome restart.
@@ -1442,8 +1521,8 @@ an ancestor pane dismisses focused, hovered and still-pending descendants at
 once while an open child draft stays until Escape closes its form, and a click
 on the root's link keeps its same-query child without another lookup.
 With Hide popup on cursor exit on in sticky mode, a mouse return from the child
-to its parent closes the child within the option's 300 ms delay while the Hide
-delay is raised to 5,000 ms.
+to its parent closes the child within the option's 300 ms delay while the grace
+period to reach the popup is raised to 5,000 ms.
 Reimports and held service-worker replies also prove top/bottom Note forms stay
 mounted, focused and reachable, and a still-focused tab survives same-view
 refresh. `HACHIDORI_NESTED_SCREENSHOT` captures the three-pane chain;
@@ -1481,13 +1560,22 @@ select that group as the clicked-kanji dictionary through the real Design
 chooser, click 食 in the verb popup and require All plus one tab per member in
 group order, the two native entries merged into one entry and the term member's
 own entry with its glossary, then remove the group and require the option to
-reset to Automatic in storage and in the open chooser.
+reset to Automatic in storage and in the open chooser. A third configures a
+Kiku note type behind a mocked AnkiConnect, clicks 食 again and requires every
+mining control to settle to ready with no feedback banner or offscreen
+exception, and Add to write `Expression` 食 with an empty reading and pitch
+fields and the native card as `Glossary` and `MainDefinition`.
 `HACHIDORI_KANJI_GROUP_SCREENSHOT` and `HACHIDORI_KANJI_GROUP_SETTINGS_SCREENSHOT`
 capture the group popup and the chooser. The extension smoke suite pins strict
 group-reference CAS and its reset, the parallel fan-out with out-of-order
-replies, the scoped tabs and structured native cards in the real renderer, the
+replies, the scoped tabs and structured native cards in the real renderer, the complete
+term-result shape of a merged native card and the Anki fields it builds, the
 Design preview's group sample, and `node --test test/reader-options.test.mjs
 test/kanji-click-settings.test.mjs` covers the resolver and the chooser.
+`node --test test/kanji-group-mining.test.mjs` pins the renderer's
+`kanjiEntryResult` to the engine's `LookupResult` keys and builds the Kiku,
+Lapis and Senren presets, `{tags}`, `{part-of-speech}`, `{conjugation}` and the
+rendered `{glossary}` from it.
 
 `compactSummaryFixture()` adds two temporary suppliers through the real WASM
 importer without changing generated fixture counts. Its single predeclared
@@ -1508,7 +1596,11 @@ The real browser checks horizontal and vertical glyph hits, padded link tiles,
 and a transparent element covering text. `HACHIDORI_HOVER_SCREENSHOTS=/path/to/dir`
 saves each state with a red marker at the actual pointer coordinates. The
 extension smoke suite additionally checks the two-pixel tolerance and complete
-supplementary Unicode characters when the caret lands after the glyph.
+supplementary Unicode characters when the caret lands after the glyph. Its text
+field case scans an untyped input, a search input and a textarea line through
+their imposter, shares one imposter and pending lookup across moves, rebuilds it
+for a changed value, refuses padding, password, masked and empty fields, keeps
+page scans out of it and removes it when the popup closes or the pointer leaves.
 
 The real browser also changes hover enablement and activation controls from
 Settings while the reading tab remains open. It proves close/re-enable without
@@ -1536,15 +1628,21 @@ observes real worker lookup relays while toggling Japanese-only scanning in the
 open tab. Set `HACHIDORI_SELECTION_BLOCKED_SCREENSHOT`,
 `HACHIDORI_SELECTION_ALLOWED_SCREENSHOT` and
 `HACHIDORI_SELECTION_EVIDENCE` to capture the two visible states and their
-request/highlight summary. Native input, textarea and contenteditable typing
-stays intact; direct and spanning selections exclude visible editing controls,
+request/highlight summary. Text inputs and textareas, one scrolled sideways and
+one scrolled down, look up 食べる from their own value (#425) while their focus,
+selection, value and scroll stay unchanged, typing still appends, selecting in
+them starts no lookup and no imposter remains once the popup closes; password
+and `-webkit-text-security` fields stay unread. Contenteditable typing stays
+intact; direct and spanning selections exclude visible editing controls,
 including boxless `display:contents` editors, without treating a hidden control
 as visible.
 Nested open-shadow editors suppress printable activation typing and cancel
 pending scans when focused. A local Japanese example link beside an autofocused
-search field supports both hover and stationary Shift lookup while preserving
-the field's focus. Visibility-restored descendants are treated as visible even
-inside a hidden editor.
+search field, and the field's own value, support both hover and stationary Shift
+lookup while preserving the field's focus; after a click into the field and
+typing, a stationary Shift scans nothing until the pointer moves.
+Visibility-restored descendants are treated as visible even inside a hidden
+editor.
 The extension suite separately holds replies through selection cancellation,
 retry and storage invalidation; checks exact Note/Back/internal-link descriptors;
 and pins same-candidate pending lookup deduplication.
@@ -1732,6 +1830,24 @@ floating-point edge cases. The one-pixel-wide tall case previously reached
 roughly 33 million pixels high through raw CSS `aspect-ratio`; it must now use
 the existing 10,000% sizer limit (100 pixels). The standard fixture counts and
 archive admission rules remain unchanged.
+
+`gaijiSizingFixture()` adds Meikyo-style gaiji and two images that declare one
+side of a 32×16 SVG, as 日本国語大辞典's accent labels declare only
+`height: 1.2em`. Chrome checks each box against the decoded ratio (2.4em by
+1.2em, 24px by 12px) and that the dictionary's `img { margin; padding }` rule
+leaves every image layer exactly on its container.
+
+`chrome-glossary-layout.mjs` renders a three-gloss plain row with tags and a
+Jitendex-shaped structured row, styled by Jitendex's own list rules, through
+`createPopupView` with the production stylesheet in a standards-mode shadow
+root. With Compact glossaries on, the tags and plain glosses share one line
+box; each later gloss carries the ` | ` bar; Jitendex's glossary lists compute
+`display: inline` and `padding-left: 0px` while its sense groups, example box
+and ★ tag row keep their lines; structured content starts at the same offset
+as in Default; a blurred definition still renders blurred; and Puppeteer's
+accessibility snapshot reads list items without a bar. The bar must reach 3:1
+against the card in every palette, and switching back restores the exact card
+heights.
 
 - The popup's **structure**, not just its flattened text. `popupReader()` reports
   `tags`, `lists`, `tables` and `bold` (with the computed `font-weight`, since the

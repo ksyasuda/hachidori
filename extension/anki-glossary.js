@@ -131,7 +131,10 @@ export function createAnkiDefinitionRenderer(document, request, filenameFor, { c
 
   function entry(glossary, brief, noDictionary, pending) {
     const wrapper = inert.createElement("div");
-    const labels = brief ? [] : [glossary.definitionTags, glossary.termTags,
+    // Yomitan's glossary-single: one comma-separated label per tag, the
+    // definition tags in their tag-bank order.
+    const { definitionTagList, parseTagList } = globalThis.HDGlossary;
+    const labels = brief ? [] : [...definitionTagList(glossary).map(tag => tag.name), ...parseTagList(glossary.termTags),
       noDictionary ? "" : dictionaryAlias(glossary.dictionary)].filter(Boolean);
     if (labels.length) {
       const meta = inert.createElement("i");
@@ -190,7 +193,9 @@ export function createAnkiDefinitionRenderer(document, request, filenameFor, { c
     }
     root.append(list);
     appendStyles(root, selected);
-    if (!brief) appendDetails(root);
+    // Yomitan's {glossary} has no footer; {part-of-speech} and {conjugation}
+    // carry this information, so compact fields leave it out (#399).
+    if (!brief && !compact) appendDetails(root);
     await Promise.all(pending);
     if (compact) return compactAnkiGlossary(document, root);
     applyClassStyles(list);

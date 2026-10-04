@@ -5,6 +5,8 @@ Enable **Advanced → Experimental features → Theme Store**, then open **Desig
 Scroll the cards horizontally and choose **Use**. Selection saves immediately
 and updates open popups and the preview. Disabling the experiment hides the
 Store and keeps the selected popup. Existing palettes continue to use Default.
+Design shows only the settings the selected theme uses (see
+[Design settings](#design-settings)); the others keep their values for Default.
 
 Default is the existing rich popup. Nazeka is a separate text renderer adapted
 from [wareya/nazeka](https://github.com/wareya/nazeka). It constructs expression,
@@ -60,10 +62,22 @@ spellings, which Hachidori returns as separate results, and has no images, Note
 editor, custom buttons or lookup counts. Its kanji view lists meanings, then
 JL's `On:`, `Kun:` and `Statistics:` lines.
 
+## Bee's Theme
+
+Bee's Theme puts Girlypop blush, magenta and violet colours on JL's typography, per-dictionary headers, inline
+audio/Anki controls and pitch marker. It adds tabs for configured dictionary
+groups with matching results, a pencil editor and custom actions beside each
+block, and shows each dictionary's formatted definition (markup and media) in
+place of JL's text and tag brackets. Audio, Anki and pencil sit together as one
+set of icon buttons, the kanji view's Back is top left, and hovering a glossary
+image shows Default's enlarged preview.
+With no matching groups, all results appear without a tab row. Extra custom
+actions go into More actions after the first two. See [details and measurements](bee.md).
+
 ## Version 2 view contract
 
 `theme-host.js` chooses a bundled renderer before content construction. Default
-adapts `HDPopup.createPopupView`; Nazeka, Plain and JL export `{schema: 2, slug, contentMode,
+adapts `HDPopup.createPopupView`; Nazeka, Plain, JL and Bee export `{schema: 2, slug, contentMode,
 createView(options)}`. Executable modules are maintainer-reviewed release assets;
 no remote theme code is fetched for execution. This is not a JavaScript sandbox.
 Sources and proposals live in [hachidori-themes](https://github.com/bee-san/hachidori-themes).
@@ -76,6 +90,11 @@ and returns `renderResults`, `renderKanji`, `renderNotice`, `renderLookupFailure
 `updateDictionaryPresentation`, and `scrollElement`. Rich-only methods such as
 masonry, image preview, toolbar/custom buttons, note closing and deferred
 presentation updates are optional.
+
+`createDictionaryTabs` supplies the existing dictionary/group descriptors.
+`createLookupActions` shares the personal dictionary editor and custom link/Anki
+buttons with Default; the renderer supplies prefill, form placement and optional
+custom-button layout. Core still binds mining to the returned actions container.
 
 - Render calls receive structured lookup results and the current request context.
   Never scrape Default DOM. Core owns cancellation, navigation and action engines.
@@ -96,9 +115,54 @@ presentation updates are optional.
 - `destroy` releases listeners/observers and owned DOM; core closes audio menus
   and retires mining state. Removed node listeners become collectible.
 
+### Design settings
+
+Each entry in `extension/vendor/themes/index.json` declares, in `designSettings`,
+which Design settings its renderer implements: `"all"` or a list of option keys.
+The keys are the renderer-owned controls, tagged `data-design-setting` in
+`settings.html`: `popupOpacityPercent`, `popupToolbarPosition`, `popupColumns`,
+`glossaryLayoutMode`, `popupImageSource`, `imageHoverPreview`, `kanjiClickDictionary`,
+`showFrequencyDictionaryNames`, `compactFrequencyNumbers`, `averageFrequency`,
+`showPitchAccentFurigana`, `pitchAccentFuriganaDictionary`, `pitchAccentFuriganaStyle`,
+`showPitchAccentColors`, `showPitchAccentBadge`, `showPitchAccentDictionaryNames`,
+`showPitchAccentText`, `showPitchAccentPosition`, `showPitchAccentGraph`,
+`hidePopupGrammarTags`, `showCompactDefinitionSummary`,
+`compactDefinitionSummaryCount`, `compactDefinitionSummaryDictionary` and
+`customButtons`. Core applies Theme, Width, Height, Scale, Highlight the word on
+the page and Custom CSS/JavaScript to every renderer, so those always show and
+are never declared.
+
+| Theme | Design settings besides the core ones |
+| --- | --- |
+| Default | All (`"all"`) |
+| Nazeka | Clicked-kanji dictionary |
+| Plain | None |
+| JL | Background opacity, Clicked-kanji dictionary, Show pitch in furigana, Pitch accent dictionary |
+| Bee's Theme | JL's four, plus Image source, Image hover preview and Custom buttons |
+
+Settings shows the core controls and the selected theme's declared ones, and
+hides a group whose controls are all hidden. Search skips hidden controls.
+Hidden settings keep their saved values and apply again on Default; choosing a
+theme writes only `popupTheme`. The filter follows the theme in use, even with
+the Theme Store switched off. An entry without `designSettings`, an unknown
+theme or an unreadable catalogue shows every control. Default declares `"all"`
+because new Design settings are built there first; the other themes list their
+keys, so a new setting stays hidden on them until each implements and declares it.
+
+A declared setting must change an open popup and the Design preview without a
+new lookup. Core delivers changes through `updateDictionaryPresentation`
+(frequency, pitch, tag, compact-summary and image-source options),
+`setToolbarPosition`, `setCustomButtons`, the `getPopupColumns` and
+`getImageHoverPreview` callbacks, the `--gsm-hoshidicts-popup-opacity`
+custom property and the `data-hoshidicts-glossary-layout` host attribute.
+`test/theme-renderer.test.mjs` checks every declaration
+against its renderer, in both directions.
+
 ## Content and stylesheet ownership
 
-Default alone loads `render/reader.css` and scoped dictionary CSS. Nazeka loads
+Default loads `render/reader.css`; Default and Bee load scoped dictionary CSS. Bee
+uses its own JL-based stylesheet and builds rich glossary DOM only on expansion.
+Nazeka loads
 its own CSS plus shared icon controls. Plain loads only its own CSS. Both still parse the shared `popup.js`
 script for existing geometry/action helpers; Nazeka never calls its Default
 view factory. Splitting that script could reduce startup parsing later, but is
@@ -113,7 +177,7 @@ The existing `appendTextOnlyGlossary` is a rich helper and is not text mode.
 
 ```sh
 node test/make-fixture.mjs
-node --test test/theme-renderer.test.mjs
+node --test test/theme-renderer.test.mjs test/settings-search.test.mjs
 node test/chrome-theme-store.mjs
 ```
 

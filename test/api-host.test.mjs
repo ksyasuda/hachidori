@@ -24,7 +24,7 @@ const dictionaries = [
   { id: "kanji-id", title: "Kanji", displayName: null, path: "/dicts/g1/Kanji", enabled: true, revision: "3", termCount: 0, frequencyCount: 0, kanjiCount: 1 },
 ];
 
-function host({ lookups = {}, kanji = {}, media = {}, audio = null, downloads = {} } = {}) {
+function host({ lookups = {}, kanji = {}, media = {}, audio = null, downloads = {}, templates = [] } = {}) {
   const calls = [];
   const engine = async message => {
     calls.push(structuredClone(message));
@@ -50,7 +50,8 @@ function host({ lookups = {}, kanji = {}, media = {}, audio = null, downloads = 
     return { ok: true, fields, media: marker(message, "glossary") ? [{ dictionary: "Fixture", path: "img/eat.png", filename: "hachidori_eat.png" }] : [] };
   };
   const answer = createApiHost({ engine, render, version: "0.1.4",
-    readDictionaries: async () => dictionaries, readAudioSources: async () => audio ? [{ id: "jpod", type: "jpod101", enabled: true }] : [] });
+    readDictionaries: async () => dictionaries, readAudioSources: async () => audio ? [{ id: "jpod", type: "jpod101", enabled: true }] : [],
+    readAnkiTemplates: async () => templates });
   return { answer, calls };
 }
 const marker = (message, name) => Object.hasOwn(message.templates, name);
@@ -58,8 +59,8 @@ const marker = (message, name) => Object.hasOwn(message.templates, name);
 test("the module names the relay contract and every request the relay sends", () => {
   assert.equal(API_CAPABILITY, "hoshidicts-api-v1");
   assert.equal(API_CLIENT_ORIGIN, "relay://yomitan-api");
-  assert.deepEqual([...API_REQUESTS].sort(), ["hd_api_anki_fields", "hd_api_dictionaries", "hd_api_dictionary_close", "hd_api_dictionary_open",
-    "hd_api_dictionary_read", "hd_api_kanji_entries", "hd_api_term_entries", "hd_api_tokenize", "hd_api_version"]);
+  assert.deepEqual([...API_REQUESTS].sort(), ["hd_api_anki_card_formats", "hd_api_anki_fields", "hd_api_dictionaries", "hd_api_dictionary_close",
+    "hd_api_dictionary_open", "hd_api_dictionary_read", "hd_api_kanji_entries", "hd_api_term_entries", "hd_api_tokenize", "hd_api_version"]);
 });
 
 test("version answers the extension's own version", async () => {
@@ -96,6 +97,26 @@ test("term entries project the engine result onto Yomitan's TermDictionaryEntry,
   assert.equal(entry.maxOriginalTextLength, 6);
   assert.deepEqual(calls.map(call => call.text), ["食べたかった", "xyz"]);
   await assert.rejects(answer({ type: "hd_api_term_entries", terms: "食べる" }), /terms must be an array/u);
+});
+
+test("definition tags keep Jitendex's U+00A0 inside a tag name, as Yomitan's _splitField does (#426)", async () => {
+  const term = { ...tabetakatta.term, glossaries: [{ ...tabetakatta.term.glossaries[0],
+    definitionTags: "rarely\u00a0used\u00a0form ateji\u00a0form" }] };
+  const { answer } = host({ lookups: { 明白: [{ ...tabetakatta, matched: "明白", term }] } });
+  const { results: [{ dictionaryEntries: [entry] }] } = await answer({ type: "hd_api_term_entries", terms: ["明白"] });
+  assert.deepEqual(entry.definitions[0].tags.map(tag => tag.name), ["rarely\u00a0used\u00a0form", "ateji\u00a0form"]);
+});
+
+test("definition tags carry the engine's tag-bank category, order, score and notes, as Yomitan's API does", async () => {
+  const tags = [{ name: "vt", category: "expression", order: 0, score: 0, notes: "transitive verb" },
+    { name: "zz", category: "default", order: 0, score: 0, notes: "" }];
+  const term = { ...tabetakatta.term, glossaries: [{ ...tabetakatta.term.glossaries[0], definitionTags: "zz vt", tags }] };
+  const { answer } = host({ lookups: { 食べる: [{ ...tabetakatta, term }] } });
+  const { results: [{ dictionaryEntries: [entry] }] } = await answer({ type: "hd_api_term_entries", terms: ["食べる"] });
+  assert.deepEqual(entry.definitions[0].tags, [
+    { name: "vt", category: "expression", order: 0, score: 0, content: ["transitive verb"], dictionaries: ["Fixture"], redundant: false },
+    { name: "zz", category: "default", order: 0, score: 0, content: [], dictionaries: ["Fixture"], redundant: false },
+  ]);
 });
 
 test("kanji entries look each character up and answer Yomitan's KanjiDictionaryEntry shape", async () => {
@@ -150,6 +171,36 @@ test("anki fields without media skip audio and images, keep every entry when unl
   await assert.rejects(answer({ type: "hd_api_anki_fields", text: "食", entryType: "sentence", markers: [] }), /unsupported entry type/u);
 });
 
+test("anki card formats answer each Template as Yomitan's AnkiCardFormat, in Settings order, without the AnkiConnect connection", async () => {
+  const anki = globalThis.HDReaderOptions.normaliseAnki({ url: "http://192.0.2.7:8765", apiKey: "secret-key", templates: [
+    { id: "mining", name: "Mining", deck: "Mining::VN", model: "Lapis", tags: ["vn"], duplicateBehavior: "overwrite", fieldTemplates: {
+      Expression: { value: "{expression}", overwriteMode: "coalesce" },
+      Sentence: { value: "{cloze-prefix}<b>{cloze-body}</b>{cloze-suffix}", overwriteMode: "overwrite" },
+      Hint: { value: "", overwriteMode: "coalesce" } } },
+    { id: "legacy", name: "Legacy", model: "Basic", fields: { expression: "Front", reading: "front", definition: "Back", pitch: "PitchPosition" } },
+    { id: "unset", name: "Template 3" },
+  ] });
+  const { answer } = host({ templates: anki.templates });
+  const reply = await answer({ type: "hd_api_anki_card_formats" });
+  assert.deepEqual(reply, { cardFormats: [
+    { name: "Mining", icon: "big-circle", deck: "Mining::VN", model: "Lapis", fields: {
+      Expression: { value: "{expression}", overwriteMode: "coalesce" },
+      Sentence: { value: "{cloze-prefix}<b>{cloze-body}</b>{cloze-suffix}", overwriteMode: "overwrite" },
+      Hint: { value: "", overwriteMode: "coalesce" } }, type: "term" },
+    // The rows mining builds from a legacy mapping: one shared field, PitchPosition's own marker.
+    { name: "Legacy", icon: "big-circle", deck: "Default", model: "Basic", fields: {
+      Front: { value: "{expression}<br>{reading}", overwriteMode: "coalesce" },
+      Back: { value: "{definition}", overwriteMode: "coalesce" },
+      PitchPosition: { value: "{pitch-position}", overwriteMode: "coalesce" } }, type: "term" },
+    { name: "Template 3", icon: "big-circle", deck: "Default", model: "", fields: {}, type: "term" },
+  ] });
+  assert.deepEqual(Object.keys(reply.cardFormats[0].fields), ["Expression", "Sentence", "Hint"], "the stored field order is kept");
+  assert.deepEqual(await answer({ type: "hd_api_anki_card_formats", profileIndex: 0 }), reply);
+  await assert.rejects(answer({ type: "hd_api_anki_card_formats", profileIndex: 1 }),
+    { message: 'Invalid input for ankiCardFormats, expected "profileIndex" to be a valid profile index but got 1' });
+  assert.doesNotMatch(JSON.stringify(reply), /secret-key|192\.0\.2\.7/u);
+});
+
 test("tokenize scans each text with the dictionaries, spreads the reading over the stem, and advances past unknown characters", async () => {
   const neko = { matched: "猫", deinflected: "猫", trace: [], term: { ...tabetakatta.term, expression: "猫", reading: "ねこ" } };
   const { answer, calls } = host({ lookups: { "猫が食べたかった。": [neko], "が食べたかった。": [], "食べたかった。": [tabetakatta], "。": [] } });
@@ -160,6 +211,16 @@ test("tokenize scans each text with the dictionaries, spreads the reading over t
   ] }]);
   assert.deepEqual(calls.filter(call => call.type === "hd_lookup").map(call => [call.text, call.maxResults, call.scanLength]),
     [["猫が食べたかった。", 1, 10], ["が食べたかった。", 1, 10], ["食べたかった。", 1, 10], ["。", 1, 10], ["X", 1, 10]]);
+});
+
+test("tokenize takes the engine's kanji-reading furigana for a word matched in dictionary form", async () => {
+  const furigana = [{ text: "好", reading: "す" }, { text: "き", reading: "" }, { text: "嫌", reading: "きら" }, { text: "い", reading: "" }];
+  const sukikirai = { matched: "好き嫌い", deinflected: "好き嫌い", trace: [],
+    term: { ...tabetakatta.term, expression: "好き嫌い", reading: "すききらい", furigana } };
+  const { answer } = host({ lookups: { "好き嫌い": [sukikirai] } });
+  const { results } = await answer({ type: "hd_api_tokenize", texts: ["好き嫌い"], parser: "scanning-parser" });
+  assert.deepEqual(results[0].content, [[{ text: "好", reading: "す" }, { text: "き", reading: "" },
+    { text: "嫌", reading: "きら" }, { text: "い", reading: "" }]]);
 });
 
 test("dictionaries list the installed packages with a download file name, and downloads pass through the engine", async () => {

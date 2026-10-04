@@ -31,6 +31,9 @@ import {
   dictionaryImportTarget,
 } from "./dictionary-import.js";
 import { OVERLAY_MODE } from "./overlay-mode.js";
+// HDGlossary.parseTagList: the one U+0020 tag splitter the renderer, Anki and
+// the API host share; and the furigana split that withFurigana completes.
+import "./render/glossary.js";
 
 /*
  * Owns the single hoshidicts engine instance inside a dedicated Web Worker.
@@ -254,6 +257,88 @@ function withoutPersonalDictionary(reply, message) {
     else if (kept.length > 0) results.push({ ...result, term: { ...result.term, glossaries: kept } });
   }
   return { ...reply, results };
+}
+
+// Each glossary gets `tags`, its definitionTags as Yomitan's Translator expands
+// them from the dictionary's tag bank at 67db60d (_expandTagGroups, _createTag,
+// _mergeSimilarTags, _groupTags): a name is looked up by its part before ":",
+// one the bank lacks is category "default", a repeated name is listed once,
+// and the list is sorted by order, then name. definitionTags is left as the
+// engine wrote it. The banks change only with the loaded set, so they are read
+// once per generation.
+const TAG_NAME_COLLATOR = new Intl.Collator("en-US");
+// A tag's share of the serialized reply beyond its name, category and notes:
+// keys and punctuation (54), a separating comma and two numbers, each at most
+// 25 characters (-0.0000012345678901234567). The reply bound counts it with
+// the native JSON, so an ordinary reply is still not serialized twice.
+const TAG_JSON_OVERHEAD = 54 + 1 + 2 * 25;
+let tagBanks = { generation: -1, banks: new Map() };
+
+function tagBank(dictionary) {
+  if (tagBanks.generation !== generation) {
+    const json = engine.ccall("hdw_tags", "string", [], []);
+    throwIfEngineFailed("hdw_tags");
+    const banks = new Map();
+    for (const { dictionary: title, tags } of parseJson(json, "hdw_tags")) {
+      const bank = new Map();
+      // Yomitan's findTagMetaBulk answers a name with its first row.
+      for (const tag of tags) if (!bank.has(tag.name)) bank.set(tag.name, tag);
+      banks.set(title, bank);
+    }
+    tagBanks = { generation, banks };
+  }
+  return tagBanks.banks.get(dictionary);
+}
+
+// Yomitan's _expandTagGroups and _groupTags for one definitionTags string and
+// its dictionary's tag bank (a Map from name to row; undefined without one).
+export function expandDefinitionTags(definitionTags, bank) {
+  const tags = [];
+  for (const name of new Set(globalThis.HDGlossary.parseTagList(definitionTags))) {
+    const colon = name.indexOf(":");
+    const entry = bank?.get(colon < 0 ? name : name.slice(0, colon));
+    tags.push({ name, category: entry?.category || "default", order: entry?.order ?? 0,
+      score: entry?.score ?? 0, notes: entry?.notes ?? "" });
+  }
+  return tags.sort((left, right) => left.order - right.order || TAG_NAME_COLLATOR.compare(left.name, right.name));
+}
+
+function withDefinitionTags(reply) {
+  let tagJsonLength = 0;
+  for (const result of reply.results) {
+    for (const glossary of result?.term?.glossaries ?? []) {
+      glossary.tags = expandDefinitionTags(glossary.definitionTags, tagBank(glossary.dictionary));
+      tagJsonLength += ',"tags":[]'.length;
+      for (const { name, category, notes } of glossary.tags) {
+        tagJsonLength += TAG_JSON_OVERHEAD + name.length + category.length + notes.length;
+      }
+    }
+  }
+  return { ...reply, nativeJsonLength: reply.nativeJsonLength + tagJsonLength };
+}
+
+// A headword whose furigana split falls back to one ruby over the whole word
+// gets `term.furigana`, the split its kanji's KANJIDIC readings allow, when
+// exactly one does (#459). Every other reply stays as the engine wrote it. The
+// readings table is read on the first such headword and kept for the worker's
+// life; each kanji's readings are derived as it is needed.
+let kanjiReadings = null;
+
+export async function withFurigana(reply) {
+  const { createKanjiReadings, distributeFurigana } = globalThis.HDGlossary;
+  const unsplit = reply.results.filter((result) => result?.term
+    && distributeFurigana(result.term.expression, result.term.reading) === null);
+  if (unsplit.length === 0) return reply;
+  kanjiReadings ??= createKanjiReadings((await import("./vendor/kanjidic/kanji-readings.json",
+    { with: { type: "json" } })).default.readings);
+  let furiganaJsonLength = 0;
+  for (const { term } of unsplit) {
+    const furigana = distributeFurigana(term.expression, term.reading, kanjiReadings);
+    if (furigana === null) continue;
+    term.furigana = furigana;
+    furiganaJsonLength += ',"furigana":'.length + JSON.stringify(furigana).length;
+  }
+  return { ...reply, nativeJsonLength: reply.nativeJsonLength + furiganaJsonLength };
 }
 
 let tail = Promise.resolve();
@@ -1452,25 +1537,34 @@ async function boot() {
   }
 }
 
+// Every count an import report carries. The last four are what a successful
+// MDX import left out; a Yomitan archive reports them as 0. Settings words
+// them (mdxImportNotes); they are not stored with the dictionary.
+const IMPORT_REPORT_COUNTS = Object.freeze([
+  "termCount",
+  "metaCount",
+  "frequencyCount",
+  "pitchCount",
+  "kanjiCount",
+  "mediaCount",
+  "skippedRecordCount",
+  "unresolvedRedirectCount",
+  "missingResourceCount",
+  "unreadableResourceCount",
+]);
+
 function emptyReport(error) {
-  return {
-    success: false,
-    title: "",
-    termCount: 0,
-    metaCount: 0,
-    frequencyCount: 0,
-    pitchCount: 0,
-    kanjiCount: 0,
-    mediaCount: 0,
-    error,
-  };
+  const report = { success: false, title: "" };
+  for (const key of IMPORT_REPORT_COUNTS) report[key] = 0;
+  report.error = error;
+  return report;
 }
 
 function normaliseReport(raw) {
   const report = emptyReport(text(raw?.error));
   report.success = raw?.success === true;
   report.title = text(raw?.title);
-  for (const key of ["termCount", "metaCount", "frequencyCount", "pitchCount", "kanjiCount", "mediaCount"]) {
+  for (const key of IMPORT_REPORT_COUNTS) {
     const count = Number(raw?.[key]);
     report[key] = Number.isFinite(count) ? count : 0;
   }
@@ -3008,7 +3102,7 @@ const HANDLERS = {
       lookupArguments(message),
     );
     throwIfEngineFailed("hdw_lookup");
-    return withoutPersonalDictionary(termLookupReply(json, "hdw_lookup"), message);
+    return withFurigana(withDefinitionTags(withoutPersonalDictionary(termLookupReply(json, "hdw_lookup"), message)));
   },
 
   async hd_lookup_dictionary(message) {
@@ -3031,7 +3125,7 @@ const HANDLERS = {
       [args[0], text(entry.path), ...args.slice(1)],
     );
     throwIfEngineFailed("hdw_lookup_dictionary");
-    return withoutPersonalDictionary(termLookupReply(json, "hdw_lookup_dictionary"), message);
+    return withFurigana(withDefinitionTags(withoutPersonalDictionary(termLookupReply(json, "hdw_lookup_dictionary"), message)));
   },
 
   async hd_kanji(message) {
@@ -3485,5 +3579,7 @@ export function startEngine() {
     throw new Error("the engine service is already started");
   }
   started = true;
-  serialise(boot);
+  // boot() never rejects: a failed start is latched in bootError, which
+  // hd_status and every request needing the engine report.
+  void serialise(boot);
 }

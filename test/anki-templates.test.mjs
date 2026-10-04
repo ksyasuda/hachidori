@@ -79,6 +79,8 @@ test("resolved saved templates never migrate a blank SentenceAudio field", () =>
 
 test("marker validation retains unknown tokens as errors and recognizes nonempty dictionary-specific markers", () => {
   assert.deepEqual(ankiTemplateErrors("{Expression}<br>{single-glossary-辞典-plain}{single-frequency-number-辞典}"), []);
+  // A Yomitan MiscInfo mapping carries over unchanged.
+  assert.deepEqual(ankiTemplateErrors("{document-title}<br>{URL}{url-plain}"), []);
   assert.deepEqual(ankiTemplateErrors("{capture-animation}{capture-audio}"),
     ["Unknown marker: {capture-animation}", "Unknown marker: {capture-audio}"]);
   const source = "literal {unknown} {single-glossary-} {screenshot} {unknown}";
@@ -91,7 +93,7 @@ test("marker validation retains unknown tokens as errors and recognizes nonempty
 test("template rendering substitutes once, preserves literal HTML and removes only empty marker-only breaks", () => {
   assert.equal(renderAnkiTemplate("<b>{EXPRESSION}</b><br>{audio}<BR />literal<br>{single-glossary-missing}",
     { expression: "&lt;語&gt;", audio: "" }), "<b>&lt;語&gt;</b><br>literal");
-  assert.equal(renderAnkiTemplate("{expression}", { expression: "{reading}" }), "{reading}");
+  assert.equal(renderAnkiTemplate("{expression}", { expression: "{reading}" }), "&#123;reading&#125;");
   assert.throws(() => renderAnkiTemplate("{unknown}", {}), /Unknown marker/u);
 });
 
