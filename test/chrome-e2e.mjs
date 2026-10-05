@@ -53,7 +53,10 @@ import { BACKUP_CHROME_CHECKS, backupChromeScenarios } from "./chrome-backup-sce
 import { checkPopupResize } from "./chrome-popup-resize.mjs";
 import { checkCompactSummaryLayout } from "./chrome-compact-summary.mjs";
 import { COMPACT_GLOSSARIES_CHECK, checkCompactGlossaries } from "./chrome-glossary-layout.mjs";
+import { STRUCTURED_TABLE_CHECK, checkStructuredTable } from "./chrome-structured-table.mjs";
 import { ACTION_ROW_CHECK, checkActionRow } from "./chrome-action-row.mjs";
+import { DYNAMIC_HEADWORD_CHECK, checkDynamicHeadword } from "./chrome-dynamic-headword.mjs";
+import { LOOKUP_COUNT_LAYOUT_CHECK, checkLookupCountLayout } from "./chrome-lookup-count-layout.mjs";
 import { SETTINGS_FEEDBACK_CHECK, checkSettingsFeedback } from "./chrome-settings-feedback-scenarios.mjs";
 import { dictionaryManagementScenarios, REORDER_CHECKS } from "./chrome-dictionary-management-scenarios.mjs";
 import { DICTIONARY_RANK_CHECK, checkDictionaryRankLayout } from "./chrome-dictionary-rank-scenarios.mjs";
@@ -421,6 +424,7 @@ const PLANNED = [
   "vertical hover hits glyphs and rejects the surrounding padding",
   "mouse resizing retains session dimensions without changing Design settings",
   "wheel over the popup scrolls neither the page nor its body wheel listeners",
+  "Alt+wheel over the popup moves one entry per step without scrolling the pane or the page",
   "hovering an inflected verb shows a popup",
   "the reader opens a popup for Japanese text inside a same-origin iframe",
   "the popup paints above a fullscreen player and returns to body on exit",
@@ -434,7 +438,7 @@ const PLANNED = [
   "nested definition lookups use an accessible close control that dismisses the child popup",
   "nested kanji navigation keeps Back and restores the term lookup close control",
   "repeated keyboard activation returns focus to an existing child lookup close control",
-  "focused popup controls prevent incidental definition pointer lookups",
+  "focused popup controls allow inherited definition pointer lookups",
   "internal links open a positioned popup chain with level-local Note and Back and live depth limits",
   "hide popup on cursor exit closes a sticky child after its own delay once the pointer returns to the parent",
   "linked and hovered children open beside their source text and follow parent scroll, popup scale and narrow viewports",
@@ -449,7 +453,10 @@ const PLANNED = [
   "Compact summaries persist Settings, share leading media and update live without replacing definitions or Note drafts",
   "Compact summaries wrap without clipping and retain narrow toolbar access",
   COMPACT_GLOSSARIES_CHECK,
+  STRUCTURED_TABLE_CHECK,
   ACTION_ROW_CHECK,
+  DYNAMIC_HEADWORD_CHECK,
+  LOOKUP_COUNT_LAYOUT_CHECK,
   "compact definition text opens a nested lookup with the same close contract",
   "Live image sources recover missing thumbnails, preserve owners and resolve groups per path with accurate aliases",
   "Live metadata Settings preserve Note and dictionary content while independently controlling frequency pitch grammar and IPA",
@@ -461,7 +468,7 @@ const PLANNED = [
   "a grouped favourite uses only its group tab",
   "selected term dictionary wins even when maximum results is one",
   "Back preserves the complete clicked-kanji drill-down history",
-  "Back restores expanded linked results, exact tab, scroll, highlight and toolbar without lookup",
+  "Back restores complete linked results, exact tab, scroll, highlight and toolbar without lookup",
   "Back restores the term results after a generic kanji lookup",
   "clicked-kanji navigation moves and restores keyboard focus",
   "Back restores focus to the exact clicked duplicate kanji",
@@ -493,6 +500,7 @@ const PLANNED = [
   "low memory mode imports single-threaded and recycles the import high-water mark",
   "low memory mode keeps only each dictionary's index in the heap",
   "turning low memory mode off restarts the full-pool worker",
+  "resident entry storage restores mapped entries independently of low memory mode",
   "real-WASM lookup bounds fail one request without poisoning the OPFS engine",
   "an oversized hover clears the previous popup and the next healthy hover recovers",
   "deep structured content renders while node-limit failures omit only their definition",
@@ -1602,9 +1610,10 @@ async function popupReader(page, depth = 0) {
               && capsuleRect.top >= entryRect.top - 1 && capsuleRect.bottom <= entryRect.bottom + 1),
             // Same row: baseline-aligned tags sit a little lower than the
             // lookup pill's top, so overlap is the row test, not equal tops.
+            // The count arrives later, so it follows the tags (#486).
             besideLookupCount: Boolean(capsuleRect && lookupCountRect && !metadataCapsule.hidden
               && capsuleRect.top < lookupCountRect.bottom && capsuleRect.bottom > lookupCountRect.top
-              && capsuleRect.left >= lookupCountRect.right),
+              && lookupCountRect.left >= capsuleRect.right),
             plain: Boolean(capsuleStyle
               && capsuleStyle.borderTopStyle === "none"
               && capsuleStyle.backgroundColor === "rgba(0, 0, 0, 0)"),
@@ -2539,7 +2548,7 @@ async function checkDictionaryTabsColumns(settings, tab, popup, browser) {
   async function openChild() {
     require((await popup.nested("focus-link"))?.linkFocused, "E8 parent source link focus");
     await tab.keyboard.press("Enter");
-    return until(childState, value => selectedReady(studyKey)(value) && imageReady(value), "E8 linked Study view");
+    return until(childState, value => selectedReady("all")(value) && imageReady(value), "E8 linked All view");
   }
   try {
     for (const dictionary of fixture.dictionaries) {
@@ -2558,8 +2567,8 @@ async function checkDictionaryTabsColumns(settings, tab, popup, browser) {
     ];
     await presentation(Object.fromEntries(titles.map((title, index) => [title,
       { displayName: ["Links", "Usage", "Examples", "Reference"][index], favorite: index === 0 || index === 3 }])), groups);
-    // Current E2E also retains the generic 食/しょく package. Preserve its genuine
-    // extra prefix result instead of copying the five-package preflight oracle.
+    // Current E2E also retains the generic 食/しょく package. The native reply
+    // includes that prefix, but an internal link displays only its full target.
     evidence.native = await settings.evaluate(async ({ root, child, reading }) => {
       const { options } = await chrome.storage.local.get("options");
       const lookup = (text, primaryReading) => chrome.runtime.sendMessage({ target: "hoshidicts-offscreen", type: "hd_lookup",
@@ -2570,12 +2579,18 @@ async function checkDictionaryTabsColumns(settings, tab, popup, browser) {
     require(evidence.native.root.ok && evidence.native.child.ok
       && evidence.native.root.results.length === 1
       && equal(evidence.native.root.results[0].term.glossaries.map(glossary => glossary.dictionary), titles), "E8 native four-card root");
-    const childExpected = evidence.native.child.results.map(({ term }) => ({
+    const childExpected = evidence.native.child.results.filter(result => result.matched === fixture.child).map(({ term }) => ({
       expression: term.expression, aria: term.reading && term.reading !== term.expression ? `${term.expression}, ${term.reading}` : term.expression,
       dictionaries: [...new Set(term.glossaries.map(glossary => glossary.dictionary))],
     }));
-    require(childExpected.length > 1 && childExpected[0].expression === fixture.child
-      && childExpected.some(entry => entry.dictionaries.includes(GENERIC_KANJI_TITLE)), "E8 genuine child prefix input");
+    require(evidence.native.child.results.some(result => result.matched !== fixture.child
+        && result.term.glossaries.some(glossary => glossary.dictionary === GENERIC_KANJI_TITLE))
+      && childExpected.length === 1 && childExpected[0].expression === fixture.child
+      && childExpected[0].aria === `${fixture.child}, ${fixture.reading}`
+      && equal(childExpected[0].dictionaries, [links]), "E8 exact child expression and reading exclude native prefixes");
+    const completeChildBody = value => value?.entries.at(-1)?.cards.some(card => card.dictionary === links
+      && card.text.some(text => text.includes("The referenced entry.")
+        && text.includes("Continue to the final entry")));
     worker = await installMediaReplyProbe(browser, settings);
     await worker.evaluate(() => { globalThis.__ownedMediaProbe.holdNext = false; });
     await tab.setViewport({ width: 1880, height: 960 });
@@ -2605,13 +2620,18 @@ async function checkDictionaryTabsColumns(settings, tab, popup, browser) {
     const noOp = await rootState();
     require(noOp.sameCards && noOp.samePanel && (await requests()).length === projectionStart, "E8 warmed tabs must stay local and same-tab must retain cards");
 
-    // Internal-link → clicked-kanji → Back preserves semantic Study context.
+    // An internal link opens All even from Study. A child-local Study choice
+    // then survives clicked-kanji → Back without changing its parent.
     await popup.dictionaryTabs("select", studyKey);
-    await tab.setViewport({ width: 1880, height: 240 });
-    const inherited = await openChild();
+    await tab.setViewport({ width: 1880, height: 160 });
+    const linked = await openChild();
+    require(equal(linked.entries.map(entry => ({ expression: entry.expression, aria: entry.aria,
+      dictionaries: entry.cards.map(card => card.dictionary) })), childExpected), "E8 linked All exact target");
+    await child.dictionaryTabs("select", studyKey);
+    const selectedChild = await until(childState, selectedReady(studyKey), "E8 child-local Study view");
     const studyResultCount = childExpected.filter(entry => entry.dictionaries.some(title => [links, usage, GENERIC_KANJI_TITLE].includes(title))).length;
     await until(childState, value => value?.entries.length === studyResultCount
-      && value.entries.at(-1).cards.some(card => card.text.includes(GENERIC_KANJI_GLOSSARY)), "E13 complete deferred bodies");
+      && completeChildBody(value), "E13 complete linked bodies");
     const beforeBack = await child.dictionaryTabs("scroll", 80);
     require(beforeBack.scrollTop > 0, "E13 nonzero prior scroll");
     const highlights = () => tab.evaluate(name => Array.from(CSS.highlights.get(name) ?? [], range => range.toString()), HIGHLIGHT_NAME);
@@ -2627,7 +2647,7 @@ async function checkDictionaryTabsColumns(settings, tab, popup, browser) {
     require(await child.click(".gsm-hoshidicts-kanji-back"), "E8 term Back");
     const back = await until(childState, value => selectedReady(studyKey)(value)
       && value.entries.length === beforeBack.entries.length && !value.showMore
-      && Math.abs(value.scrollTop - beforeBack.scrollTop) < 1, "E13 expanded linked Back viewport");
+      && Math.abs(value.scrollTop - beforeBack.scrollTop) < 1, "E13 complete linked Back viewport");
     evidence.back = back.toolbar === beforeBack.toolbar
       && await child.dictionaryTabs("matches", beforeBack.entries)
       && equal(await highlights(), previousHighlights)
@@ -2638,7 +2658,7 @@ async function checkDictionaryTabsColumns(settings, tab, popup, browser) {
       await tab.screenshot({ path: process.env.HACHIDORI_KANJI_BACK_SCREENSHOT, clip: { x, y, width, height } });
     }
     // The width follows Design live; the height is at most the Design value,
-    // because in this 240px window a child fits on neither side of its source
+    // because in this 160px window a child fits on neither side of its source
     // link and is shortened beside it rather than covering it (issue #360).
     const childBesideLink = async () => ({ ...await childState(), link: (await popup.nested())?.linkRect });
     const sizedBesideLink = (width, height) => value => value.rect.width === Math.min(width, value.viewport.width - 12)
@@ -2673,9 +2693,11 @@ async function checkDictionaryTabsColumns(settings, tab, popup, browser) {
     await until(childBesideLink, sizedBesideLink(560, 420), "E15 restore child dimensions");
     require(await child.click(".gsm-hoshidicts-popup-close") && await child.waitForHidden(), "E8 close child lookup");
     await tab.setViewport({ width: 1880, height: 960 });
-    evidence.inheritance = { inherited: inherited.selected, kanji: kanji.selected, back: back.selected,
+    evidence.inheritance = { linked: linked.selected, selectedChild: selectedChild.selected, kanji: kanji.selected, back: back.selected,
       parent: (await rootState()).selected };
-    require(evidence.inheritance.parent === studyKey, "E8 child navigation changed parent tab");
+    require(evidence.inheritance.linked === "all" && evidence.inheritance.selectedChild === studyKey
+      && evidence.inheritance.kanji === studyKey && evidence.inheritance.back === studyKey
+      && evidence.inheritance.parent === studyKey, "E8 linked default and child-local navigation preserve parent tab");
     require((await status()).generation === initialStatus.generation, "E8 presentation or tabs reloaded native dictionaries");
 
     const liveStart = (await requests()).length;
@@ -2698,8 +2720,10 @@ async function checkDictionaryTabsColumns(settings, tab, popup, browser) {
     await presentation({}, groups);
     require((await popup.nested()).sameAnchor, "E8 pending child lost its parent anchor");
     await worker.evaluate(() => { for (const release of globalThis.__ownedMediaProbe.heldLookups.splice(0)) release(); });
-    const newest = await until(childState, value => selectedReady(studyKey)(value)
+    const newest = await until(childState, value => selectedReady("all")(value)
       && value.tabs.find(tab => tab.key === studyKey)?.label === "Learning" && imageReady(value), "E8 pending child uses newest presentation");
+    await child.dictionaryTabs("select", studyKey);
+    const newestSelected = await until(childState, selectedReady(studyKey), "E8 newest child-local Study view");
     require(await popup.click(".gsm-hoshidicts-note-button"), "E8 parent Note");
     await popup.writeNote({ definition: "E8 protected presentation draft" });
     const draft = await popup.retainedControls("remember");
@@ -2735,8 +2759,9 @@ async function checkDictionaryTabsColumns(settings, tab, popup, browser) {
     require(fallback.tabs.find(tab => tab.key === "all").focused, "E8 removed-group fallback focus");
     const liveRequests = (await requests()).slice(liveStart);
     require(liveRequests.length === 1 && liveRequests[0].type === "hd_lookup"
-      && liveRequests[0].text === fixture.child && newest.selected === studyKey, "E8 live presentation duplicated lookup/media/style work");
-    evidence.live = { renamed, newest, protectedView, protectedDraft, flushed, fallback, liveRequests };
+      && liveRequests[0].text === fixture.child && newest.selected === "all"
+      && newestSelected.selected === studyKey, "E8 live presentation duplicated lookup/media/style work");
+    evidence.live = { renamed, newest, newestSelected, protectedView, protectedDraft, flushed, fallback, liveRequests };
 
     // Columns must preserve mounted controls/cards; actual rects expose the
     // content-box width bug instead of accepting overlapping width styles.
@@ -2847,11 +2872,11 @@ async function checkDictionaryTabsColumns(settings, tab, popup, browser) {
     await popup.nested("remember");
     await popup.nested("focus-link");
     await tab.keyboard.press("Enter");
-    await until(childState, value => selectedReady("all")(value) && imageReady(value), "E8 All child before expansion");
+    await until(childState, value => selectedReady("all")(value) && imageReady(value), "E8 All exact linked child");
     const expanded = await until(childState, value => value?.entries.length === childExpected.length && packed(value, 2)
-      && value.entries.flatMap(entry => entry.cards).some(card => card.text.includes(GENERIC_KANJI_GLOSSARY)), "E8 complete child expansion");
+      && completeChildBody(value), "E8 complete exact linked bodies");
     require(equal(expanded.entries.map(entry => ({ expression: entry.expression, aria: entry.aria,
-      dictionaries: entry.cards.map(card => card.dictionary) })), childExpected), "E8 expanded native expression/reading/dictionary order");
+      dictionaries: entry.cards.map(card => card.dictionary) })), childExpected), "E8 exact linked expression/reading/dictionary order");
     await child.dictionaryTabs("remember");
     await child.click(".gsm-hoshidicts-note-button");
     await child.writeNote({ definition: "E8 child holds its anchor through resize" });
@@ -2859,7 +2884,7 @@ async function checkDictionaryTabsColumns(settings, tab, popup, browser) {
     const nestedResizeStart = (await requests()).length;
     for (const size of [{ width: 520, height: 740 }, { width: 1880, height: 960 }]) {
       await tab.setViewport(size);
-      const resized = await until(childState, value => value?.viewport.width === size.width && packed(value, 2), "E8 expanded child resize");
+      const resized = await until(childState, value => value?.viewport.width === size.width && packed(value, 2), "E8 complete linked child resize");
       const controls = await child.retainedControls();
       require(resized.sameCards && await child.dictionaryTabs("matches", expanded.entries)
         && (await popup.nested()).sameAnchor && controls.sameForm && controls.mounted
@@ -2905,7 +2930,7 @@ async function checkDictionaryTabsColumns(settings, tab, popup, browser) {
     if (errors.length) failure = new AggregateError(failure ? [failure, ...errors] : errors, "E8 scenario/cleanup failure");
   }
   if (failure) throw failure;
-  check("Back restores expanded linked results, exact tab, scroll, highlight and toolbar without lookup",
+  check("Back restores complete linked results, exact tab, scroll, highlight and toolbar without lookup",
     evidence.back === true, JSON.stringify(evidence.inheritance));
   check("Popup tabs project ordered groups and ungrouped favourites without another lookup",
     evidence.passed && evidence.projections.length === 4, JSON.stringify({ projections: evidence.projections, inheritance: evidence.inheritance }));
@@ -3246,11 +3271,26 @@ async function checkCompactSummaries(settings, tab, popup, browser) {
     await tab.keyboard.press("Enter");
     // The primary header travels with the toolbar edge, which now follows the
     // child's placement, so summaries are matched by content rather than order.
-    await until(() => child.compactSummaries(), value => value.some(summary => summary.items[0] === "Text before the image."
-      && summary.image.length === 0), "E10 child late-image negative");
-    await until(() => child.compactSummaries(), value => value.length === 2
-      && value.some(summary => summary.items.length === 3), "E10 deferred headers use current preferences");
+    const linkedSummary = await until(() => child.compactSummaries(), value => value.length === 1
+      && equal(value[0].items, ["Text before the image."])
+      && value[0].image.length === 0, "E10 exact child late-image negative");
+    const linkedEntries = (await child.dictionaryTabs()).entries;
+    require(linkedEntries.length === 1 && linkedEntries[0].expression === fixture.child
+      && linkedEntries[0].aria === `${fixture.child}, ようやくご`, "E10 internal link excludes the shorter prefix");
     require(await child.click(".gsm-hoshidicts-popup-close") && await child.waitForHidden(), "E10 child close");
+
+    // Ordinary hover retains the native 要約 prefix. Its second header is
+    // appended after the initial result and must use the current source/count.
+    await show(fixture.child);
+    const deferredSummaries = await until(summaries, value => value.length === 2
+      && value.some(summary => equal(summary.items, ["Text before the image."]) && summary.image.length === 0)
+      && value.some(summary => summary.dictionary === fixture.illustrated
+        && equal(summary.items, ["短い説明", "使い方", "別の意味"])), "E10 deferred hover headers use current preferences");
+    const deferredEntries = (await popup.dictionaryTabs()).entries;
+    require(equal(deferredEntries.map(entry => [entry.expression, entry.aria]), [
+      [fixture.child, `${fixture.child}, ようやくご`], [fixture.query, `${fixture.query}, ようやく`],
+    ]), "E10 ordinary hover keeps the genuine prefix result for deferred rendering");
+    evidence.deferredHeaders = { linkedSummary, deferredSummaries };
 
     await show(fixture.broken);
     await until(summaries, value => equal(value[0]?.items, ["The text remains available."])
@@ -3680,17 +3720,22 @@ async function checkNestedLinks(settings, tab, popup, browser) {
   await installMediaArchive(settings, fixture.archive);
   try {
     await setDepth(2);
+    await writeOptions({ lookupMode: "hover", definitionLookupMode: "inherit" });
     await tab.setViewport({ width: 1880, height: 960 });
     await tab.$eval("#verb", (element, query) => { element.textContent = query; }, fixture.query);
     await tab.bringToFront();
     await tab.keyboard.press("Escape");
     await hoverForPopup(tab, popup, "#verb");
     const definitionSource = await popup.definitionTextRect(fixture.child);
+    const definitionFocus = await popup.nested("focus-link");
     await moveToDefinition(definitionSource);
     const definitionChild = await waitForPopupState(child,
       state => state.plain.includes(fixture.child));
     const definitionParent = await popup.state();
     const definitionChildLayout = await child.nested();
+    // The focused ancestor deliberately stayed focused while its definition
+    // opened a child. Escape must now target the deepest pane, not that ancestor.
+    await popup.nested("blur");
     const definitionClose = definitionChild?.closeControl;
     const definitionClosed = await child.click(".gsm-hoshidicts-popup-close") && await child.waitForHidden();
     if (definitionClosed) {
@@ -3734,6 +3779,7 @@ async function checkNestedLinks(settings, tab, popup, browser) {
     await setDepth(2);
 
     await writeOptions({ lookupMode: "activation", activationKey: "Shift" });
+    const activationFocus = await popup.nested("focus-link");
     await moveToDefinition(definitionSource);
     await new Promise(resolve => setTimeout(resolve, 500));
     const activationGated = !child.visible(await child.state());
@@ -3745,6 +3791,7 @@ async function checkNestedLinks(settings, tab, popup, browser) {
     } finally {
       await tab.keyboard.up("Shift");
     }
+    await popup.nested("blur");
     if (activationChild) {
       await tab.keyboard.press("Escape");
       await child.waitForHidden();
@@ -3826,12 +3873,14 @@ async function checkNestedLinks(settings, tab, popup, browser) {
       lookupMode: originalOptions.lookupMode ?? "hover" });
     definitionEvidence = {
       activationChild,
+      activationFocus,
       activationGated,
       definitionChain,
       definitionChild,
       definitionChildLayout,
       definitionClose,
       definitionClosed,
+      definitionFocus,
       definitionGrandchild,
       definitionGrandchildSource,
       definitionHighlights,
@@ -3844,6 +3893,12 @@ async function checkNestedLinks(settings, tab, popup, browser) {
       missingParent,
       missingSource,
     };
+    const linkParent = await popup.state();
+    const linkSourceHighlights = await highlights();
+    if (!popup.visible(linkParent) || !linkParent.plain.includes(fixture.query)
+        || JSON.stringify(linkSourceHighlights) !== JSON.stringify([fixture.query])) {
+      throw new Error(`Nested link setup lost its parent source: ${JSON.stringify({ linkParent, linkSourceHighlights })}`);
+    }
     await tab.evaluate(name => {
       window.__sourceAncestorRanges = [...CSS.highlights.get(name)];
     }, HIGHLIGHT_NAME);
@@ -3887,6 +3942,7 @@ async function checkNestedLinks(settings, tab, popup, browser) {
         hidePopupOnCursorExitDelayMs: originalOptions.hidePopupOnCursorExitDelayMs ?? 160 });
     }
     stickyEvidence = await stickyLargeChildScenario(returnPoint);
+    await writeOptions({ lookupMode: "hover", definitionLookupMode: "inherit" });
     await popup.nested("focus-link");
     await tab.keyboard.press("Enter");
     const first = await waitForPopupState(child, state => state.plain.includes(fixture.child)
@@ -3903,9 +3959,11 @@ async function checkNestedLinks(settings, tab, popup, browser) {
     }
     const focusedDefinitionSource = await child.definitionTextRect(fixture.grandchild);
     await moveToDefinition(focusedDefinitionSource);
-    await new Promise(resolve => setTimeout(resolve, 500));
+    const focusedPointerGrandchild = await waitForPopupState(grandchild,
+      state => state.plain.includes(fixture.grandchild));
     const focusedPointerChild = await child.state();
-    const focusedPointerGrandchild = await grandchild.state();
+    const focusedPointerClosed = grandchild.visible(focusedPointerGrandchild)
+      && await grandchild.click(".gsm-hoshidicts-popup-close") && await grandchild.waitForHidden();
     const chain = await child.nested();
     await child.click(".gsm-hoshidicts-note-button");
     const draft = await child.writeNote({ definition: "child draft survives parent Note" });
@@ -3990,7 +4048,7 @@ async function checkNestedLinks(settings, tab, popup, browser) {
     const disabled = await popup.nested();
     const refreshedControls = await checkRetainedLinkControls(browser, settings, tab, popup, child, fixture, setDepth);
     evidence = { source, mouseChild, mousePosition, childHoverRetained, returnPoint, pointerReturn, stickyReturn, first, repeatedKeyboardFocus,
-      focusedDefinitionSource, focusedPointerChild, focusedPointerGrandchild, chain, draft, parentDraft, childDraft, parentClosed, childStillEditing,
+      focusedDefinitionSource, focusedPointerChild, focusedPointerGrandchild, focusedPointerClosed, chain, draft, parentDraft, childDraft, parentClosed, childStillEditing,
       secondSource, second, fullChain, limited, narrowRoot, narrowChild, narrow, lowered, kanji, back, returnedWithClose, returned, retained, disabled, refreshedControls };
   } finally {
     await writeOptions({
@@ -4013,6 +4071,7 @@ async function checkNestedLinks(settings, tab, popup, browser) {
   }
   check("plain definition text opens nested child lookups with native hover, activation, miss, line-end and depth behavior",
     definitionEvidence.definitionSource?.text === fixture.child[0]
+      && definitionEvidence.definitionFocus?.linkFocused
       && definitionEvidence.definitionChild?.plain.includes(fixture.child)
       && definitionEvidence.definitionParent?.plain.includes(fixture.query)
       && bounded(definitionEvidence.definitionChildLayout)
@@ -4030,6 +4089,7 @@ async function checkNestedLinks(settings, tab, popup, browser) {
       && !child.visible(definitionEvidence.lineEndChild)
       && !child.visible(definitionEvidence.depthDisabledChild)
       && definitionEvidence.activationGated
+      && definitionEvidence.activationFocus?.linkFocused
       && definitionEvidence.activationChild?.plain.includes(fixture.child),
     JSON.stringify(definitionEvidence));
   check("definition text can wait for the activation key or a click in Hover mode",
@@ -4053,12 +4113,13 @@ async function checkNestedLinks(settings, tab, popup, browser) {
   check("repeated keyboard activation returns focus to an existing child lookup close control",
     evidence.repeatedKeyboardFocus.includes("gsm-hoshidicts-popup-close"),
     JSON.stringify({ focusedClass: evidence.repeatedKeyboardFocus }));
-  check("focused popup controls prevent incidental definition pointer lookups",
+  check("focused popup controls allow inherited definition pointer lookups",
     evidence.focusedDefinitionSource?.text === fixture.grandchild[0]
       && evidence.focusedPointerChild?.plain.includes(fixture.child)
-      && !grandchild.visible(evidence.focusedPointerGrandchild),
+      && evidence.focusedPointerGrandchild?.plain.includes(fixture.grandchild)
+      && grandchild.visible(evidence.focusedPointerGrandchild) && evidence.focusedPointerClosed,
     JSON.stringify({ source: evidence.focusedDefinitionSource, child: evidence.focusedPointerChild,
-      grandchild: evidence.focusedPointerGrandchild }));
+      grandchild: evidence.focusedPointerGrandchild, closed: evidence.focusedPointerClosed }));
   check("internal links open a positioned popup chain with level-local Note and Back and live depth limits",
     evidence.source.query === fixture.child && evidence.source.reading === fixture.reading
       && evidence.mouseChild !== null && evidence.childHoverRetained && !evidence.returnPoint?.covered && evidence.pointerReturn
@@ -11357,7 +11418,7 @@ async function main() {
     runOutcome?.heading === "Some dictionaries could not be installed"
       && JSON.stringify(runOutcome.rows.map((row) => [row[0], row[1].replace(/\d+(\.\d+)? seconds/u, "N seconds")])) === JSON.stringify([
         ["jitendex", "Installed in N seconds"],
-        ["jmnedict", "Failed: could not read JMnedict.zip: HTTP 503"],
+        ["jmnedict", "Failed: JMnedict.zip: reading the archive failed. could not read JMnedict.zip: HTTP 503"],
         ["bees-ultimate-kanji-dictionary", "Installed in N seconds"],
         ["jiten", "Installed in N seconds"],
         ["bees-ultimate-grammar-dictionary", "Installed in N seconds"],
@@ -11380,7 +11441,7 @@ async function main() {
       && seenPhase("bees-ultimate-kanji-dictionary", (row) => /^Downloading… [\d.]+ (KB|MB)$/u.test(row[1]) && row[3] === row[1])
       && JSON.stringify(setupArchives.requests) === JSON.stringify(RECOMMENDED_DICTIONARIES.map(({ sourceId }) => sourceId))
       && ["jitendex", "bees-ultimate-kanji-dictionary", "jiten", "bees-ultimate-grammar-dictionary"].every((sourceId) => runOutcomes[sourceId]?.status === "installed" && runOutcomes[sourceId].seconds > 0)
-      && runOutcomes.jmnedict?.status === "failed" && runOutcomes.jmnedict.error === "could not read JMnedict.zip: HTTP 503"
+      && runOutcomes.jmnedict?.status === "failed" && runOutcomes.jmnedict.error === "JMnedict.zip: reading the archive failed. could not read JMnedict.zip: HTTP 503"
       && afterRun.setupState.dictionaries.totalSeconds > 0 && afterRun.setupState.dictionaries.continued === false
       && afterRun.setupState.stage === "dictionaries"
       && JSON.stringify(installedTitles) === JSON.stringify(RECOMMENDED_DICTIONARIES.filter(({ sourceId }) => sourceId !== "jmnedict")
@@ -12205,6 +12266,7 @@ async function main() {
       && /\d+(?:\.\d)? seconds/u.test(batchUi.outcomes[0].text)
       && batchUi.outcomes[1].error === true
       && batchUi.outcomes[1].text.includes("Failed before import")
+      && batchUi.outcomes[1].text.includes("malformed-index.zip: reading dictionary metadata failed")
       && batchUi.outcomes[2].error === false
       && batchUi.outcomes[2].text.includes("Imported hachidori-fixture")
       && JSON.stringify(batchUi.outcomes.map(({ name }) => name)) === JSON.stringify([
@@ -12442,7 +12504,7 @@ async function main() {
             audio: "audio-source-add", anki: "anki-refresh", keybinds: "keybind-add",
             "custom-dictionary": "custom-dictionary-source",
             "add-dictionaries": "import-file", updates: "update-schedule", "dictionary-groups": "dict-group-name-new", backup: "backup-export",
-            advanced: "opt-experimental-longKeyScan",
+            advanced: "opt-experimental-googleDocs",
           };
           const controls = [...panel.querySelectorAll("input, select, button, textarea, summary")]
             .filter((control) => control.checkVisibility());
@@ -13395,6 +13457,82 @@ async function main() {
     wheeled !== null && wheeled.visible && wheeled.pageWheels === 0 && wheeled.after === wheeled.before,
     JSON.stringify({ wheelRect, wheeled }));
 
+  // Yomitan's Alt+wheel moves one entry per wheel step. The default
+  // Alt+WheelDown/WheelUp keybinds do the same, for a touchpad-sized step
+  // too, where a plain wheel would scroll the pane 30 px. The second entry
+  // needs two results; the checks below read one.
+  const writeMaxResults = maxResults => page.evaluate(async value => {
+    const { options } = await chrome.storage.local.get("options");
+    const reply = await chrome.runtime.sendMessage({ target: "hoshidicts-worker", type: "hd_options_write",
+      baseRevision: options?.revision ?? 0, options: { maxResults: value } });
+    if (!reply.ok) throw new Error(reply.error);
+    return options?.maxResults ?? 32;
+  }, maxResults);
+  const readerMaxResults = await writeMaxResults(2);
+  await tab.evaluate(() => {
+    document.body.style.minHeight = "400vh";
+    window.__pageWheels = 0;
+    document.body.addEventListener("wheel", window.__countPageWheel = () => { window.__pageWheels += 1; });
+    // Read once dispatch has finished, so this sees what the popup decided.
+    window.__altWheelsCancelled = [];
+    window.addEventListener("wheel", window.__recordAltWheel = event => {
+      if (event.altKey) setTimeout(() => window.__altWheelsCancelled.push(event.defaultPrevented));
+    }, true);
+  });
+  const readAltWheelPane = () => tab.evaluate(() => {
+    const scroll = document.querySelector("hachidori-host")?.shadowRoot
+      ?.querySelector(".gsm-hoshidicts-popup:not([hidden]) .gsm-hoshidicts-content-scroll");
+    if (!scroll) return null;
+    const origin = scroll.getBoundingClientRect().top - scroll.scrollTop;
+    // Where entry navigation lands: a later entry's own header slides under
+    // the pinned one (#488).
+    return { scrollTop: scroll.scrollTop, maxScroll: scroll.scrollHeight - scroll.clientHeight,
+      offsets: [...scroll.querySelectorAll(":scope > .gsm-hoshidicts-tab-panel > .gsm-hoshidicts-entry")]
+        .map((entry, index) => (index === 0 ? entry.getBoundingClientRect().top
+          : entry.querySelector(":scope > .gsm-hoshidicts-entry-header").getBoundingClientRect().bottom) - origin),
+      rect: scroll.getBoundingClientRect().toJSON(), pageY: window.scrollY, pageWheels: window.__pageWheels,
+      cancelled: [...window.__altWheelsCancelled] };
+  });
+  const altWheelScrolledTo = top => tab.waitForFunction(value => {
+    const scroll = document.querySelector("hachidori-host")?.shadowRoot
+      ?.querySelector(".gsm-hoshidicts-popup:not([hidden]) .gsm-hoshidicts-content-scroll");
+    return scroll && Math.abs(scroll.scrollTop - value) <= 1;
+  }, { timeout: 2000 }, top).catch(() => null);
+  const altWheelPopup = await hover("#verb", { accept: state => state.text.includes("unrelated term-dictionary definition") });
+  const altWheelStart = altWheelPopup === null ? null : await readAltWheelPane();
+  let altWheeled = null;
+  if (altWheelStart) {
+    await popup.dictionaryTabs("scroll", 0);
+    // The pane's left padding: a scrollable target with no glyph to scan.
+    await tab.mouse.move(altWheelStart.rect.left + 3, altWheelStart.rect.top + altWheelStart.rect.height / 2);
+    const second = Math.min(altWheelStart.offsets[1] ?? 0, altWheelStart.maxScroll);
+    await tab.keyboard.down("Alt");
+    await tab.mouse.wheel({ deltaY: 30 });
+    await altWheelScrolledTo(second);
+    const down = await readAltWheelPane();
+    await tab.mouse.wheel({ deltaY: -30 });
+    await altWheelScrolledTo(0);
+    await new Promise(done => setTimeout(done, 300));
+    const up = await readAltWheelPane();
+    await tab.keyboard.up("Alt");
+    altWheeled = { start: altWheelStart, second, down, up, visible: await popup.waitForVisible(1000) !== null };
+  }
+  await tab.keyboard.press("Escape");
+  await popup.waitForHidden();
+  await tab.evaluate(() => {
+    document.body.removeEventListener("wheel", window.__countPageWheel);
+    window.removeEventListener("wheel", window.__recordAltWheel, true);
+    document.body.style.minHeight = "";
+    window.scrollTo(0, 0);
+  });
+  await writeMaxResults(readerMaxResults);
+  check("Alt+wheel over the popup moves one entry per step without scrolling the pane or the page",
+    altWheeled !== null && altWheeled.visible && altWheeled.start.offsets.length >= 2 && altWheeled.second > 31
+      && Math.abs(altWheeled.down?.scrollTop - altWheeled.second) <= 1 && altWheeled.up?.scrollTop <= 1
+      && altWheeled.up.cancelled.length === 2 && altWheeled.up.cancelled.every(Boolean)
+      && altWheeled.up.pageY === altWheeled.start.pageY && altWheeled.up.pageWheels === altWheeled.start.pageWheels,
+    JSON.stringify(altWheeled));
+
   const verb = await hover("#verb");
   check("hovering an inflected verb shows a popup", verb !== null,
     "no .gsm-hoshidicts-popup appeared within 12 hover attempts");
@@ -13447,8 +13585,14 @@ async function main() {
   check("Compact summaries wrap without clipping and retain narrow toolbar access", true);
   await checkCompactGlossaries(browser);
   check(COMPACT_GLOSSARIES_CHECK, true);
+  await checkStructuredTable(browser);
+  check(STRUCTURED_TABLE_CHECK, true);
   await checkActionRow(browser);
   check(ACTION_ROW_CHECK, true);
+  await checkDynamicHeadword(browser, { screenshotDirectory: process.env.HACHIDORI_DYNAMIC_HEADWORD_SCREENSHOTS });
+  check(DYNAMIC_HEADWORD_CHECK, true);
+  await checkLookupCountLayout(browser);
+  check(LOOKUP_COUNT_LAYOUT_CHECK, true);
   await checkCompactSummaries(page, tab, popup, browser);
   await checkReaderActivation(page, tab, popup);
   await checkReaderSelection(browser, page, tab, popup);
@@ -15032,7 +15176,8 @@ async function main() {
       && extensionTotal.reply.heapBytes === lowMemoryBefore.memory.heapBytes
       && extensionTotal.reply.bytes >= extensionTotal.reply.heapBytes
       && extensionTotal.reply.bytes - extensionTotal.reply.heapBytes < extensionTotal.reply.heapBytes
-      && lowMemoryBefore.status.pagedDictionaries === false
+      && lowMemoryBefore.status.pagedDictionaries === true
+      && lowMemoryBefore.status.dictionaryEntryStorage === "auto"
       && lowMemoryOptions?.lowMemoryMode === true
       && lowMemoryStatus?.threaded === true && lowMemoryStatus.storageBackend === "opfs"
       && lowMemoryStatus.pagedDictionaries === true,
@@ -15128,11 +15273,27 @@ async function main() {
     "turning low memory mode off restarts the full-pool worker",
     fullPoolOptions?.lowMemoryMode === false
       && fullPoolStatus?.threaded === true && fullPoolStatus.dictionaryCount === 1
-      && fullPoolStatus.pagedDictionaries === false
+      && fullPoolStatus.pagedDictionaries === true
       && fullPoolLookup.ok === true && fullPoolLookup.results[0]?.term.expression === "食べる"
-      && fullPoolMemory.dictionaries[0]?.paged === false && fullPoolMemory.pageCacheBytes === 0
-      && fullPoolMemory.dictionaries[0].bytes === indexBytes + lowMemorySizes["blobs.bin"],
+      && fullPoolMemory.dictionaries[0]?.paged === true
+      && fullPoolMemory.dictionaries[0].bytes === indexBytes,
     JSON.stringify({ status: fullPoolStatus, lookup: fullPoolLookup, memory: fullPoolMemory, lowMemoryMode: fullPoolOptions?.lowMemoryMode }),
+  );
+
+  await page.select("#opt-dictionary-entry-storage", "resident");
+  const residentStatus = await page.waitForFunction(async () => {
+    const status = await chrome.runtime.sendMessage({ target: "hoshidicts-offscreen", type: "hd_status" });
+    return status?.ok && status.ready && !status.loading && status.dictionaryEntryStorage === "resident" ? status : false;
+  }, { timeout: 30_000, polling: 250 }).then(handle => handle.jsonValue()).catch(() => null);
+  const residentLookup = await engineRequest("hd_lookup", { text: "食べる" });
+  const residentMemory = await engineRequest("hd_memory");
+  check(
+    "resident entry storage restores mapped entries independently of low memory mode",
+    residentStatus?.lowMemory === false && residentStatus.pagedDictionaries === false
+      && residentMemory.dictionaries[0]?.paged === false && residentMemory.pageCacheBytes === 0
+      && residentMemory.dictionaries[0].bytes === indexBytes + lowMemorySizes["blobs.bin"]
+      && residentLookup.ok === true && JSON.stringify(residentLookup.results) === JSON.stringify(fullPoolLookup.results),
+    JSON.stringify({ status: residentStatus, memory: residentMemory, lookup: residentLookup }),
   );
   await engineRequest("hd_remove", { title: lowMemoryTitle });
   await page.waitForFunction(async () => {

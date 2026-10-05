@@ -87,6 +87,31 @@ renderer timings and cumulative counts of Default view construction, rich glossa
 calls and dictionary-style application. These are separate from input-to-frame
 and complete-result measurements; see [the theme report](../docs/themes/benchmark.md).
 
+For Bee's repeated dictionary headers, `bee-renderer.mjs` measures production
+rendering and presentation updates with forced synchronous layout. It covers
+3 and 36 blocks, three named frequency sources, pitch, custom actions, eight
+senses per dictionary, and a group showing 12 of the 36 blocks. It compares
+unchanged, group-name and pitch-only updates, records chip identity and helper
+calls, and checks dictionary/glossary/visibility signatures across revisions.
+Frequency text, accessible labels and pitch morae also enter those signatures.
+The default is six fresh browser profiles, 20 excluded warmups and 100
+measurements per scenario/revision/profile (600 per scenario/revision). Both
+revisions render in independent shadow roots in one document and renderer
+process. Measured execution order reverses on every iteration; setup and
+scenario order reverse in odd profiles. The harness requires byte-identical
+shared production components, so each revision uses its own Bee module/CSS
+with the same shared helpers. `HACHIDORI_BEE_PROFILES` changes the profile count.
+
+```sh
+HACHIDORI_CHROME=/path/to/chrome HACHIDORI_PUPPETEER=/path/to/puppeteer-core.js \
+  node benchmark/bee-renderer.mjs /tmp/bee-renderer /path/to/before /path/to/after
+```
+
+These targeted timings exclude engine lookup, transport, runtime action binding,
+asynchronous media and paint. Pair them with the Bee-only hover harness for
+input-to-frame timings. The [Bee UI performance report](../docs/themes/bee-ui-performance.md)
+retains the compared revisions, setup, raw samples and limitations.
+
 Use `HACHIDORI_HOVER_SAMPLES` to change the profile count. Each profile also times
 1,000 production `resolveCandidate()` calls at a glyph, 1,000 at a point in
 the tile's padding, 20 CSS pixels left of the text, 1,000 at a word 600
@@ -282,22 +307,31 @@ explicitly skipped on other platforms. Its Linux assertions remain unchanged;
 the other framework tests, including the current-account Chrome cache fixture,
 also run on macOS. This does not add non-Linux process metrics to the runner.
 
-## Low memory mode
+## Entry storage and Low memory mode
 
-`low-memory-mode.mjs` alternates fresh-profile samples with
-[Low memory mode](../docs/memory.md) off and on: the archives imported together
-through Settings' real file input, the import wall time (file selection to ready
-status), the engine heap (`hd_memory.heapBytes`) and the summed Chrome
-process-tree RSS right after the import settles and, with the mode on, again
-after the worker has been recycled, then `hd_lookup` round trips. Without
-`--words` one text is looked up repeatedly (median and p95); with `--words` a
-file of lookup texts, one per line, is looked up `--passes` times (default 2),
-recording each pass's distribution, the page cache and the heap after the last.
-Peak import RSS is not sampled; the standard runner above does that.
+`low-memory-mode.mjs` alternates fresh-profile samples across `--variants`
+(default `resident,auto,low`): Settings → Advanced → Memory → **Dictionary
+entries** set to *Keep in memory* (`resident`), *Automatic* (`auto`, paged on
+direct OPFS) or *Read from disk* (`paged`), each with normal imports, and Low
+memory mode (`low`). Each sample imports the archives together through
+Settings' real file input and records the import wall time (file selection to
+ready status), the engine heap (`hd_memory.heapBytes`), the logical size of the
+imported files in OPFS and the summed Chrome process-tree RSS right after the
+import settles (and, with Low memory mode, again after the worker has been
+recycled). It then restarts Chrome on the retained profile and records the
+restart-to-ready time, the heap and each package's resident bytes and paging
+before any lookup, so the lookups meet an empty page cache. Without `--words`
+one text is looked up repeatedly (median and p95); with `--words` a file of
+lookup texts, one per line, is looked up `--passes` times (default 2),
+recording each pass's distribution, an FNV-1a hash of every reply's results
+(identical across variants when lookups are unchanged), the page cache and the
+heap after the last. RSS needs Linux `/proc` and reads 0 elsewhere. Peak import
+RSS is not sampled; the standard runner above does that.
 
 ```sh
 node benchmark/low-memory-mode.mjs --archive /path/to/jitendex.zip \
-  [--archive /path/to/jmnedict.zip ...] [--words hovers.txt --passes 5] \
+  [--archive /path/to/pixiv.zip ...] [--words hovers.txt --passes 5] \
+  [--variants resident,auto,paged,low] \
   --samples 3 --output benchmark/results/low-memory-mode.json
 ```
 
