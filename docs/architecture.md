@@ -29,7 +29,9 @@ settings.html / content.js
                       │    └─ import-worker.js: a second instance per hd_import
                       ├─ no OPFS access handles: engine-worker-idbfs.js
                       │    └─ pthread Wasm + classic FS + IDBFS
-                      └─ fallback: engine-service.js
+                      ├─ no shared memory: engine-worker-local.js
+                      │    └─ single-thread Wasm + classic FS + IDBFS
+                      └─ no workers: engine-service.js in the document
                            └─ single-thread Wasm + IDBFS
 ```
 
@@ -71,7 +73,7 @@ archive, source-document, or background-storage-queue limit.
 
 If shared Wasm memory and workers are available but direct OPFS is not, `offscreen.js` starts `engine-worker-idbfs.js`: the same pthread engine on the classic Emscripten FS with IDBFS mounted at `/dicts`. Electron (the GameSentenceMiner host) is the known case: it exposes cross-origin isolation and shared memory but refuses OPFS sync access handles to `chrome-extension://` origins. Imports keep the bounded eight-thread worker group (Jitendex imports in about 1.6 s instead of 3.9 s single-threaded), and the offscreen document's own thread stays free for audio and Anki work during an import. `hd_status` reports `threaded: true` and `storageBackend: "idbfs"`.
 
-If shared Wasm memory or workers are unavailable, `offscreen.js` loads the single-thread WebAssembly module locally. That build mounts IDBFS at `/dicts`, restores it before opening dictionaries, and synchronizes generated files after a successful import.
+If shared Wasm memory is unavailable (no cross-origin isolation) but workers are, `offscreen.js` starts `engine-worker-local.js`: the single-thread WebAssembly module in a dedicated worker, through the same `engine-worker-runtime.js` bridge as the pthread workers. Lookups and imports then run off the offscreen document's thread, and the worker can read IndexedDB Blob records by range with `FileReaderSync` (see [memory.md](memory.md)). Low memory mode does not apply to it, so it is never recycled. Only a host without workers loads the single-thread module in the document itself. Either way the build mounts IDBFS at `/dicts`, restores it before opening dictionaries, and synchronizes generated files after a successful import.
 
 Both IDBFS paths are intentionally explicit: `hd_status` reports `storageBackend: "idbfs"`, with `threaded: false` only for the single-thread runtime. The production benchmark rejects either when it is measuring the primary Hachidori path.
 
@@ -103,9 +105,24 @@ Settings row uses to say *Updating…*.
 
 Multiple selected local archives remain separate transactions. Settings runs
 them sequentially, keeps an outcome for each file, and continues after a failure.
+Staging checks the returned memory mapping before copying archive bytes, and a
+cleanup failure cannot replace the original write error. Native exceptions from
+filesystem calls are decoded with the module's exception helpers; their storage
+is released and the shadow stack restored before the module is used again.
+Errors include the archive name and failed stage, with advice for memory or disk
+quota failures, and the failed import report carries the same error as the reply.
 
-While the experimental **MDX dictionaries** flag (`options.experimental.mdxImport`)
-is on, the same picker and drop zone also take MDict files. Settings groups one
+A memory failure gets one reduced-memory retry after the failed transaction has
+rolled back. Direct OPFS starts a fresh import worker with one importer thread
+and stages the archive and any MDD resources on disk in its new, uncommitted
+generation instead of keeping the input file in MEMFS as well as its mapping.
+Transferred bytes are read again before the retry and their length is checked;
+the normal metadata review and commit revalidation still apply. The IDBFS path
+reuses its intact input bytes and retries single-threaded. Failed rollback and
+unknown commit outcomes are never retried, and a second failure stops the import
+with explicit recovery advice. No archive-size limit is imposed.
+
+The same picker and drop zone also take MDict files. Settings groups one
 `.mdx` with the `.mdd` files named after its stem (`Dict.mdd`, `Dict.1.mdd`, …,
 case-insensitively), sends them as one `hd_import` whose `resources` list the
 MDD blob URLs, and reports a `.mdd` without its `.mdx` instead of importing it.
@@ -668,6 +685,11 @@ movement does not cancel it. Dictionary links, clicked kanji, the depth limit an
 protected Note drafts behave the same in every mode. The option is kept local to
 a linked overlay.
 
+Glossary scanning continues when a disclosure, link or action button keeps
+focus. Editing fields and protected Note drafts still pause scanning. Internal
+dictionary links look up their complete target and start with all dictionaries
+visible; Back preserves the parent popup's selected tab.
+
 Disabled readers do not create pointer scan timers. Activation-gated readers
 remember the pointer but do not scan or schedule until the key is held. Modifier
 flags handle entering a tab while holding Shift/Control/Alt/Meta; a printable
@@ -729,13 +751,16 @@ full browser restart without reloading the engine.
 ### Keybinds
 
 `options.keybinds` copies yomitan-gsm's hotkey entries exactly: `action`,
-`argument`, `key` (a `KeyboardEvent.code`, or `null` for modifiers only),
-`modifiers`, `scopes` and `enabled`. Only actions that map onto an existing
-Hachidori control are offered. Close, entry and dictionary navigation, Back, Add
-note, View notes, Play audio, Play audio from source, Scan selected text, Scan
-text at selection and Toggle option are available. The defaults are Yomitan's
-keys for those actions: Escape, Alt+PageUp/PageDown (three entries),
-Alt+ArrowUp/ArrowDown, Alt+Home/End, Alt+B, Alt+E, Alt+P and Alt+V.
+`argument`, `key` (a `KeyboardEvent.code`, `WheelUp`/`WheelDown` for a wheel
+step, or `null` for modifiers only), `modifiers`, `scopes` and `enabled`. Only
+actions that map onto an existing Hachidori control are offered. Close, entry
+and dictionary navigation, Back, Add note, View notes, Play audio, Play audio
+from source, Scan selected text, Scan text at selection and Toggle option are
+available. The defaults are Yomitan's keys for those actions: Escape,
+Alt+PageUp/PageDown (three entries), Alt+ArrowUp/ArrowDown, Alt+Home/End, Alt+B,
+Alt+E, Alt+P and Alt+V. Two rows follow them, Alt+WheelUp/WheelDown (one
+entry): Yomitan's popup moves one entry per Alt+wheel event outside its
+hotkeys, so here that gesture is an ordinary binding.
 
 Several Yomitan actions are omitted because Hachidori has no matching feature:
 
@@ -751,26 +776,55 @@ set as Yomitan's `HotkeyHandler` does. The first enabled binding in scope that
 handles the key prevents its default. Unmodified or Shift-only character keys
 stay with a focused text field, and auto-repeat remains ignored.
 
+A wheel step over a popup is matched the same way, with its vertical direction
+as the key, and acts on that popup rather than the deepest one, as Yomitan's
+per-popup wheel handler does; wheel steps over the page stay with the page. One
+notch presses the binding once, whatever its delta. A touchpad sends many small
+steps instead, so steps in one direction with the same modifiers, each under
+100 ms after the last, are one gesture: it presses the binding when it starts
+and again for every further 100 px of travel. A handled step is cancelled before
+it reaches anything else in the popup, so the pane does not also scroll and page
+wheel listeners never see it. An unhandled step keeps the popup's own wheel
+isolation, and Ctrl+wheel stays with the browser unless it is bound.
+
 Yomitan's popup scope means a popup that has focus. Hachidori's hover popup never
 takes focus, so here the popup scope means a popup is open or its lookup is
 pending. The page scope applies anywhere. Settings offers the scopes Yomitan's
 controller offers for each action. Toggle option adds the page scope, because no
 popup exists while lookups are off.
 
-Close keeps the reader's Escape order and event handling. Popup actions target the
+Close keeps the reader's Escape order and event handling. A key press acts on the
 deepest visible popup. As in Yomitan, the current entry starts at the first entry
-and changes only through navigation or a click on an entry. Navigation reveals
-later entries through the existing Show more control. Dictionary navigation moves
+and changes through navigation or a click on an entry. It also changes when
+scrolling changes the result the popup's header shows (below). Navigation reveals
+later entries through the existing Show more control. Entry navigation scrolls the
+target's own header just under the popup's header. Dictionary navigation moves
 from the most visible glossary card to the nearest card from another dictionary.
 Add note, View notes and Back click the current entry's existing buttons, so
 duplicate and disabled behavior is unchanged. Audio replays without
 the click toggle, or plays the first choice from the selected source. Toggle
 option writes one boolean through the revisioned options CAS.
 
+The Default popup's header shows the result being read: the last result whose
+own header has scrolled above the definitions, or the first result (#488). In
+Yomitan every entry's header scrolls with its entry; Hachidori's header stays
+where it is, so the shown result's own headword and action row move into it,
+the same bound nodes, and the first result's stay there hidden. The emptied
+header keeps its height, so no definition moves. The header's Anki,
+pronunciation and custom Anki buttons, the personal-dictionary prefill and custom
+links then act on that result. A scroll event or a layout pass reads at most a
+few header edges. A Note form, a pending personal-dictionary save, a child popup
+or a focused custom Anki button holds the header until it is released. Keyboard
+focus on a control that leaves the header moves to the incoming result's Anki
+button, if the Anki button had it, or else its pronunciation button. Bundled
+renderers other than Default keep each header with its entry.
+
 The Keybinds section edits the list like Yomitan's key field: a key press
 replaces the modifiers, a non-modifier key replaces the key, and plain Tab still
-moves focus. Each row has Clear, Reset (the action's first default binding) and
-Remove. The section also has Add and Reset keybinds to defaults.
+moves focus. Turning the wheel with a modifier held over the focused field
+records that wheel step; a plain wheel still scrolls Settings. Each row has
+Clear, Reset (the action's first default binding) and Remove. The section also
+has Add and Reset keybinds to defaults.
 
 Yomitan's native browser shortcuts are manifest `commands` for the features
 Hachidori has:
@@ -810,11 +864,9 @@ past `scanLength` only when the processed text begins like one of those keys, up
 to that key's length plus eight code points for an inflected ending; other text
 keeps the cost of `scanLength`. `packageFromIndex` records the longest such key
 on the package row as `longKeyLength` (0 for packages imported before the index
-existed). While the experimental **Long dictionary entries** flag
-(`options.experimental.longKeyScan`) is on, the reader collects
-`max(scanLength, longKeyLength + 8)` code points of page text across enabled
-term packages, capped at 256, while still requesting `scanLength`; with the flag
-off it collects `scanLength` as before, so the engine never sees a longer key.
+existed). The reader collects `max(scanLength, longKeyLength + 8)` code points
+of page text across enabled term packages, capped at 256, while still
+requesting `scanLength`.
 Scans shorter than eight code points never extend, so a clicked-kanji lookup
 stays one character.
 
@@ -1306,7 +1358,9 @@ never picks their Han forms. The glossary rules in `reader.css` follow Yomitan's
 dictionary's own styles still override them, with Yomitan's variable names mapped
 onto the popup palette. Hachidori keeps its per-dictionary cards, the monochrome
 image mask, table scrolling, failed-image labels and 1em-per-pixel image boxes at
-its 16px text. The Anki export keeps Yomitan's own Anki shape (one element bare,
+its 16px text. A disclosure table's scroller includes the disclosure indent, so
+dictionary-authored negative margins can extend into it without clipping the
+first column. The Anki export keeps Yomitan's own Anki shape (one element bare,
 several as a list) through the renderer's `layout: "anki"` option.
 
 Definition tags follow Yomitan's tag banks (#426). Tag, rule and kanji reading
@@ -2287,6 +2341,15 @@ after resize or media load.
 The final edge is resolved once, avoiding an intermediate Top move before an
 Automatic root's actual placement is known.
 
+The toolbar is the popup's whole header: the headword with its furigana and
+deinflection, the compact summary and the actions, plus the dictionary tabs
+when a group or favourite adds them. An Automatic popup that opens above its
+word therefore shows the headword last, next to the word. Readers look for
+the headword rather than the toolbar, so Settings names the control
+**Headword and toolbar position** and its hint says what Automatic and Top do
+(#484). **Top** keeps the headword first in both placements, as Yomitan
+shows it.
+
 An unchanged edge never reorders controls. A changed edge keeps the toolbar
 and Note form adjacent in DOM and visual order. If a tab, Note field, or glossary
 link has focus, only unfocused immediate siblings move around its owner: the
@@ -2368,6 +2431,10 @@ across a settings change. A saved field that differs from the submitted value
 not skip deferred pronunciation; only a failed readback or a first field Anki
 did not save as submitted does, and enrichment still refuses to update a
 pronunciation field whose current value changed.
+
+The `{frequencies}` marker writes Yomitan's left-aligned `<ul>` with one `<li>`
+per frequency value. It shares the single-dictionary frequency formatter,
+including dictionary aliases and HTML escaping.
 
 Only requested glossary variants are exported through the shared structured
 renderer into inert HTML. As in Yomitan's default Anki field templates, each
@@ -2672,7 +2739,8 @@ Unlinking restores the kept values with `max(kept, mirrored) + 1` revisions and
 removes the host's `lookupStats:` rows. The local-only `sharing` key holds
 `{ host: { enabled, port, network } | null, client: { address } | null }` and
 neither it nor `sharingLocalState` is part of backups. For an overlay client,
-activation/scanning, source highlighting and popup geometry are composed from
+Anki configuration, pronunciation sources, custom buttons and their legacy links, activation/scanning,
+source highlighting and popup geometry are composed from
 the kept local options. Its private `sharingOptionsVersion` stores the host
 revision and an offset for one increasing live revision; it is also excluded
 from backups. Local-only writes commit the live and kept options together,
@@ -2689,7 +2757,9 @@ welcome view probes this computer once and, when a shared Hachidori answers,
 offers to use it; that link then advances setup to `complete`. See
 [sharing](sharing.md) for use.
 
-Linked Anki mining keeps `hd_anki_screenshot`/discard local to the reading
+Overlay clients keep Anki discovery, mining and the duplicate index local while
+linked; the host supplies dictionary data. For ordinary linked browsers,
+linked Anki mining keeps `hd_anki_screenshot`/discard local to the reading
 browser. Settings discovery, preflight, submit, browse and maturity go to the
 host. A popup's preflight batch reaches the host as one `hd_anki_preflight`
 per result, sent together, each with its own browser-speech follow-up, so the
@@ -2714,7 +2784,7 @@ uncertain write leaves it for inspection and an explicit retry.
 | Capture tab/document routing identities | service worker; recovered by validating the surviving offscreen host and reader | transient memory only |
 | Watched DOM nodes/ranges, cue/DOM observers, and collector epochs | linked content script | transient memory only |
 
-The engine holds each loaded dictionary's index and entry files (`blobs.bin`) in WebAssembly linear memory once, however many kinds it loads as (Emscripten emulates `mmap` by copying), and that memory never shrinks; media (`media.bin`) is read from the file when `hd_media` asks for it. On direct OPFS an import's high-water mark belongs to the terminated `import-worker.js` instance and is returned to the browser; the engine's heap grows only by the new generation's resident files. On IDBFS the import runs inside the engine, so its high-water mark stays for the life of the engine worker. `hd_memory` reports the heap and each loaded package's resident bytes; Settings → Advanced → Memory shows them, and its **Low memory mode** switch (`options.lowMemoryMode`) makes `offscreen.js` recycle the engine worker once idle after a dictionary change and start it with a two-thread pool that imports single-threaded and loads every package paged: only its index stays in the heap and `blobs.bin` is read through a bounded page cache (`engine-recycler.js`, `engine-worker-runtime.js`, `hd_engine_config`, `hdw_add_dict`'s `paged` argument). Any worker loads a package paged when it does not fit in the heap mapped. [memory.md](memory.md) explains the model, the readout, the mode's costs and the two failure regimes.
+The engine holds each loaded dictionary's index files in WebAssembly linear memory once, however many kinds it loads as (Emscripten emulates `mmap` by copying), and that memory never shrinks. Direct OPFS workers default to paged entries (`blobs.bin`) through the existing shared page cache; `options.dictionaryEntryStorage` selects `auto` (OPFS paged, IDBFS resident), `paged`, or `resident` independently of import threading and low-memory recycling; changing the policy restarts the idle worker. Existing stored options adopt `auto` without reimporting dictionaries; media (`media.bin`) is read from the file when `hd_media` asks for it. On direct OPFS an import's high-water mark belongs to the terminated `import-worker.js` instance and is returned to the browser; the engine's heap grows only by the new generation's resident files. On IDBFS the import runs inside the engine, so its high-water mark stays for the life of the engine worker. `hd_memory` reports the heap and each loaded package's resident bytes; Settings → Advanced → Memory shows them, and its **Low memory mode** switch (`options.lowMemoryMode`) makes `offscreen.js` recycle the engine worker once idle after a dictionary change and start it with a two-thread pool that imports single-threaded and loads every package paged: only its index stays in the heap and `blobs.bin` is read through a bounded page cache (`engine-recycler.js`, `engine-worker-runtime.js`, `hd_engine_config`, `hdw_add_dict`'s `paged` argument). Any worker loads a package paged when it does not fit in the heap mapped. [memory.md](memory.md) explains the model, the readout, the mode's costs and the two failure regimes.
 
 The offscreen document deliberately has no direct `chrome.storage` access. It asks the service worker to read or compare-and-set dictionary metadata. Those writes are serialized so a settings-page edit cannot be silently overwritten by a stale engine write. Dictionary-state commits prune removed package IDs from global groups and invalid selectors in the same storage transaction, and every Settings option write is revalidated there so a stale page cannot restore them.
 
@@ -2783,10 +2853,10 @@ and in-flight dictionary commits when leaving Settings.
 | `hd_lookup` | Run a bounded scan/deinflection lookup |
 | `hd_anki_maturity` | Read whether the first term's expression has a mature card in the selected duplicate-index scope; independent of engine and mutation queues |
 | `hd_open_external` | Validate and open a user-activated HTTP(S) dictionary link in a browser tab, outside storage and engine queues |
-| `hd_status` | Report readiness, loading state, dictionary count, generation, storage backend, threading mode, and whether the worker is the low-memory one (`lowMemory`) that reads every package's entries from disk (`pagedDictionaries`); while the offscreen bridge runs an import, `updating: { id, phase, fallback }` names the replaced package and phase |
+| `hd_status` | Report readiness, loading state, dictionary count, generation, storage backend, threading mode, and whether the worker is the low-memory one (`lowMemory`) and its entry storage policy (`dictionaryEntryStorage`) and whether every package's entries are read from disk (`pagedDictionaries`); while the offscreen bridge runs an import, `updating: { id, phase, fallback }` names the replaced package and phase |
 | `hd_memory` | Report the engine heap size, the paged entries' cache (`pageCacheBytes`), and each loaded package's resident bytes (its index files and, unless it is `paged`, its entries, once however many native kinds it loads as); see [memory.md](memory.md) |
 | `hd_memory_total` | Answered by the offscreen document itself, outside the engine queue: `performance.measureUserAgentSpecificMemory()` over the document and its workers, with the engine heap (`heapBytes`, from `hd_memory`) counted once rather than once per engine thread; `bytes` is `null` where the API is unavailable; see [memory.md](memory.md) |
-| `hd_engine_config` | Read `options.lowMemoryMode` for the offscreen document (its sender only) before it creates the engine worker; the service worker pushes the same message to the document when the stored option changes |
+| `hd_engine_config` | Read `options.lowMemoryMode` and `options.dictionaryEntryStorage` for the offscreen document (its sender only) before it creates the engine worker; the service worker pushes the same message to the document when the stored option changes |
 | `hd_reload` | Reload enabled dictionaries from persisted metadata |
 | `hd_remove` | Stage a package's files, commit its removal, then delete the staged copy |
 | `hd_state_read` | Read revisioned dictionary state through the service worker |

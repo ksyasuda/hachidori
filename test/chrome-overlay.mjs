@@ -100,6 +100,7 @@ const PAGE_HTML = `<!doctype html><html><head><meta charset="utf-8"><title>overl
   box("line", ${JSON.stringify(TEXT)}, 100);
   box("line2", "漢字", 200);
   window.__hostEvents = [];
+  window.addEventListener("mousedown", (event) => { window.__lastPressPrevented = event.defaultPrevented; });
   for (const type of ["hachidori-popup-shown", "hachidori-popup-hidden"]) {
     window.addEventListener(type, () => window.__hostEvents.push(type.replace("hachidori-popup-", "")));
   }
@@ -884,6 +885,29 @@ try {
   assert.equal(beyond, TEXT.slice(2), "dragging past the last box keeps its glyph");
   await tab.keyboard.press("Escape");
   assert.equal(await popup.waitForHidden(), true);
+
+  // Over a full-window layer with an in-flow caption (SubMiner's subtitle
+  // overlay), the caret APIs snap to the caption from anywhere. A press away
+  // from it pressed no glyph: the page keeps its press and no drag starts.
+  await tab.evaluate(() => {
+    window.getSelection().removeAllRanges();
+    const layer = document.createElement("div");
+    layer.id = "caption-layer";
+    layer.style.cssText = "position:fixed;inset:0;display:flex;align-items:flex-end;justify-content:center";
+    layer.innerHTML = '<span style="font-size:34px;margin-bottom:20px">下の字幕です</span>';
+    document.body.append(layer);
+  });
+  await settle();
+  await events();
+  await tab.mouse.move(boxes[0].x, second.y + second.height + 150);
+  await tab.mouse.down();
+  const awayPrevented = await tab.evaluate(() => window.__lastPressPrevented);
+  await tab.mouse.up();
+  await settle();
+  await tab.evaluate(() => document.getElementById("caption-layer").remove());
+  assert.deepEqual({ prevented: awayPrevented, selected: await selected(), popup: popup.visible(await popup.state()) },
+    { prevented: false, selected: "", popup: false }, "a press away from every glyph starts no glyph drag");
+  await events();
 
   // Issue #430: a link button's %s is the OCR line the lookup came from, as
   // its Anki sentence is: for a hover, a drag over several glyphs, a drag over

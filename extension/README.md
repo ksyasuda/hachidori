@@ -27,7 +27,9 @@ those saved settings or other tabs.
 The popup action row is one non-wrapping keyboard and visual group: a nested
 Close or Back control first, then Anki, pronunciation, personal-dictionary
 edit, and custom buttons in saved order. A custom button opens a URL template
-or mines with a chosen Anki Template. Actions share a 32-pixel height and a
+or mines with a chosen Anki Template. The Default renderer's header shows the
+result being read, so its Anki, pronunciation and custom buttons act on the
+result whose definitions are at the top. Actions share a 32-pixel height and a
 4-pixel gap. An icon-only row takes its natural width, so the compact summary
 sits beside the headword; a row with labelled custom buttons shares the line
 from a fixed basis and truncates the labels. At narrow popup widths the whole action row scrolls horizontally
@@ -41,7 +43,7 @@ validated URL in the system browser.
 | --- | --- | --- |
 | `background.js` | the service worker | Routes every runtime message and owns everything in `chrome.storage.local`: dictionary metadata, options, the personal dictionary, update schedules, lookup counts, automatic-backup metadata, first-run and sharing state. It also owns the alarms, the Anki gateway and the sharing host and client. It holds no engine state, so Chrome may stop it whenever it is idle. |
 | `content.js`, with the classic scripts listed under `content_scripts` | every frame of a web page | Scans the Japanese text near the pointer and renders a popup in that frame, bounded by its viewport. The popup uses a shadow root through `theme-host.js` and the selected renderer (`render/popup.js` for Default), with Anki and pronunciation controls (`anki-content.js`, `audio-content.js`). `content.css` is the only style the page itself receives: the source highlight. |
-| `offscreen.html`, `offscreen.js` | Chrome’s offscreen document | Owns the dictionary engine. `engine-worker.js` runs the pthread build with direct OPFS once `opfs-capability-worker.js` has proved the browser can, and imports each archive in a short-lived second instance, `import-worker.js`, so lookups keep working; `engine-worker-idbfs.js` runs the pthread build on IDBFS when the browser has shared memory but no OPFS access handles (Electron), both through `engine-worker-runtime.js`; `engine-service.js` is also the single-thread IDBFS fallback. `engine-recycler.js` decides when Low memory mode replaces the worker ([docs/memory.md](../docs/memory.md)). Pronunciation, Anki and the first-run installer load here on demand. |
+| `offscreen.html`, `offscreen.js` | Chrome’s offscreen document | Owns the dictionary engine. `engine-worker.js` runs the pthread build with direct OPFS once `opfs-capability-worker.js` has proved the browser can, and imports each archive in a short-lived second instance, `import-worker.js`, so lookups keep working; `engine-worker-idbfs.js` runs the pthread build on IDBFS when the browser has shared memory but no OPFS access handles (Electron), and `engine-worker-local.js` the single-thread build on IDBFS when there is no shared memory, all through `engine-worker-runtime.js`; `engine-service.js` runs in the document only where workers are unavailable. `engine-recycler.js` decides when Low memory mode replaces the worker ([docs/memory.md](../docs/memory.md)). Pronunciation, Anki and the first-run installer load here on demand. |
 | `settings.html`, `settings.js` | the options page | Dictionaries, groups, updates, the personal dictionary, Reading, Design, pronunciation, Anki, keybinds, backup and sharing, and global search. The larger sections have their own `*-settings.js` controller; `design-preview.html` is the live preview inside Design. |
 | `startup.html`, `startup.js` | a tab opened once after install | First-run setup: recommended dictionaries, Anki detection, a practice lookup, and the offer to use a Hachidori that another browser on this computer already shares. Overlay mode skips it. |
 | `toolbar.html`, `toolbar.js` | the toolbar button's popup | Turns lookups on and off, shows the sharing state and opens Settings. |
@@ -106,7 +108,9 @@ the service worker and both engine runtimes run the same code.
   and `backup-settings.js` the manual and automatic restore controls.
 - **Sharing.** `sharing-protocol.js` is the wire contract both sides import;
   `sharing-host.js` and `sharing-client.js` are the two roles in the service
-  worker; `sharing-settings.js` is the Settings section. `anki-addon.js` pins
+  worker; `sharing-settings.js` is the Settings section. `linked-import.js`
+  sends a dictionary archive to a host in chunks and, on the host, holds the
+  upload until it imports it ([docs/sharing.md](../docs/sharing.md#imports-from-linked-browsers)). `anki-addon.js` pins
   and downloads the compatible `.ankiaddon` release from
   [hachidori-anki](https://github.com/bee-san/hachidori-anki), which owns the
   Python relay, its tests, and packaging.

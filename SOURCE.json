@@ -1,0 +1,23 @@
+{
+  "repository": "https://github.com/bee-san/hachidori",
+  "revision": "991c48cd4c7ed65b946a4b42e7a5d7e5a770ddd1",
+  "hoshidicts": {
+    "repository": "https://github.com/bee-san/hoshidicts",
+    "revision": "1b69ca26b09c926d623e4bb17c89864e0f14b85e"
+  },
+  "license": "GPL-3.0-or-later",
+  "artifacts": {
+    "extension/vendor/hoshidicts-threaded-idbfs.mjs": "9591da9a94608597ccd571608b08d58dd06fd0ebd37568ed1e9cc2a9a83b2398",
+    "extension/vendor/hoshidicts-threaded-idbfs.wasm": "24d85e8468d2cfd6eda5a13e82c3479a494fb6f25609e079832afb9c9d4d7412",
+    "extension/vendor/hoshidicts-threaded.mjs": "8241e80b56c6af0ae6e080fc42cbf44d379585dd36db538117ca0494b2a77bd1",
+    "extension/vendor/hoshidicts-threaded.wasm": "3969c63d91a205bdcca623cf7098f45cfc02b2d0a5dfa00cacdf6e5de85534dc",
+    "extension/vendor/hoshidicts.mjs": "ee817d5203d99a49e46032af479eaae0b21aaf4e5eb35d20b1d822482090b7a4",
+    "extension/vendor/hoshidicts.wasm": "705f9e746fd411ff17f9c31f27f32bd19556bb4a96546d3411ffcfe9aa25394a"
+  },
+  "localChanges": [
+    "Expose popup host attributes, successful lookups, mouse events and host commands to SubMiner; visibility uses native Hachidori events.",
+    "Mark initial Anki adds and overwrites for SubMiner media enrichment; background pronunciation enrichment stays unmarked.",
+    "Prioritize SubMiner character glossaries and character-name lookup results in the host popup.",
+    "Send private mining metadata only to the exact SubMiner-managed Anki proxy URL; direct AnkiConnect uses standard parameters."
+  ]
+}

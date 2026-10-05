@@ -36,6 +36,7 @@ import {
   TRAINED_TERMS,
   TRAINED_TITLE,
   TRAINING_SAMPLE_FLOOR,
+  buildDataDescriptorZip,
   buildEntryCountZip,
   buildEntryExpandedZip,
   buildFixtureZip,
@@ -982,6 +983,12 @@ check('compression ratios above the former cap are not rejected by a fixed limit
 check('a forged local/central size disagreement is refused', () =>
   rejectedWith(buildForgedSizeZip(), ARCHIVE_ERRORS.forgedSize, 'forged size'));
 
+check('entries that defer their sizes to data descriptors import like the fixture (#491)', () =>
+  acceptedWithoutResourceCap(buildDataDescriptorZip(), 'data descriptors'));
+
+check('a data-descriptor entry whose local header records other sizes is refused', () =>
+  rejectedWith(buildForgedSizeZip({ dataDescriptor: true }), ARCHIVE_ERRORS.forgedSize, 'forged descriptor size'));
+
 check('a deflate entry with no compressed data for its declared size is refused', () =>
   rejectedWith(buildTinyCompressedZip(), ARCHIVE_ERRORS.tinyCompressed, 'tiny compressed'));
 
@@ -1401,6 +1408,41 @@ check('a dictionary-scoped lookup returns only the requested term dictionary', (
 check('a dictionary-scoped lookup retains shared frequency and pitch metadata', () => {
   eq(selectedLookup.results[0].term.frequencies[0]?.dictionary, TITLE, 'frequency dictionary');
   eq(selectedLookup.results[0].term.pitches[0]?.dictionary, TITLE, 'pitch dictionary');
+});
+
+G('definition score order (#472)');
+
+check('definitions sort by score within each dictionary, keeping ties, tags and dictionary priority', () => {
+  const titles = ['definition-order-first', 'definition-order-second'];
+  const paths = titles.map(title => `/dicts/${title}`);
+  const terms = [
+    ['青タン', 'あおタン', 'hanafuda', '', -4, ['hanafuda'], 2723740, ''],
+    ['青タン', 'あおタン', 'colloquial', '', 0, ['bruise'], 2223970, ''],
+    ['青タン', 'あおタン', 'tie', '', 0, ['equal-score later row'], 3, ''],
+    ['青タン', 'あおタン', 'fraction-low', '', -0.75, ['lower fraction'], 4, ''],
+    ['青タン', 'あおタン', 'fraction-high', '', -0.25, ['higher fraction'], 5, ''],
+  ];
+  const expected = [terms[1], terms[2], terms[4], terms[3], terms[0]]
+    .map(row => [JSON.stringify(row[5]), row[2]]);
+  const secondTerms = [['青タン', 'あおタン', 'second', '', 100, ['second dictionary'], 6, '']];
+  for (const [index, title] of titles.entries()) {
+    const zipPath = `/work/${title}.zip`;
+    M.FS.writeFile(zipPath, buildTitledZip(title, { terms: index === 0 ? terms : secondTerms }));
+    ok(hdwImport(zipPath, '/dicts').success, lastError());
+  }
+  const project = term => term.glossaries.map(({ glossary, definitionTags }) => [glossary, definitionTags]);
+  const second = [[JSON.stringify(secondTerms[0][5]), secondTerms[0][2]]];
+  for (const paged of [0, 1]) {
+    reset();
+    paths.forEach(path => eq(addDict(path, 0, paged), 1, lastError()));
+    const response = lookup('青タン');
+    conforms(response, LOOKUP_RESPONSE, 'definition ordering response');
+    same(project(response.results[0].term), [...expected, ...second], `dictionary priority, paged=${paged}`);
+    eq(response.results[0].term.score, 100, 'merged score still keeps its maximum');
+    same(project(lookupDictionary('青タン', paths[0]).results[0].term), expected, 'selected dictionary');
+    eq(call('hdw_set_dict_order', 'number', ['string'], [JSON.stringify([...paths].reverse())]), 1, lastError());
+    same(project(lookup('青タン').results[0].term), [...second, ...expected], 'reordered dictionaries');
+  }
 });
 
 G('long keys beyond the scan length');

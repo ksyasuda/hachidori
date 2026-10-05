@@ -139,8 +139,8 @@ function genericPackage(overrides = {}) {
     ...overrides,
   };
 }
-// Where chrome-e2e.mjs already keeps puppeteer-core, so one out-of-repo tree
-// holds every test dependency. HACHIDORI_JSDOM or NODE_PATH override it.
+// Legacy external tooling cache, used after the repository's locked test tooling.
+// HACHIDORI_JSDOM or NODE_PATH override both locations.
 const DEFAULT_JSDOM_TREE = resolve(
   process.env.XDG_CACHE_HOME || resolve(homedir(), ".cache"),
   "hachidori-e2e",
@@ -1715,7 +1715,7 @@ async function sharingHostStage() {
       && JSON.stringify(listening.sharing.clients[0].capabilities) === JSON.stringify(["linked-anki-v1"])
       && listening.sharing.clients[0].address === "127.0.0.1" && listening.sharing.clients[0].local === true
       && hello?.kind === "hello" && hello.protocol === 1 && hello.version === "0.0.0-smoke" && hello.name === "another browser" && hello.dictionaryCount === 1
-      && JSON.stringify(hello.capabilities) === JSON.stringify(["linked-anki-v1", "linked-anki-v2", "hoshidicts-api-v1"])
+      && JSON.stringify(hello.capabilities) === JSON.stringify(["linked-anki-v1", "linked-anki-v2", "hoshidicts-api-v1", "linked-import-v1"])
       && JSON.stringify(Object.keys(hello.snapshot).sort()) === JSON.stringify(["customDictionarySource", "dictionaryState", "dictionaryUpdates", "lookupStats", "options"])
       && hello.snapshot.options === null,
     JSON.stringify({ empty, noSocketWhileEmpty, before, enabled, askedForNetwork, listening, hello, sockets: FakeSharingSocket.instances.map(s => [s.url, s.readyState]) }));
@@ -3041,29 +3041,34 @@ async function sharingTransitionStage() {
     const write = (patch, baseRevision = current().revision) => overlay.send("hd_options_write",
       { baseRevision, options: patch }, "hoshidicts-worker");
     const initial = structuredClone(current());
-    const blockedTemplates = await write({
-      anki: globalThis.HDReaderOptions.normaliseOptions({}).anki,
-    });
-    const local = await write({ hoverEnabled: false, popupWidthPx: 480, definitionLookupMode: "click" });
+    const localAnki = globalThis.HDReaderOptions.normaliseAnki({ templates: [{
+      ...globalThis.HDReaderOptions.DEFAULT_ANKI_TEMPLATE, deck: "Overlay deck", model: "Basic",
+    }] });
+    const savedTemplates = await write({ anki: localAnki });
+    const local = await write({ hoverEnabled: false, popupWidthPx: 480, definitionLookupMode: "click", customButtons: [{
+      id: "overlay-link", type: "link", label: "Overlay link", url: "https://overlay.example/%w",
+    }] });
     const rawHost = { ...overlay.hello.snapshot.options, revision: 11, popupTheme: "dracula", popupWidthPx: 1200 };
     socket.receive({ kind: "storage", changes: { options: rawHost } });
     await until(() => current().popupTheme === "dracula");
     const mirrored = structuredClone(current());
     socket.receive({ kind: "storage", changes: { options: overlay.hello.snapshot.options } });
     await tick();
-    check("a linked overlay keeps activation, highlighting and geometry local through host option batches",
+    check("a linked overlay keeps mining, activation, highlighting and geometry local through host option batches",
       initial.hoverEnabled && initial.lookupMode === "hover" && !initial.sourceHighlightEnabled
         && initial.popupWidthPx === 420 && initial.popupTheme === "light"
-        && blockedTemplates.ok === false
-        && blockedTemplates.error === "The linked Hachidori does not support host-owned Anki mining. Update it and try again."
-        && local.ok && local.options.revision === initial.revision + 1 && socket.requests().length === 0
+        && savedTemplates.ok && savedTemplates.options.anki.deck === "Overlay deck"
+        && savedTemplates.options.revision === initial.revision + 1
+        && local.ok && local.options.revision === savedTemplates.options.revision + 1 && socket.requests().length === 0
+        && mirrored.anki.deck === "Overlay deck"
+        && mirrored.customButtons[0]?.id === "overlay-link" && mirrored.customLinks[0]?.label === "Overlay link"
         && mirrored.popupWidthPx === 480 && !mirrored.hoverEnabled && mirrored.lookupMode === "hover"
         && mirrored.definitionLookupMode === "click" && current().definitionLookupMode === "click"
         && !mirrored.sourceHighlightEnabled && mirrored.revision === local.options.revision + 1
         && current().revision === mirrored.revision && current().popupTheme === "dracula"
         && overlay.storage.raw.get("sharingLocalState").options.popupWidthPx === 480
         && overlay.storage.raw.get("sharingLocalState").options.definitionLookupMode === "click",
-      JSON.stringify({ initial, blockedTemplates, local, mirrored, current: current() }));
+      JSON.stringify({ initial, savedTemplates, local, mirrored, current: current() }));
 
     async function answerWrite(promise, hostOptions, expectedCount, ok = true) {
       await until(() => socket.requests().length === expectedCount);
@@ -3081,9 +3086,10 @@ async function sharingTransitionStage() {
     const stale = await write({ popupWidthPx: 900 }, initial.revision);
     check("overlay saves translate host revisions, split mixed patches and reject stale local edits",
       shared.request.baseRevision === 11 && shared.reply.ok && shared.reply.options.popupWidthPx === 480
-        && shared.reply.options.revision === 13
+        && shared.reply.options.revision === mirrored.revision + 1
         && mixed.request.baseRevision === 12 && JSON.stringify(mixed.request.options) === JSON.stringify({ popupTheme: "light" })
-        && mixed.reply.ok && mixed.reply.options.popupWidthPx === 520 && mixed.reply.options.revision === 15
+        && mixed.reply.ok && mixed.reply.options.popupWidthPx === 520
+        && mixed.reply.options.revision === shared.reply.options.revision + 2
         && JSON.stringify(current()) === JSON.stringify(afterMixed)
         && stale.ok === false && stale.conflict === true && socket.requests().length === 2,
       JSON.stringify({ shared, mixed, afterMixed, current: current(), stale }));
@@ -4665,6 +4671,8 @@ function loadSettingsScript(window, { overlayMode = false, recommendedInstall = 
     .replace(/^export\s+/gmu, "");
   const dictionaryImport = readFileSync(resolve(EXTENSION, "dictionary-import.js"), "utf8")
     .replace(/^export\s+/gmu, "");
+  const importErrors = readFileSync(resolve(EXTENSION, "dictionary-import-errors.js"), "utf8")
+    .replace(/^export\s+/gmu, "");
   const setupState = readFileSync(resolve(EXTENSION, "setup-state.js"), "utf8")
     .replace(/import\s*\{[\s\S]*?\}\s*from\s*"\.\/recommended-dictionaries\.js";\s*/u, "")
     .replace(/^export\s+/gmu, "");
@@ -4682,6 +4690,7 @@ function loadSettingsScript(window, { overlayMode = false, recommendedInstall = 
     .replace(/import \{ createActivationSettings \} from "\.\/activation-settings\.js";\s*/u, "")
     .replace(/import \{ createMemorySettings \} from "\.\/memory-settings\.js";\s*/u, "")
     .replace(/^import .* from "\.\/dictionary-name-drafts\.js";\s*/gmu, "")
+    .replace(/^import .* from "\.\/dictionary-import-errors\.js";\s*/gmu, "")
     .replace(/import\s*\{[\s\S]*?\}\s*from\s*"\.\/dictionary-progress\.js";\s*/u, "")
     .replace(/import \{ createAnkiTemplateSettingsController \} from "\.\/anki-settings\.js";\s*/u, "")
     .replace(/import "\.\/reader-options\.js";\s*/u, "")
@@ -4709,7 +4718,7 @@ function loadSettingsScript(window, { overlayMode = false, recommendedInstall = 
     };
   }
   window.eval(
-    `${externalLinks}\n${customButtonSettings}\n${readerOptions}\n${recommended.replace(/^export\s+/gmu, "")}\n${customDictionary}\n${managedSource}\n${groupState}\n${groups}\n${nameDrafts}\n${dictionaryProgress}\n${dictionaryImport}\nasync function readDictionaryArchiveIdentity(file) { return window.__readDictionaryArchiveIdentity(file); }\n${setupState}\n${settingsDom}\n${audioSettings}\n${ankiTemplates}\n${anki}\n${ankiSettings}\n${automaticBackups}\n${backupSettings}\n${experimentalSettings}\n${themeStore}\n${activationSettings}\n${memorySettings}\n${localFileAccess}\n${settings}`,
+    `${externalLinks}\n${customButtonSettings}\n${readerOptions}\n${recommended.replace(/^export\s+/gmu, "")}\n${customDictionary}\n${managedSource}\n${groupState}\n${groups}\n${nameDrafts}\n${dictionaryProgress}\n${dictionaryImport}\n${importErrors}\nasync function readDictionaryArchiveIdentity(file) { return window.__readDictionaryArchiveIdentity(file); }\n${setupState}\n${settingsDom}\n${audioSettings}\n${ankiTemplates}\n${anki}\n${ankiSettings}\n${automaticBackups}\n${backupSettings}\n${experimentalSettings}\n${themeStore}\n${activationSettings}\n${memorySettings}\n${localFileAccess}\n${settings}`,
   );
 }
 
@@ -5797,6 +5806,7 @@ async function main() {
   let status = await request("hd_status");
   equal("hd_status replies with the contract-C envelope", Object.keys(status).sort(), [
     "dictionaryCount",
+    "dictionaryEntryStorage",
     "error",
     "failedDictionaries",
     "generation",
@@ -5902,18 +5912,25 @@ async function main() {
   const unrelatedWrite = await writeReaderOptions(lowMemoryWrite.options.revision, { scanLength: 20 });
   await new Promise((done) => setTimeout(done, 20));
   const pushesAfterUnrelated = enginePushes();
+  const entryStorageWrite = await writeReaderOptions(unrelatedWrite.options.revision, { dictionaryEntryStorage: "resident" });
+  for (let attempt = 0; attempt < 50 && enginePushes() === pushesAfterUnrelated; attempt += 1) {
+    await new Promise((done) => setTimeout(done, 2));
+  }
+  const residentConfig = await readEngineConfig(engineConfigSender);
   check(
     "hd_engine_config is read by the engine host only and pushed when the option changes",
     configFromPage?.ok === false
       && pushFromPage?.ok === false
-      && configOff?.ok === true && configOff.lowMemoryMode === false
+      && configOff?.ok === true && configOff.lowMemoryMode === false && configOff.dictionaryEntryStorage === "auto"
       && lowMemoryWrite.ok === true
       && configOn?.ok === true && configOn.lowMemoryMode === true
       && unrelatedWrite.ok === true
-      && pushesAfterUnrelated === pushesBefore + 1,
-    JSON.stringify({ configFromPage, pushFromPage, configOff, configOn, pushesBefore, pushesAfterUnrelated }),
+      && pushesAfterUnrelated === pushesBefore + 1
+      && entryStorageWrite.ok === true && enginePushes() === pushesAfterUnrelated + 1
+      && residentConfig?.dictionaryEntryStorage === "resident" && residentConfig.lowMemoryMode === true,
+    JSON.stringify({ configFromPage, pushFromPage, configOff, configOn, residentConfig, pushesBefore, pushesAfterUnrelated }),
   );
-  await writeReaderOptions(unrelatedWrite.options.revision, { lowMemoryMode: false, scanLength: optionsBeforeLowMemory.scanLength ?? 16 });
+  await writeReaderOptions(entryStorageWrite.options.revision, { lowMemoryMode: false, dictionaryEntryStorage: "auto", scanLength: optionsBeforeLowMemory.scanLength ?? 16 });
 
   const zip = new Uint8Array(await readFile(FIXTURE));
   const blobUrl = createObjectURL(zip);
@@ -9404,7 +9421,7 @@ async function main() {
       && noteContent.eventFirst?.request?.type === "hd_lookup"
       && noteContent.eventFirst.request.text === "\u5185\u90e8\u8a9e"
       && noteContent.eventFirst.request.maxResults === 7
-      && noteContent.eventFirst.request.scanLength === 9
+      && noteContent.eventFirst.request.scanLength === 3
       && noteContent.eventFirst.request.options?.frequencyDictionary === "Frequency A"
       && noteContent.eventFirst.request.options?.frequencyOrder === "descending"
       && noteContent.eventFirst.request.options?.primaryReading === "\u306a\u3044\u3076\u3054"
@@ -9823,6 +9840,7 @@ async function main() {
 
   await isolatedImportStage({ createHoshidicts, offscreenChrome, storedDictionaryState, idb, trainedExpression });
   await pagedDictionariesStage({ createHoshidicts, offscreenChrome, storedDictionaryState, trainedExpression });
+  await blobBackedIdbfsStage({ createHoshidicts, offscreenChrome, storedDictionaryState, idb });
 
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);
@@ -9977,6 +9995,244 @@ async function pagedDictionariesStage({ createHoshidicts, offscreenChrome, store
       && (await mapped.request("hd_status")).failedDictionaries.length === 0,
     JSON.stringify(removed),
   );
+
+  // A disabled package is validated with its entries read on demand, in both
+  // the startup and the incremental load, and enabling it then uses the active
+  // policy rather than the validation one.
+  const quiet = "disabled-validation";
+  const isQuiet = (path) => path.endsWith(`/${quiet}`);
+  const quietZip = (gloss) => createObjectURL(buildTitledZip(quiet, {
+    terms: [["静寂", "せいじゃく", "", "", 0, [gloss], 1, ""]],
+  }));
+  await mapped.request("hd_import", { blobUrl: quietZip("silence"), fileName: `${quiet}.zip` });
+  const withQuiet = await storedDictionaryState();
+  await mapped.request("hd_apply_state", {
+    baseRevision: withQuiet.revision,
+    dictionaries: withQuiet.dictionaries.map((entry) => (entry.title === quiet ? { ...entry, enabled: false } : entry)),
+  });
+  const restarted = await startService("disabled-validation-startup");
+  const startupAdds = restarted.adds.filter((add) => isQuiet(add.path));
+  const startupMemory = await restarted.request("hd_memory");
+  const disabledState = await storedDictionaryState();
+  restarted.adds.length = 0;
+  const enabledQuiet = await restarted.request("hd_apply_state", {
+    baseRevision: disabledState.revision,
+    dictionaries: disabledState.dictionaries.map((entry) => (entry.title === quiet ? { ...entry, enabled: true } : entry)),
+  });
+  const enableAdds = restarted.adds.filter((add) => isQuiet(add.path));
+  const enabledMemory = await restarted.request("hd_memory");
+  const enabledLookup = await restarted.request("hd_lookup", { text: "静寂" });
+  check(
+    "startup validates a disabled package paged, drops it, and enabling it maps its entries",
+    restarted.status.lastLoadPath === "full" && startupAdds.length > 0 && startupAdds.every((add) => add.paged === 1)
+      && restarted.adds.length === enableAdds.length
+      && !startupMemory.dictionaries.some((row) => row.title === quiet)
+      && startupMemory.dictionaries.every((row) => row.paged === false)
+      && enabledQuiet.ok === true && enableAdds.length > 0 && enableAdds.every((add) => add.paged === 0)
+      && enabledMemory.dictionaries.find((row) => row.title === quiet)?.paged === false
+      && enabledLookup.results.some((result) => result.term?.glossaries?.some((glossary) =>
+        JSON.stringify(glossary).includes("silence"))),
+    JSON.stringify({ status: restarted.status, startupAdds, startupMemory, enabledQuiet, enableAdds, enabledMemory }),
+  );
+
+  // An in-engine reimport rebuilds the set; the disabled package's new
+  // generation is validated paged there too.
+  const reenabledState = await storedDictionaryState();
+  await restarted.request("hd_apply_state", {
+    baseRevision: reenabledState.revision,
+    dictionaries: reenabledState.dictionaries.map((entry) => (entry.title === quiet ? { ...entry, enabled: false } : entry)),
+  });
+  restarted.adds.length = 0;
+  const reimported = await restarted.request("hd_import", { blobUrl: quietZip("stillness"), fileName: `${quiet}.zip` });
+  const reimportStatus = await restarted.request("hd_status");
+  const reimportAdds = restarted.adds.filter((add) => isQuiet(add.path));
+  const reimportState = await storedDictionaryState();
+  const reimportMemory = await restarted.request("hd_memory");
+  check(
+    "a full rebuild validates a disabled package's new generation paged and leaves it unloaded",
+    reimported.ok === true && reimportStatus.lastLoadPath === "full"
+      && reimportState.dictionaries.find((entry) => entry.title === quiet)?.enabled === false
+      && reimportAdds.length > 0 && reimportAdds.every((add) => add.paged === 1)
+      && !reimportMemory.dictionaries.some((row) => row.title === quiet)
+      && reimportStatus.failedDictionaries.length === 0,
+    JSON.stringify({ reimported, reimportStatus, reimportAdds, reimportMemory }),
+  );
+}
+
+/* --------------------------------------------------- blob-backed IDBFS stage */
+
+// In a worker, IDBFS files persisted as Blobs stay Blobs in the MEMFS mirror:
+// restoration, reads, mmap and unload read only the ranges they need, and an
+// import's arrays are released once its persistence has completed. Node has no
+// FileReaderSync, so this stage supplies a synchronous Blob and reader and
+// counts what is read through them.
+async function blobBackedIdbfsStage({ createHoshidicts, offscreenChrome, storedDictionaryState, idb }) {
+  section("blob-backed IDBFS: Blob records stay Blobs and are read by range");
+  const NativeBlob = globalThis.Blob;
+  const reads = [];
+  class SyncBlob extends NativeBlob {
+    constructor(parts = [], options) {
+      super(parts, options);
+      const chunks = parts.map((part) => (part instanceof SyncBlob ? part.bytes
+        : ArrayBuffer.isView(part) ? new Uint8Array(part.buffer, part.byteOffset, part.byteLength)
+          : typeof part === "string" ? new TextEncoder().encode(part) : new Uint8Array(part)));
+      this.bytes = new Uint8Array(chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0));
+      let offset = 0;
+      for (const chunk of chunks) {
+        this.bytes.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+    }
+    slice(start = 0, end = this.bytes.byteLength) {
+      return new SyncBlob([this.bytes.subarray(start, end)]);
+    }
+  }
+  globalThis.Blob = SyncBlob;
+  globalThis.FileReaderSync = class {
+    readAsArrayBuffer(blob) {
+      reads.push(blob.bytes.byteLength);
+      return blob.bytes.slice().buffer;
+    }
+  };
+  const services = [];
+  const startService = async (tag, options = {}) => {
+    const service = await import(
+      `file://${resolve(EXTENSION, "engine-service.js").replace(/\\/gu, "/")}?blob-${tag}`
+    );
+    const handle = { module: null };
+    service.configureEngineService(
+      (message) => offscreenChrome.runtime.sendMessage(message),
+      {
+        createHoshidicts: async (...args) => {
+          handle.module = await createHoshidicts(...args);
+          return handle.module;
+        },
+        storageBackend: "idbfs",
+        lowRam: true,
+        ...options,
+      },
+    );
+    let counter = 0;
+    handle.request = (type, fields = {}) => {
+      counter += 1;
+      return service.handleEngineMessage({ type, requestId: `blob-${tag}-${counter}`, ...fields });
+    };
+    service.startEngine();
+    const deadline = Date.now() + 30000;
+    let status = await handle.request("hd_status");
+    while (!(status.ok && status.ready && !status.loading) && Date.now() < deadline) {
+      await new Promise((done) => setTimeout(done, 25));
+      status = await handle.request("hd_status");
+    }
+    handle.status = status;
+    services.push(handle);
+    return handle;
+  };
+  const node = (handle, path) => handle.module.FS.lookupPath(path).node;
+  try {
+    // Pseudo-random glosses, so blobs.bin stays above the 1 MiB Blob threshold.
+    let seed = 7;
+    const noise = () => Array.from({ length: 320 }, () => {
+      seed = (seed * 1103515245 + 12345) >>> 0;
+      return String.fromCharCode(97 + (seed % 26));
+    }).join("");
+    const title = "blob-backed-idbfs";
+    const terms = Array.from({ length: 16000 }, (_, index) =>
+      [`語${index}`, `ご${index}`, "", "", 0, [index === 0 ? "first word" : noise()], index, ""]);
+    const writer = await startService("writer");
+    const imported = await writer.request("hd_import", {
+      blobUrl: createObjectURL(buildTitledZip(title, { terms })), fileName: `${title}.zip`,
+    });
+    const record = (await storedDictionaryState()).dictionaries.find((entry) => entry.title === title);
+    const blobsPath = `${record?.path}/blobs.bin`;
+    const written = node(writer, blobsPath);
+    const writerLookup = JSON.stringify((await writer.request("hd_lookup", { text: "語0" })).results);
+    check(
+      "a persisted import releases its large arrays for the stored Blobs",
+      imported.ok === true && written.blob instanceof SyncBlob && written.contents === null
+        && written.usedBytes === written.blob.size && written.usedBytes > 1024 * 1024
+        && writerLookup.includes("first word"),
+      JSON.stringify({ imported, size: written.usedBytes, blob: written.blob?.constructor?.name }),
+    );
+
+    reads.length = 0;
+    const restored = await startService("restored");
+    const restoredNode = node(restored, blobsPath);
+    const restoredLookup = JSON.stringify((await restored.request("hd_lookup", { text: "語0" })).results);
+    const restoredMemory = await restored.request("hd_memory");
+    check(
+      "restoring IDBFS backs large files with their Blobs while mapped lookups stay identical",
+      restored.status.ready === true && restoredNode.blob instanceof SyncBlob && restoredNode.contents === null
+        && restoredLookup === writerLookup
+        && restoredMemory.dictionaries.find((row) => row.title === title)?.paged === false
+        && reads.every((bytes) => bytes <= 8 * 1024 * 1024),
+      JSON.stringify({ status: restored.status, reads: reads.length, restoredMemory }),
+    );
+
+    reads.length = 0;
+    const paged = await startService("paged", { pagedDictionaries: true });
+    const pagedLookup = JSON.stringify((await paged.request("hd_lookup", { text: "語0" })).results);
+    const pagedNode = node(paged, blobsPath);
+    check(
+      "paged reads of a Blob-backed file read pages, not the file",
+      pagedLookup === writerLookup && pagedNode.blob instanceof SyncBlob
+        && reads.length > 0 && Math.max(...reads) < pagedNode.usedBytes / 4,
+      JSON.stringify({ reads, size: pagedNode.usedBytes }),
+    );
+
+    // Unloading a read-only mapping must not write it back.
+    const readBefore = reads.reduce((sum, bytes) => sum + bytes, 0);
+    const state = await storedDictionaryState();
+    const unloaded = await restored.request("hd_apply_state", {
+      baseRevision: state.revision,
+      dictionaries: state.dictionaries.map((entry) => (entry.title === title ? { ...entry, enabled: false } : entry)),
+    });
+    check(
+      "unloading a mapped Blob-backed package leaves its file a Blob",
+      unloaded.ok === true && node(restored, blobsPath).blob instanceof SyncBlob
+        && node(restored, blobsPath).contents === null
+        && !(await restored.request("hd_memory")).dictionaries.some((row) => row.title === title)
+        && reads.reduce((sum, bytes) => sum + bytes, 0) - readBefore < node(restored, blobsPath).usedBytes,
+      JSON.stringify({ unloaded, readBefore, after: reads.reduce((sum, bytes) => sum + bytes, 0) }),
+    );
+
+    // A write reads the file into an array first and changes only what it writes.
+    const FS = paged.module.FS;
+    const scratch = `${record.path}/scratch.bin`;
+    FS.writeFile(scratch, new Uint8Array(2 * 1024 * 1024).fill(5));
+    FS.utime(scratch, 1, 1);
+    paged.module.FS.filesystems.IDBFS.storeLocalEntry(`${scratch}.copy`,
+      { mode: FS.stat(scratch).mode, timestamp: new Date(2), contents: new SyncBlob([FS.readFile(scratch)]) }, () => {});
+    const copy = node(paged, `${scratch}.copy`);
+    const lazyBefore = copy.blob instanceof SyncBlob;
+    const stream = FS.open(`${scratch}.copy`, "r+");
+    FS.write(stream, new Uint8Array([9, 9]), 0, 2, 10);
+    FS.close(stream);
+    const after = FS.readFile(`${scratch}.copy`);
+    FS.truncate(`${scratch}.copy`, 0);
+    check(
+      "writing to a Blob-backed file materializes it and keeps the rest of its bytes",
+      lazyBefore && copy.blob === undefined && after.byteLength === 2 * 1024 * 1024
+        && after[9] === 5 && after[10] === 9 && after[11] === 9 && after[12] === 5
+        && FS.stat(`${scratch}.copy`).size === 0,
+      JSON.stringify({ lazyBefore, size: after.byteLength }),
+    );
+    FS.unlink(`${scratch}.copy`);
+    FS.unlink(scratch);
+
+    const reenabled = await storedDictionaryState();
+    await restored.request("hd_apply_state", { baseRevision: reenabled.revision,
+      dictionaries: reenabled.dictionaries.map((entry) => ({ ...entry, enabled: entry.title === title ? true : entry.enabled })) });
+    const removed = await restored.request("hd_remove", { id: record.id, title });
+    check(
+      "a Blob-backed package is removed from IndexedDB with its files",
+      removed.ok === true && !idb.keys("/dicts").some((key) => key.startsWith(record.path)),
+      JSON.stringify({ removed }),
+    );
+  } finally {
+    globalThis.Blob = NativeBlob;
+    delete globalThis.FileReaderSync;
+  }
 }
 
 /* ------------------------------------------------------- isolated import stage */
@@ -9993,14 +10249,28 @@ async function isolatedImportStage({ createHoshidicts, offscreenChrome, storedDi
   );
   let stageEngine = null;
   const native = { resets: 0, adds: 0, removes: 0, reorders: 0, imports: 0 };
+  const addModes = [];
   const progress = [];
   let hold = null;
   let importerFailure = null;
+  let memoryFailures = 0;
+  const memoryAttempts = [];
   let failedRoot = null;
   let conflictCas = false;
   let casConflicts = 0;
   const isolatedImport = async (request) => {
     if (hold !== null) await hold;
+    if (memoryFailures > 0) {
+      memoryFailures -= 1;
+      memoryAttempts.push(request.lowRam);
+      failedRoot = request.generationRoot;
+      stageEngine.FS.mkdirTree(`${failedRoot}/partial`);
+      stageEngine.FS.writeFile(`${failedRoot}/partial/blobs.bin`, new Uint8Array(16));
+      // The real worker owns and detaches these bytes, even when it fails.
+      structuredClone(request.archive, { transfer: [request.archive.buffer] });
+      throw new Error("std::bad_alloc");
+    }
+    if (memoryAttempts.length > 0) memoryAttempts.push(request.lowRam);
     if (importerFailure !== null) {
       // A worker that died mid-import leaves whatever it had written.
       failedRoot = request.generationRoot;
@@ -10009,7 +10279,7 @@ async function isolatedImportStage({ createHoshidicts, offscreenChrome, storedDi
       throw importerFailure;
     }
     return service.importDictionaryArchive(stageEngine, request.archive, request.generationRoot,
-      request.lowRam, request.fileName, request.expectedArchiveBytes, request.resources);
+      request.lowRam, request.fileName, request.expectedArchiveBytes, { resources: request.resources, backend: "opfs" });
   };
   service.configureEngineService(
     async (message) => {
@@ -10028,7 +10298,10 @@ async function isolatedImportStage({ createHoshidicts, offscreenChrome, storedDi
         module.ccall = (name, returnType, argumentTypes, argumentValues) => {
           const result = ccall(name, returnType, argumentTypes, argumentValues);
           if (name === "hdw_reset") native.resets += 1;
-          else if (name === "hdw_add_dict" && result) native.adds += 1;
+          else if (name === "hdw_add_dict" && result) {
+            native.adds += 1;
+            addModes.push({ path: argumentValues[0], paged: argumentValues[2] });
+          }
           else if (name === "hdw_remove_dict" && result) native.removes += 1;
           else if (name === "hdw_set_dict_order" && result) native.reorders += 1;
           else if (name === "hdw_import") native.imports += 1;
@@ -10037,7 +10310,7 @@ async function isolatedImportStage({ createHoshidicts, offscreenChrome, storedDi
         return module;
       },
       storageBackend: "idbfs",
-      lowRam: true,
+      lowRam: false,
       reportProgress: (event) => progress.push(structuredClone(event)),
       isolatedImport,
     },
@@ -10171,18 +10444,76 @@ async function isolatedImportStage({ createHoshidicts, offscreenChrome, storedDi
       && (await request("hd_status")).ok === true,
     JSON.stringify({ conflicted, casConflicts, beforeConflict, afterConflict, conflictLookup: revisionOf(conflictLookup), roots: generationRoots() }),
   );
+
+  memoryFailures = 1;
+  const beforeRetry = snapshot();
+  const generationBeforeRetry = (await request("hd_status")).generation;
+  const recovered = await request("hd_import", { blobUrl: createObjectURL(archive(3)), fileName: "Pixiv.zip" });
+  const recoveredState = await storedDictionaryState();
+  const rootsAfterRetry = generationRoots();
+  check(
+    "an isolated memory failure restages detached bytes and retries once before publishing one generation",
+    recovered.ok === true && memoryAttempts.join() === "false,true"
+      && snapshot().resets === beforeRetry.resets
+      && snapshot().imports === beforeRetry.imports + 1
+      && recoveredState.revision === updatedState.revision + 1
+      && revisionOf(await request("hd_lookup", { text: query })) === "3"
+      && (await request("hd_status")).generation === generationBeforeRetry + 1
+      && !stageEngine.FS.analyzePath(failedRoot).exists
+      && progress.some(event => event.phase === "installing" && event.retry === true),
+    JSON.stringify({ recovered, memoryAttempts, beforeRetry, after: snapshot(), recoveredState, rootsAfterRetry }),
+  );
+  memoryAttempts.length = 0;
+  memoryFailures = 2;
+  const exhausted = await request("hd_import", { blobUrl: createObjectURL(archive(3)), fileName: "Pixiv.zip" });
+  check(
+    "a repeated memory failure stops after one retry with useful errors and keeps the committed dictionary",
+    exhausted.ok === false && exhausted.errorCode === "import-memory"
+      && /Pixiv\.zip.*reduced memory/u.test(exhausted.error)
+      && exhausted.report?.error === exhausted.error
+      && memoryAttempts.join() === "false,true"
+      && JSON.stringify(await storedDictionaryState()) === JSON.stringify(recoveredState)
+      && JSON.stringify(generationRoots()) === JSON.stringify(rootsAfterRetry)
+      && revisionOf(await request("hd_lookup", { text: query })) === "3",
+    JSON.stringify({ exhausted, memoryAttempts, roots: generationRoots() }),
+  );
+
+  // Updating a disabled package publishes a generation this session never
+  // loaded; the in-place path validates it with entries read on demand.
+  const enabledState = await storedDictionaryState();
+  const disabledTarget = await request("hd_apply_state", {
+    baseRevision: enabledState.revision,
+    dictionaries: enabledState.dictionaries.map((entry) => (entry.title === title ? { ...entry, enabled: false } : entry)),
+  });
+  const beforeDisabledUpdate = snapshot();
+  addModes.length = 0;
+  const disabledUpdate = await request("hd_import", { blobUrl: createObjectURL(archive(4)), fileName: `${title}.zip` });
+  const disabledUpdateStatus = await request("hd_status");
+  const disabledUpdatePackage = (await storedDictionaryState()).dictionaries.find((entry) => entry.title === title);
+  const validationAdds = addModes.filter((add) => add.path === disabledUpdatePackage?.path);
+  check(
+    "an in-place load validates a disabled package's new generation paged without a reset and leaves it unloaded",
+    disabledTarget.ok === true && disabledUpdate.ok === true
+      && disabledUpdateStatus.lastLoadPath === "incremental"
+      && snapshot().resets === beforeDisabledUpdate.resets
+      && disabledUpdatePackage?.enabled === false && disabledUpdatePackage.path !== updatedPackage.path
+      && validationAdds.length > 0 && validationAdds.every((add) => add.paged === 1)
+      && (await memoryRow(title)).length === 0
+      && disabledUpdateStatus.failedDictionaries.length === 0,
+    JSON.stringify({ disabledTarget, disabledUpdate, disabledUpdateStatus, validationAdds, addModes }),
+  );
   await request("hd_remove", { id: installedPackage.id, title });
 }
 
 /* ------------------------------------------------------- renderer integration stage */
 
-// jsdom is not a repo dependency: it lives in the same out-of-repo tree as
-// puppeteer-core, so a checkout carries neither. ESM ignores NODE_PATH, hence
-// resolving through require() before importing.
+// Prefer locked test tooling, while preserving external dependency overrides.
+// ESM ignores NODE_PATH, hence resolving through require() before importing.
 function jsdomSearchPaths() {
   return [
     ...(process.env.HACHIDORI_JSDOM ? [process.env.HACHIDORI_JSDOM] : []),
     ...(process.env.NODE_PATH ? process.env.NODE_PATH.split(":").filter(Boolean) : []),
+    resolve(HERE, "tooling"),
     ROOT,
     HERE,
     DEFAULT_JSDOM_TREE,
@@ -12967,7 +13298,7 @@ async function settingsBatchImportStage() {
   return result;
 }
 
-// With the MDX dictionaries flag on, a dropped batch groups each .mdx with the
+// A dropped batch groups each .mdx with the
 // .mdd files named after its stem into one hd_import carrying `resources`,
 // still imports ZIPs on their own, and reports an .mdd without its .mdx.
 async function settingsMdxImportStage() {
@@ -13022,8 +13353,7 @@ async function settingsMdxImportStage() {
     storage: {
       local: {
         async get() {
-          return { options: { kanjiClickDictionary: "",
-            experimental: { ...globalThis.HDReaderOptions.DEFAULT_OPTIONS.experimental, mdxImport: true } } };
+          return { options: { kanjiClickDictionary: "" } };
         },
       },
       onChanged: { addListener() {} },
@@ -15045,7 +15375,7 @@ async function contentNoteStage() {
           callbacks.popup.dataset.definitionBlurState = record.blurState;
           return record.blurState;
         },
-        setLookupStats(element, payload) { record.lookupStatistics = payload; element.hidden = !payload; },
+        setLookupStats(element, payload, pending = false) { record.lookupStatistics = payload; element.hidden = !payload && !pending; },
         setToolbarPosition(value) { callbacks.popup.dataset.toolbarPosition = value; },
       };
       popupRecords.set(callbacks.popup, record);
@@ -15436,6 +15766,7 @@ async function contentNoteStage() {
       "accepted primary views record once across tabs, expansion, Note refresh and Back": false,
       "internal links and clicked-kanji terms record independently while misses and stale replies do not": false,
       "statistics reject obsolete namespace replies and never retry a failed increment": false,
+      "a count on its way keeps its slot until it paints, and a count that will not arrive hides it": false,
     };
     const harness = await createHarness(undefined, { holdLookupStats: true });
     const records = () => harness.sent.filter(request => request.type === "hd_lookup_stats_record");
@@ -15592,6 +15923,28 @@ async function contentNoteStage() {
         offVisit && Boolean(read) && hidden.lookupStatistics()?.lookupCount === 4 && slot()?.hidden === false
         && hidden.take("hd_lookup_stats_record") === null && hidden.renders.length === rendersBefore;
     } finally { hidden.close(); }
+    // The slot keeps the count's place from the first render (#486), so its
+    // arrival moves nothing; a count that will not arrive takes the place away.
+    const kept = await createHarness(null, { holdLookupStats: true });
+    try {
+      const slot = () => kept.popup.querySelector(".gsm-hoshidicts-lookup-stats");
+      const onItsWay = () => slot()?.hidden === false && kept.lookupStatistics() === null;
+      await kept.initialLookup();
+      const counted = kept.take("hd_lookup_stats_record");
+      const keptFirst = onItsWay();
+      if (counted) kept.reply(counted, { descriptor: { generation: "statistics", revision: 1 },
+        statistics: { term: counted.request.term, reading: counted.request.reading, lookupCount: 3 } });
+      await kept.settle();
+      const painted = slot()?.hidden === false && kept.lookupStatistics()?.lookupCount === 3;
+      await kept.initialLookup();
+      const lost = kept.take("hd_lookup_stats_record");
+      const keptAgain = onItsWay();
+      if (lost) kept.reply(lost, { error: "lost reply" }, false);
+      await kept.settle();
+      outcomes["a count on its way keeps its slot until it paints, and a count that will not arrive hides it"] =
+        (Boolean(counted) && keptFirst && painted && Boolean(lost) && keptAgain && slot()?.hidden === true)
+        || { counted: Boolean(counted), keptFirst, painted, lost: Boolean(lost), keptAgain, hidden: slot()?.hidden };
+    } finally { kept.close(); }
     return outcomes;
   }
 
@@ -16304,7 +16657,7 @@ async function contentNoteStage() {
     const outcomes = [];
     for (const kind of ["term", "kanji"]) {
       for (const selection of [{ dictionary: "Generic" }, { groupId: "study" }, { favourites: true }]) {
-        const harness = await createHarness({ title: "Generic", kind });
+        const harness = await createHarness({ title: "Generic", kind }, { options: { scanLength: 2 } });
         await harness.initialLookup();
         const dictionaries = harness.driver.snapshot().dictionaries;
         const memberId = dictionaries[0].id;
@@ -16317,16 +16670,19 @@ async function contentNoteStage() {
         harness.emitState({ revision: 3, dictionaries,
           groups: [{ id: "study", name: "Latest group", dictionaryIds: [memberId] }] });
         harness.emitState({ revision: 2, dictionaries, groups: [] });
-        harness.reply(pending, { dictionaryCount: 1, results: [harness.term("child")] });
+        harness.reply(pending, { dictionaryCount: 1, results: [harness.term("ch"), harness.term("child")] });
         await operation;
         const child = harness.driver.viewRequest(1);
         const childContext = harness.render(1).context;
         const sameSelection = (value) => JSON.stringify(value) === JSON.stringify(selection);
-        const inherited = sameSelection(childContext.selectedDictionaryTab)
-          && child.selectedDictionaryTab !== parent.selectedDictionaryTab
+        const unfiltered = childContext.selectedDictionaryTab === null
+          && child.selectedDictionaryTab === null && sameSelection(parent.selectedDictionaryTab)
+          && pending.request.scanLength === 5
+          && harness.render(1).results.length === 1 && harness.render(1).results[0].matched === "child"
           && JSON.stringify(childContext.dictionaryTabGroups) === JSON.stringify([
             { id: "study", name: "Latest group", dictionaries: ["Generic"] },
           ]);
+        childContext.onDictionaryTabSelected(selection);
         const clicked = harness.callbacks(1).onKanjiClick("食");
         const request = harness.take(kind === "term" ? "hd_lookup_dictionary" : "hd_kanji");
         harness.reply(request, kind === "term"
@@ -16342,12 +16698,12 @@ async function contentNoteStage() {
           && sameSelection(child.selectedDictionaryTab) && sameSelection(parent.selectedDictionaryTab);
         const beforeBack = harness.sent.length;
         await clickedContext.onBack();
-        outcomes.push(inherited && copied && independent && harness.sent.length === beforeBack
+        outcomes.push(unfiltered && copied && independent && harness.sent.length === beforeBack
           && harness.driver.viewRequest(1) === child && sameSelection(harness.render(1).context.selectedDictionaryTab));
         harness.close();
       }
     }
-    return { "linked and clicked-kanji requests copy tab context and retain exact parent and Back selections": outcomes.every(Boolean) };
+    return { "internal links show all dictionaries while clicked-kanji and Back retain independently selected tabs": outcomes.every(Boolean) };
   }
 
   async function nestedLevelsCase() {
@@ -16583,7 +16939,9 @@ async function contentNoteStage() {
               return allowed;
             },
           });
-          view.renderResults(childRender.results, childRender.candidate, childRender.context);
+          childRender.context.onDictionaryTabSelected({ groupId: "g" });
+          view.renderResults(childRender.results, childRender.candidate,
+            { ...childRender.context, selectedDictionaryTab: { groupId: "g" } });
           const beforeFills = fills.length;
           detached.anchor.remove();
           parentSource.remove();
@@ -18280,18 +18638,19 @@ async function contentNoteStage() {
       && harness.driver.viewRequest() === original && harness.render()?.results.length === 1;
     const link = harness.internalLink({ query: "別の語", primaryReading: "べつ" });
     const linked = harness.take("hd_lookup");
-    if (linked) harness.reply(linked, { generation: 3, dictionaryCount: 2, results: [harness.term("別")] });
+    if (linked) harness.reply(linked, { generation: 3, dictionaryCount: 2,
+      results: [harness.term("別"), harness.term("別の語")] });
     await link;
     const linkedDescriptor = harness.driver.viewRequest(1);
     const linkKept = linked?.request.text === "別の語" && linked.request.options.primaryReading === "べつ"
-      && linked.request.scanLength === 1 && linkedDescriptor?.exactSelection === false
-      && harness.render(1)?.results[0].matched === "別"
+      && linked.request.scanLength === 3 && linkedDescriptor?.exactSelection === false
+      && harness.render(1)?.results[0].matched === "別の語"
       && harness.driver.viewRequest() === original && harness.driver.snapshot().activeHighlightText === query;
-    const linkedRefresh = await noteRefresh(3, 3, [harness.term("別")], false, 1);
+    const linkedRefresh = await noteRefresh(3, 3, [harness.term("別の語")], false, 1);
     harness.driver.scanPointer({ target: harness.anchor, clientX: 200, clientY: 200 });
     const linkedRefreshKept = linkedRefresh?.request.text === "別の語"
       && linkedRefresh.request.options.primaryReading === "べつ"
-      && harness.driver.viewRequest(1) === linkedDescriptor && harness.render(1)?.results[0].matched === "別"
+      && harness.driver.viewRequest(1) === linkedDescriptor && harness.render(1)?.results[0].matched === "別の語"
       && harness.driver.viewRequest() === original && harness.driver.snapshot().activeHighlightText === query
       && harness.take("hd_lookup") === null;
     harness.close();
@@ -18810,13 +19169,10 @@ async function contentNoteStage() {
 
   // The engine finds dictionary keys longer than the scan length only if it is
   // handed enough text: each package row carries the longest key its long-key
-  // index lists, and while the experimental Long dictionary entries flag is on
-  // the reader collects that many code points plus eight for an inflected
-  // ending while still requesting options.scanLength. Off, it collects
-  // options.scanLength whatever the packages list.
+  // index lists, and the reader collects that many code points plus eight for
+  // an inflected ending while still requesting options.scanLength.
   async function longKeyWindowCase() {
-    const experimental = { ...globalThis.HDReaderOptions.DEFAULT_OPTIONS.experimental, longKeyScan: true };
-    const harness = await createHarness(undefined, { options: { experimental } });
+    const harness = await createHarness();
     const window = harness.popup.ownerDocument.defaultView;
     window.Range.prototype.getClientRects = () => [{ left: 0, top: 0, right: 20, bottom: 20 }];
     const document = window.document;
@@ -18854,18 +19210,11 @@ async function contentNoteStage() {
     harness.driver.onMouseMove({ target: block, clientX: 10, clientY: 10 });
     await harness.settle();
     const request = harness.take("hd_lookup");
-
-    harness.emitOptions({ scanLength: 9, experimental: { ...experimental, longKeyScan: false } });
-    const flagOff = length(scan());
-    harness.emitOptions({ scanLength: 9, experimental });
-    const flagBackOn = length(scan());
     harness.close();
     return { "the reader hands the engine the longest indexed key plus eight while requesting its own scan length":
       plain === 9 && withLongKeys === 45 && disabledLongKeys === 9 && capped === 256 && frequencyOnly === 9
         && shorterThanScan === 9 && request?.request.scanLength === 9 && Array.from(request?.request.text ?? "").length === 45
-        || { plain, withLongKeys, disabledLongKeys, capped, frequencyOnly, shorterThanScan, request: request?.request && { scanLength: request.request.scanLength, textLength: Array.from(request.request.text).length } },
-      "the long-key window applies only while the Long dictionary entries flag is on":
-        flagOff === 9 && flagBackOn === 45 || { flagOff, flagBackOn } };
+        || { plain, withLongKeys, disabledLongKeys, capped, frequencyOnly, shorterThanScan, request: request?.request && { scanLength: request.request.scanLength, textLength: Array.from(request.request.text).length } } };
   }
 
   async function hoverGlyphCase() {
@@ -19625,7 +19974,24 @@ async function contentNoteStage() {
     return { "pending pointer candidates deduplicate by node and query without losing retries or newer ownership": passed };
   }
 
+  // jsdom lays nothing out; put every glyph under a popup case's pointer.
+  function glyphsUnderPointer(harness) {
+    harness.popup.ownerDocument.defaultView.Range.prototype.getClientRects =
+      () => [{ left: 110, top: 70, right: 130, bottom: 90 }];
+  }
+
   async function definitionTextLookupCase() {
+    function focusDisclosure(harness) {
+      const document = harness.popup.ownerDocument;
+      const details = document.createElement("details");
+      const summary = document.createElement("summary");
+      summary.textContent = "Dictionary explanation";
+      details.append(summary);
+      harness.popup.append(details);
+      summary.focus();
+      return harness.popup.getRootNode().activeElement === summary;
+    }
+
     function appendGlossary(harness, text, depth = 0) {
       const document = harness.popup.ownerDocument;
       const glossary = document.createElement("div");
@@ -19640,9 +20006,11 @@ async function contentNoteStage() {
 
     const hover = await createHarness();
     try {
+      glyphsUnderPointer(hover);
       await hover.initialLookup();
       const parent = hover.driver.viewRequest();
       const first = appendGlossary(hover, "食用語");
+      const focusedDisclosure = focusDisclosure(hover);
       const caretCalls = [];
       hover.popup.ownerDocument.caretPositionFromPoint = (_x, _y, options) => {
         caretCalls.push(options);
@@ -19744,6 +20112,8 @@ async function contentNoteStage() {
         offset: 0,
       });
       const linkBoundary = hover.driver.resolveDefinitionCandidate(120, 80)?.query === "食";
+      // Past a line's end the caret still snaps into it; the glyph is not there.
+      const besideGlyph = hover.driver.resolveDefinitionCandidate(300, 80) === null;
 
       async function definitionLookup(onlyScanJapaneseText, text) {
         const language = await createHarness(
@@ -19751,6 +20121,7 @@ async function contentNoteStage() {
           { options: { onlyScanJapaneseText } },
         );
         try {
+          glyphsUnderPointer(language);
           await language.initialLookup();
           const latin = appendGlossary(language, text);
           language.popup.ownerDocument.caretPositionFromPoint = () => ({
@@ -19779,10 +20150,12 @@ async function contentNoteStage() {
         deduplicated,
         depthLimited,
         explicitLink,
+        focusedDisclosure,
         glossaryOnly,
         japaneseOnly,
         mixedNumeral,
         linkBoundary,
+        besideGlyph,
         missPreservedParent,
         nativeCaret,
         parentRetained,
@@ -19792,6 +20165,7 @@ async function contentNoteStage() {
 
       const activation = await createHarness();
       try {
+        glyphsUnderPointer(activation);
         activation.emitOptions({
           activationKey: "Shift",
           lookupMode: "activation",
@@ -19824,6 +20198,7 @@ async function contentNoteStage() {
         });
         await activation.settle();
         const definition = appendGlossary(activation, "食用語");
+        const focusedActivationDisclosure = focusDisclosure(activation);
         activation.popup.ownerDocument.caretPositionFromPoint = () => ({
           offsetNode: definition.textNode,
           offset: 0,
@@ -19852,7 +20227,7 @@ async function contentNoteStage() {
           "definition text uses native closed-shadow caret scanning and preserves its parent popup":
             firstResult || firstDetails,
           "definition text inherits Japanese gating, depth limits and stationary activation":
-            gated && stationary?.request.text.startsWith("食用語"),
+            focusedActivationDisclosure && gated && stationary?.request.text.startsWith("食用語"),
           ...await definitionTriggerCases(),
         };
       } finally {
@@ -19871,6 +20246,7 @@ async function contentNoteStage() {
         kanjiClickDictionary: { title: "Generic", kind: "term" } };
       async function open(definitionLookupMode) {
         const harness = await createHarness(undefined, { options: { definitionLookupMode } });
+        glyphsUnderPointer(harness);
         await harness.initialLookup();
         const word = appendGlossary(harness, "食用語");
         const document = harness.popup.ownerDocument;
@@ -20547,6 +20923,7 @@ async function contentNoteStage() {
   async function activationButtonCase() {
     const result = {};
     const harness = await createHarness();
+    glyphsUnderPointer(harness);
     const window = harness.popup.ownerDocument.defaultView;
     const { document } = window;
     const timers = new Map();
@@ -20574,6 +20951,8 @@ async function contentNoteStage() {
       return event;
     };
     const press = (button, buttons, target) => mouse("mousedown", { button, buttons }, target);
+    // A press over popup text lands where the popup's own mousemove put the pointer.
+    const popupPress = (target) => mouse("mousedown", { button: 1, buttons: 4, clientX: 120, clientY: 80 }, target);
     const release = (button, target) => mouse("mouseup", { button, buttons: 0 }, target);
     const events = () => harness.popupEvents.splice(0);
     const answer = async (query) => {
@@ -20688,14 +21067,14 @@ async function contentNoteStage() {
       harness.driver.onPopupMouseMove({ clientX: 120, clientY: 80, target: definition });
       fire(0);
       const definitionGated = harness.take("hd_lookup") === null;
-      const definitionPress = press(1, 4, definition);
+      const definitionPress = popupPress(definition);
       fire(0);
       const child = await answer("食用語");
       const childOpened = !harness.driver.snapshot(1).popupHidden;
       release(1, definition);
       const definitionClick = mouse("auxclick", { button: 1 }, definition);
       harness.driver.onPopupMouseMove({ clientX: 120, clientY: 80, target: link });
-      const linkPress = press(1, 4, link);
+      const linkPress = popupPress(link);
       const linkScan = fire(0);
       release(1, link);
       const linkClick = mouse("auxclick", { button: 1 }, link);
@@ -20745,7 +21124,7 @@ async function contentNoteStage() {
       const heldWord = addDefinition();
       fire(0);
       const childGated = harness.take("hd_lookup") === null;
-      const childPress = press(1, 4, heldWord);
+      const childPress = popupPress(heldWord);
       fire(0);
       const heldChild = await answer("食用語");
       release(1, heldWord);
@@ -20766,7 +21145,7 @@ async function contentNoteStage() {
       release(1);
       mouse("auxclick", { button: 1 });
       const clickWord = addDefinition();
-      const clickPress = press(1, 4, clickWord);
+      const clickPress = popupPress(clickWord);
       fire(0);
       const clickLookup = harness.take("hd_lookup");
       release(1, clickWord);
@@ -21568,9 +21947,77 @@ async function contentNoteStage() {
     return result;
   }
 
+  // Yomitan's Alt+wheel entry moves, as Alt+WheelDown/WheelUp keybinds: one
+  // press per notch, a touchpad's small steps gathered into notches, acting on
+  // the popup under the pointer and leaving the page nothing to scroll.
+  async function wheelKeybindCase() {
+    const result = {};
+    const wheel = (harness, target, deltaY, timeStamp, init = { altKey: true }) => {
+      const window = harness.popup.ownerDocument.defaultView;
+      const event = new window.WheelEvent("wheel", { deltaY, bubbles: true, cancelable: true, composed: true, ...init });
+      Object.defineProperty(event, "timeStamp", { value: timeStamp });
+      target.dispatchEvent(event);
+      return event.defaultPrevented;
+    };
+    const defaults = await createHarness();
+    try {
+      const window = defaults.popup.ownerDocument.defaultView;
+      let pageWheels = 0;
+      window.document.body.addEventListener("wheel", () => { pageWheels += 1; });
+      await defaults.initialLookup();
+      const moves = (depth = 0) => defaults.entryFocus(depth).length;
+      const notch = wheel(defaults, defaults.popup, 4, 1000) && moves() === 1;
+      let swallowed = true;
+      for (let step = 1; step < 25; step += 1) swallowed = wheel(defaults, defaults.popup, 4, 1000 + step * 10) && swallowed;
+      const gathered = swallowed && moves() === 1;
+      const nextNotch = wheel(defaults, defaults.popup, 4, 1250) && moves() === 2;
+      const afterPause = wheel(defaults, defaults.popup, 4, 1400) && moves() === 3;
+      const reversed = wheel(defaults, defaults.popup, -4, 1410) && moves() === 4;
+      const travelled = wheel(defaults, defaults.popup, -300, 1420) && moves() === 7;
+      const directions = JSON.stringify(defaults.entryFocus().map(target => target.offset)) === "[1,1,1,-1,-1,-1,-1]";
+      wheel(defaults, defaults.popup, 100, 1600, {});
+      const zoom = !wheel(defaults, defaults.popup, 100, 1800, { ctrlKey: true });
+      const unbound = moves() === 7;
+      const link = defaults.internalLink({ query: "child", primaryReading: "reading" });
+      defaults.reply(defaults.take("hd_lookup"), { dictionaryCount: 1, results: [defaults.term("child")] });
+      await link;
+      const child = defaults.driver.popupAt(1);
+      const childOnly = Boolean(child) && wheel(defaults, child, 4, 2000) && moves(1) === 1 && moves() === 7;
+      const parentOwn = wheel(defaults, defaults.popup, 4, 2010) && moves() === 8 && moves(1) === 1;
+      result["Alt+wheel keybinds press once per notch, gather touchpad steps and act on the popup under the pointer"] =
+        (notch && gathered && nextNotch && afterPause && reversed && travelled && directions && unbound && zoom
+          && childOnly && parentOwn && pageWheels === 0)
+        || { notch, gathered, nextNotch, afterPause, reversed, travelled, directions, unbound, zoom, childOnly, parentOwn,
+          pageWheels, focus: defaults.entryFocus(), childFocus: child ? defaults.entryFocus(1) : null };
+    } finally {
+      defaults.close();
+    }
+
+    const bind = (action, key, modifiers, extra = {}) =>
+      ({ action, argument: "", key, modifiers, scopes: ["popup"], enabled: true, ...extra });
+    const custom = await createHarness(undefined, { options: { keybinds: [
+      bind("firstEntry", "WheelDown", ["ctrl"]),
+      bind("nextEntry", "WheelDown", ["alt"], { argument: "1", enabled: false }),
+    ] } });
+    try {
+      await custom.initialLookup();
+      const remapped = wheel(custom, custom.popup, 100, 1000, { ctrlKey: true })
+        && JSON.stringify(custom.entryFocus()) === JSON.stringify(["first"]);
+      wheel(custom, custom.popup, 100, 1200);
+      wheel(custom, custom.popup, -100, 1400);
+      const zoom = !wheel(custom, custom.popup, -100, 1600, { ctrlKey: true });
+      const unbound = custom.entryFocus().length === 1;
+      result["custom wheel keybinds follow their modifiers and enablement, and unbound wheels keep scrolling"] =
+        (remapped && zoom && unbound) || { remapped, zoom, unbound, focus: custom.entryFocus() };
+    } finally {
+      custom.close();
+    }
+    return result;
+  }
+
   return {
     callbacksWired,
-    keybinds: await keybindCase(),
+    keybinds: { ...await keybindCase(), ...await wheelKeybindCase() },
     popupVisibility: await popupVisibilityCase(),
     fullscreenHost: await fullscreenHostCase(),
     lookupStatistics: { ...await lookupStatisticsCase(), ...await lookupStatisticsRaceCase() },
@@ -22063,6 +22510,7 @@ async function renderStage({ imageLookup, kanji, lookup, media }) {
   await metadataRenderStage({ HDGlossary, HDPopup, document, window, candidate, result: lookup.results[0] });
   lookupCountsRenderStage({ HDGlossary, HDPopup, document, window, candidate, results: lookup.results });
   keybindEntryRenderStage({ HDGlossary, HDPopup, document, window, candidate, result: lookup.results[0] });
+  await dynamicHeadwordRenderStage({ HDGlossary, HDPopup, document, window, candidate, result: lookup.results[0] });
 
   const glossary = lookup.results[0].term.glossaries[0];
   const noteResults = [
@@ -23033,6 +23481,7 @@ function lookupCountsRenderStage({ HDGlossary, HDPopup, document, window, candid
 
 // jsdom has no layout: entries and cards sit at fixed content offsets and move
 // with the stubbed scroller, which starts 100px down the page and is 200px tall.
+// A later entry's own 20px header opens it; navigation lands just below it.
 function keybindEntryRenderStage({ HDGlossary, HDPopup, document, window, candidate, result }) {
   const popup = document.createElement("div");
   document.body.appendChild(popup);
@@ -23053,13 +23502,15 @@ function keybindEntryRenderStage({ HDGlossary, HDPopup, document, window, candid
   Object.defineProperty(scroller, "scrollTop", { configurable: true, get: () => scrollTop, set: value => { scrollTop = value; } });
   scroller.scrollTo = ({ top, behavior }) => { scrolls.push({ top, behavior }); scrollTop = top; };
   const place = (node, offset, height) => Object.defineProperty(node, "getBoundingClientRect", { configurable: true,
-    value: () => ({ top: 100 + offset - scrollTop, bottom: 100 + offset + height - scrollTop }) });
+    value: () => ({ top: 100 + offset - scrollTop, bottom: 100 + offset + height - scrollTop, height }) });
   scroller.getBoundingClientRect = () => ({ top: 100, bottom: 300 });
   const glossary = result.term.glossaries[0];
   const entry = (expression, dictionaries) => ({ ...result, matched: expression,
     term: { ...result.term, expression, glossaries: dictionaries.map(dictionary => ({ ...glossary, dictionary })) } });
   const layout = () => [...scroller.querySelectorAll(".gsm-hoshidicts-entry")].forEach((node, index) => {
     place(node, index * 300, 280);
+    const header = node.querySelector(":scope > .gsm-hoshidicts-entry-header");
+    if (header) place(header, index * 300, 20);
     [...node.querySelectorAll(".gsm-hoshidicts-glossary-card")].forEach((card, cardIndex) => place(card, index * 300 + 20 + cardIndex * 90, 80));
   });
   try {
@@ -23068,9 +23519,9 @@ function keybindEntryRenderStage({ HDGlossary, HDPopup, document, window, candid
     const initial = view.currentEntryIndex() === 0 && scroller.querySelectorAll(".gsm-hoshidicts-entry").length === 1;
     const moved = view.focusEntry({ offset: 1 });
     layout();
-    const expandedToNext = moved && expanded.length === 1 && view.currentEntryIndex() === 1 && scrolls.at(-1).top === 300
+    const expandedToNext = moved && expanded.length === 1 && view.currentEntryIndex() === 1 && scrolls.at(-1).top === 320
       && scrolls.at(-1).behavior === "instant";
-    const clamped = view.focusEntry({ offset: 5 }) && view.currentEntryIndex() === 2 && scrolls.at(-1).top === 600;
+    const clamped = view.focusEntry({ offset: 5 }) && view.currentEntryIndex() === 2 && scrolls.at(-1).top === 620;
     const first = view.focusEntry("first") && view.currentEntryIndex() === 0 && scrolls.at(-1).top === 0;
     scrollTop = 30; // Beta is now the most visible card of the first entry.
     const nextDictionary = view.focusEntry({ dictionary: 1 }) && view.currentEntryIndex() === 2 && scrolls.at(-1).top === 620;
@@ -23087,6 +23538,123 @@ function keybindEntryRenderStage({ HDGlossary, HDPopup, document, window, candid
         && scrolls.every(scroll => scroll.behavior === "instant"),
       JSON.stringify({ initial, expandedToNext, clamped, first, nextDictionary, previousDictionary, clicked, last, reset, empty,
         expanded, scrolls, current: view.currentEntryIndex() }));
+  } finally { view.destroy(); popup.remove(); }
+}
+
+// Issue #488: the pinned header shows the result being read. Three 明日 results
+// sit 300px apart in the same stubbed layout; later results' own 20px headers
+// open their articles, and the reader starts 100px down a 200px scroller.
+async function dynamicHeadwordRenderStage({ HDGlossary, HDPopup, document, window, candidate, result }) {
+  const popup = document.createElement("div");
+  document.body.appendChild(popup);
+  const bound = [];
+  const layouts = new Set();
+  let editing = false;
+  const view = HDPopup.createPopupView({ document, window, popup,
+    appendExpressionRuby: HDGlossary.appendExpressionRuby,
+    createPronunciationPitchAccent: HDGlossary.createPronunciationPitchAccent,
+    appendTextOnlyGlossary: HDGlossary.appendTextOnlyGlossary,
+    parseTagList: HDGlossary.parseTagList, positionPopup() {}, onKanjiClick() {}, onAddCustomEntry() {},
+    onNoteEditingChange: value => { editing = value; },
+    // As content.js: a Note draft holds the view.
+    canProjectDictionaryPresentation: () => !editing,
+    onResultsRendered: rendered => bound.push(rendered),
+    onResultsExpanded: rendered => bound.push(rendered),
+    queueMasonry: callback => layouts.add(callback),
+    customButtons: [{ id: "sentence", type: "anki", label: "Sentence card", templateId: "sentence" }],
+  });
+  const scroller = view.scrollElement;
+  let scrollTop = 0;
+  Object.defineProperty(scroller, "scrollTop", { configurable: true, get: () => scrollTop, set: value => { scrollTop = value; } });
+  scroller.scrollTo = ({ top }) => { scrollTop = top; };
+  scroller.getBoundingClientRect = () => ({ top: 100, bottom: 300, height: 200 });
+  const place = (node, offset, height) => Object.defineProperty(node, "getBoundingClientRect", { configurable: true,
+    value: () => ({ top: 100 + offset - scrollTop, bottom: 100 + offset + height - scrollTop, height }) });
+  const articles = () => [...scroller.querySelectorAll(".gsm-hoshidicts-entry")];
+  const layout = () => articles().forEach((node, index) => {
+    place(node, index * 300, 280);
+    const header = node.querySelector(":scope > .gsm-hoshidicts-entry-header");
+    if (header) place(header, index * 300, 20);
+  });
+  const scrollTo = top => { scrollTop = top; scroller.dispatchEvent(new window.Event("scroll")); };
+  const reading = (expression, value, definition) => ({ ...result, matched: "明日", deinflected: "明日", trace: [],
+    term: { ...result.term, expression, reading: value, rules: "", furigana: null,
+      glossaries: [{ ...result.term.glossaries[0], glossary: JSON.stringify([definition]) }] } });
+  const results = [reading("明日", "あした", "tomorrow"), reading("明日", "あす", "tomorrow (formal)"),
+    reading("明日", "みょうにち", "tomorrow (business)")];
+  // あす alone carries a trace, so its headword holds the only later disclosure.
+  results[1] = { ...results[1], matched: "明日は", deinflected: "明日", trace: [{ name: "particle", description: "" }] };
+  const header = () => popup.querySelector(".gsm-hoshidicts-primary-header");
+  const visibleReading = () => [...header().querySelectorAll(":scope > .gsm-hoshidicts-headword")]
+    .filter(node => !node.hidden).map(node => node.querySelector("rt")?.textContent ?? "").join("|");
+  try {
+    view.renderResults(results, candidate, { expandAll: true, definitionBlurState: "blurred", lookupStatsSlot: true });
+    layout();
+    const [rendered] = bound;
+    const toolbar = header().querySelector(":scope > .gsm-hoshidicts-entry-actions");
+    const asuHeader = articles()[1].querySelector(":scope > .gsm-hoshidicts-entry-header");
+    const asuHeadword = asuHeader.querySelector(".gsm-hoshidicts-headword");
+    const asuRow = rendered.miningActions[1].actions;
+    const cards = [...popup.querySelectorAll(".gsm-hoshidicts-glossary-card")];
+    const stats = popup.querySelector(".gsm-hoshidicts-lookup-stats");
+    const firstAudio = rendered.audioButtons[0].button;
+    const initial = visibleReading() === "あした" && view.currentEntryIndex() === 0
+      && rendered.miningActions[0].customActions === toolbar && rendered.miningActions[1].customActions === null;
+
+    // あした's header button has focus when あす's own header scrolls away.
+    firstAudio.focus();
+    scrollTo(330);
+    const shown = visibleReading() === "あす" && header().contains(asuHeadword) && toolbar.contains(asuRow)
+      && toolbar.contains(rendered.audioButtons[1].button) && asuHeader.style.height === "20px"
+      && asuHeader.childElementCount === 0 && header().dataset.shownResult === "1";
+    const followed = view.currentEntryIndex() === 1 && rendered.miningActions[1].customActions === toolbar
+      && rendered.miningActions[0].customActions === null && bound.length === 2 && bound[1].miningActions === rendered.miningActions;
+    const focusMoved = popup.ownerDocument.activeElement === rendered.audioButtons[1].button;
+    const retained = cards.every((card, index) => popup.querySelectorAll(".gsm-hoshidicts-glossary-card")[index] === card)
+      && popup.querySelector(".gsm-hoshidicts-lookup-stats") === stats && popup.dataset.definitionBlurState === "blurred";
+
+    // The Note form opens with the shown result and holds the header.
+    popup.querySelector(".gsm-hoshidicts-note-button").click();
+    const form = popup.querySelector(".gsm-hoshidicts-note-form");
+    const prefilled = form.querySelector(".gsm-hoshidicts-note-reading").value === "あす";
+    form.querySelector(".gsm-hoshidicts-note-definition").value = "draft";
+    scrollTo(640);
+    const held = visibleReading() === "あす" && form.querySelector(".gsm-hoshidicts-note-definition").value === "draft";
+    form.querySelector(".gsm-hoshidicts-note-cancel").click();
+    view.flushDictionaryPresentation();
+    const caughtUp = visibleReading() === "みょうにち" && asuHeader.contains(asuHeadword) && asuHeader.style.height === ""
+      && view.currentEntryIndex() === 2;
+
+    // Back keeps disclosures in fresh order while みょうにち is shown, then the
+    // restored scroll shows it again.
+    asuHeadword.querySelector(".gsm-hoshidicts-deinflection").open = true;
+    const prior = view.captureTermView();
+    view.renderResults(results, candidate, { ...prior, expandAll: true });
+    const restarted = visibleReading() === "あした" && !header().dataset.shownResult;
+    await new Promise(done => window.setTimeout(done, 0));
+    const restoredOpen = articles()[1].querySelector(".gsm-hoshidicts-deinflection")?.open === true;
+    layout();
+    for (const callback of layouts) callback();
+    layouts.clear();
+    const restoredShown = scrollTop === 640 && visibleReading() === "みょうにち";
+
+    // Navigation shows its target; one that cannot reach the top stays current.
+    scrollTo(0);
+    const next = bound.at(-1);
+    view.focusEntry({ offset: 1 });
+    const navigated = scrollTop === 320 && visibleReading() === "あす" && view.currentEntryIndex() === 1
+      && next.miningActions[1].customActions === header().querySelector(":scope > .gsm-hoshidicts-entry-actions");
+    scroller.scrollTo = ({ top }) => { scrollTop = Math.min(top, 400); };
+    view.focusEntry("last");
+    const unreachable = scrollTop === 400 && visibleReading() === "あす" && view.currentEntryIndex() === 2;
+    scrollTo(0);
+    const back = visibleReading() === "あした" && view.currentEntryIndex() === 0 && !header().dataset.shownResult
+      && articles()[1].querySelector(":scope > .gsm-hoshidicts-entry-header").style.height === "";
+    check("the pinned header moves the shown result's own headword and actions in, holds for a Note draft and restores them",
+      initial && shown && followed && focusMoved && retained && prefilled && held && caughtUp && restarted
+        && restoredOpen && restoredShown && navigated && unreachable && back,
+      JSON.stringify({ initial, shown, followed, focusMoved, retained, prefilled, held, caughtUp, restarted,
+        restoredOpen, restoredShown, navigated, unreachable, back, reading: visibleReading(), current: view.currentEntryIndex() }));
   } finally { view.destroy(); popup.remove(); }
 }
 

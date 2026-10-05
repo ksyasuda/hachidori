@@ -44,6 +44,7 @@ export function withOverlayLookupDefault(record) {
 
 // These describe the local reading surface, even while its library is shared.
 export const OVERLAY_LOCAL_OPTION_KEYS = Object.freeze([
+  "anki", "audioSources", "customButtons", "customLinks",
   "hoverEnabled", "onlyScanJapaneseText", "personalDictionaryEnabled", "showNoResultNotice", "lookupMode", "activationKey",
   "definitionLookupMode", "popupHideDelayMs",
   "hidePopupOnCursorExit", "hidePopupOnCursorExitDelayMs",

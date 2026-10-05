@@ -88,6 +88,26 @@ member of a selector list prefixed, commas inside `:is()` and strings kept,
 rules inside `@media` prefixed, global rules dropped and no `@scope`. The Chrome
 suite checks the prefixed styles apply only inside their dictionary's item.
 
+`test/chrome-structured-table.mjs`, called by the Chrome suite, checks NHK-pitch's
+negative-margin disclosure tables at 320px and 560px popup widths: the first
+header glyph remains visible, and wide tables still scroll to their final column
+both inside and outside a disclosure.
+
+`test/chrome-dynamic-headword.mjs`, called by the Chrome suite, renders four
+results, three for 明日, through the production renderer, stylesheet and Anki
+controller. Scrolling past あす's own header must show あす in the popup's
+header, with the top and bottom toolbars and at 125% scale, without moving any
+glossary card. The header keeps one row of Anki, pronunciation, Note and custom
+Anki buttons, and its Anki and custom Anki clicks mine あす. Focus on the leaving
+pronunciation button moves to あす's, and a focused custom Anki button holds the
+header until focus leaves it. Go to next entry leaves みょうにち's header under the
+pinned one. The accessibility tree names the hidden first headword nowhere.
+`HACHIDORI_DYNAMIC_HEADWORD_SCREENSHOTS` names a directory for its screenshots.
+The extension smoke suite's jsdom stage for the same change checks node identity,
+the held Note draft, navigation that cannot reach its target, and Back's
+disclosure order. `test/anki-content.test.mjs` checks that a renderer can name
+the result that owns the shared custom Anki buttons.
+
 `node --test test/sentence.test.mjs` is the table-driven contract of
 `extension/sentence.js`, Yomitan's sentence boundaries: terminators kept at the
 end, enclosing quotes and brackets left out, nested and preceding pairs kept
@@ -113,7 +133,8 @@ one or several glyph boxes, and a drag on into the next OCR block.
 `node --test test/settings-search.test.mjs test/toolbar.test.mjs` checks global
 settings search, keyboard navigation, disclosure focus and draft preservation,
 including "highlight", "selection" and "custom dictionary" finding **Use the
-personal dictionary**, plus the toolbar toggle and revision conflicts. Search uses
+personal dictionary** and "headword" and "header" finding **Headword and
+toolbar position**, plus the toolbar toggle and revision conflicts. Search uses
 the same external jsdom dependency described below. The toolbar tests do not
 start a recording session.
 
@@ -188,11 +209,17 @@ with opposite polarity. It also rejects a sidebar item without a link. It uses
 the same external jsdom dependency.
 
 `node --test test/keybind-settings.test.mjs` checks Yomitan's default keybinds for
-supported actions, keybind normalisation and strict option patches, key
-combination capture, action/argument/scope editing, Clear, Reset, Remove, Add and
+supported actions plus the Alt+wheel rows, keybind normalisation and strict option
+patches, key combination capture, wheel steps recorded only with a modifier over
+the focused field, action/argument/scope editing, Clear, Reset, Remove, Add and
 Reset to defaults. It uses the same external jsdom dependency. The extension smoke
 suite drives the content script's keybind dispatch and the real popup view's entry
-navigation. `audio-content.test.mjs` covers keybind audio playback. The keybind
+navigation. Its wheel cases press a binding once per notch, gather a touchpad's
+small steps into notches, start again after a pause or a reversal, act on the
+popup under the pointer, and leave unbound and Ctrl wheels to the existing
+scrolling. The Chrome suite moves one entry per real Alt+wheel step without
+scrolling the pane or the page. `audio-content.test.mjs` covers keybind audio
+playback. The keybind
 settings suite also lists Chrome's browser shortcuts and refreshes them when the
 window regains focus, while proving an overlay disables only that Chrome-owned
 shortcut manager and leaves page/popup keybind editing available.
@@ -214,10 +241,10 @@ direction), the Settings → Advanced → Memory readout and each Library row's
 is busy or unreachable, the *Extension total* line from a stubbed
 `hd_memory_total` reply, a dash where it cannot be measured and never holding
 the engine line, a refresh on a new engine generation while Advanced is
-shown and when a row's Details opens, the switch saving
+shown and when a row's Details opens, the switches and entry-storage selector saving
 through the ordinary options queue, and the switch hidden with
 the single-thread engine, and a paged row's *(entries read from disk)*), and the
-`lowMemoryMode` option's normalisation. The
+`lowMemoryMode` and `dictionaryEntryStorage` options' normalisation. The
 memory settings suite uses the same external jsdom dependency. `node-smoke.mjs`
 records the heap after import and after `hdw_reset` and imports inside a
 two-thread pool. It also loads copies of the fixture into fresh modules with one
@@ -231,12 +258,17 @@ runs a worker configured as the low-memory one (every add paged, identical
 lookups, smaller rows, a filled page cache) and, with `hdw_add_dict` refusing a
 package the way a full heap does, checks that the package loads paged, and that
 one refused paged too is reported in `failedDictionaries` while the others load.
+`engine-recycler.test.mjs` checks automatic OPFS paging independently of import
+mode, IDBFS defaults, explicit resident storage, the low-memory override, and
+idle restarts when only the storage policy changes.
 `chrome-e2e.mjs` first requires the real extension total, with the engine
 heap counted once, then turns the mode on in a real Chrome, watches the worker recycle
 (the generation restarts from zero), imports in the strict two-thread pool,
 and checks that the heap dropped, lookups still hit, the package's row counts
 only its index files as sized in OPFS, the page cache filled within its budget
-and the readout renders; turning the mode off again counts `blobs.bin` again.
+and the readout renders. Turning the mode off retains paged OPFS entries with
+the full import pool; selecting resident entry storage counts `blobs.bin` again
+and produces identical lookup results.
 The hoshidicts `dictionary-storage` test covers the engine side natively.
 
 `node --test test/sharing-protocol.test.mjs test/sharing-client.test.mjs
@@ -342,10 +374,6 @@ fails if `git status` in the submodule comes back dirty.
 ## `issue-template.test.mjs`
 
 Run `node --test test/issue-template.test.mjs` for changes to issue templates or their enforcement workflow. This dependency-free suite uses the production validator and mocked GitHub issue calls to check completed and incomplete submissions, Markdown comments and code fences, the acknowledgement, closure feedback, and stale issue events. It never closes real issues. The Issue template workflow runs this check on relevant pull requests and pushes to `main`; its separate issue-event job enforces the template on opened, edited, and reopened issues.
-
-## `accessibility-review.test.mjs`
-
-Run `node --test test/accessibility-review.test.mjs` for changes to the accessibility review gate. It checks affected-file detection, exact-head owner approval, and the label/check decision using mocked GitHub calls. The workflow tests pull-request code with a read-only token; its review gate executes the default-branch script and posts the result to the pull request's head commit.
 
 ---
 
@@ -550,7 +578,10 @@ What it proves, in order:
    must complete import, reload from the installed files, and answer a lookup. The
    expanded-size fixtures carry valid raw-deflate streams while keeping their
    physical ZIPs small. Structurally inconsistent local and central headers and
-   impossible zero-byte deflate streams remain rejected.
+   impossible zero-byte deflate streams remain rejected. A copy of the fixture
+   whose local headers leave their sizes zero for a data descriptor (general-
+   purpose bit 3, as streaming writers produce) imports like the original, while
+   a bit-3 local header that records different sizes is still rejected.
 7. **`hdw_reset`** — every dictionary dropped (lookup, kanji, styles and media all
    return their empty forms), then reloaded from the same MEMFS directory.
 8. **Import staging.** `dictionary_importer::import` builds its output directory
@@ -617,6 +648,11 @@ What it proves, in order:
     windows-1252 stylesheets decoded, without `@charset` or U+FFFD.
     `legacy_font.mdx` turns `<font size>` into `medium` and `x-large`, and its
     inline `font-size` wins over `size="5"`.
+
+The definition-order regression (#472) imports two small dictionaries and checks
+descending definition scores, stable ties, fractional and negative scores, tag
+ownership, dictionary priority and reordering, and selected-dictionary lookups
+through both mapped and paged storage. The JSON response shape stays unchanged.
 
 Two behaviours worth knowing, both asserted so they cannot drift silently:
 
@@ -1533,8 +1569,9 @@ cards, without changing the generated fixture files. Four Chrome projections
 cover All, ordered nonempty groups and an ungrouped favourite from the complete
 native result; ordinary contributors and grouped favourites receive no duplicate
 dictionary tabs. Warmed tab changes must issue no lookup, media or style
-requests. Linked-child, clicked-kanji and Back retain their semantic selection.
-Back restores an expanded, scrolled child with its prior tab, highlight and
+requests. Links open their exact target on All; a child's own tab selection
+survives clicked-kanji and Back while its parent keeps its selected tab.
+Back restores a complete, scrolled child with its prior tab, highlight and
 toolbar and identical dictionary cards, without another native lookup;
 its next Back still closes the child. Extension checks cover native-source fallback and
 terminal misses, cached versus changed-generation restoration, lazy IPA and
@@ -1546,10 +1583,11 @@ for protected Note forms and child anchors to retire before local projection.
 
 The same scenario saves columns one through four through Settings, compares
 actual card rectangles for shortest-column packing and non-overlap, then resets
-all one-column inline styles. Narrow/wide resizing, a held real PNG reply and
-genuine child Show more retain complete results, mounted drafts and anchors.
-Readiness includes the deferred generic-prefix definition before freezing the
-expanded DOM oracle. A nondefault column count also survives the existing full
+all one-column inline styles. Narrow/wide resizing and a held real PNG reply
+retain complete results, mounted drafts and anchors. Linked-child readiness
+requires the complete exact-target bodies before freezing the DOM oracle;
+resizing preserves those cards, the mounted Note draft and the parent anchor.
+A nondefault column count also survives the existing full
 browser restart. `HACHIDORI_TABS_SCREENSHOT` captures the two-column reader;
 `HACHIDORI_OPTIONS_SCREENSHOT` and `HACHIDORI_OPTIONS_DARK_SCREENSHOT` capture
 the Reading controls in light and dark themes.
@@ -1848,6 +1886,14 @@ as in Default; a blurred definition still renders blurred; and Puppeteer's
 accessibility snapshot reads list items without a bar. The bar must reach 3:1
 against the card in every palette, and switching back restores the exact card
 heights.
+
+`chrome-lookup-count-layout.mjs` renders the primary entry the same way at every
+even popup width from 280 to 600 px, with no, four and four named frequency tags
+(#486). A count on its way keeps a place after the tags and paints nothing;
+painting counts from 0 to 99 leaves the tags, the count and the first definition
+card exactly where they were, and longer counts still never move the tags. A
+count that will not arrive keeps no place, and the accessibility snapshot exposes
+only the painted count, still before the tags.
 
 - The popup's **structure**, not just its flattened text. `popupReader()` reports
   `tags`, `lists`, `tables` and `bold` (with the computed `font-weight`, since the
