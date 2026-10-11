@@ -1,0 +1,5 @@
+# SubMiner pins sha256 hashes of the vendored engine builds and patches
+# extension sources by exact text, so checkouts must keep LF on every platform
+# (Windows runners default to core.autocrlf=true).
+* text=auto eol=lf
+*.wasm binary
