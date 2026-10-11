@@ -93,13 +93,13 @@ dictionary when a new show starts. The archive is imported exactly as if it had
 been dropped into this browser's Settings, and every linked browser sees the
 result through the usual storage batches.
 
-On a linked browser, **Import dictionaries** sends each ZIP to the host. The
+On a linked browser, **Add dictionaries** sends each ZIP to the host. The
 browser still reads the archive's title first and asks whether to replace an
 installed dictionary with that title or add the archive separately; the host
 applies that choice to its own library. MDX dictionaries are imported on the
 host itself.
 
-![Import dictionaries on a linked browser](assets/sharing-linked-import.png)
+![Add dictionaries on a linked browser](assets/sharing-linked-import.png)
 
 An app sends four runtime messages to target `hachidori-linked-import`; a
 linked Hachidori forwards them to its host, and an unlinked one imports the
@@ -138,15 +138,17 @@ cannot use its port. Browsers on other computers then enter `address:port`.
 After linking, the page reloads, and from then on:
 
 - lookups, media, engine status, Note appends, settings edits, dictionary
-  presentation edits, update checks and installs, recommended-dictionary
-  installs and removals go to the host, which commits them through its
-  ordinary revisioned transactions and pushes the resulting storage batches back;
+  presentation edits, words marked as known or ignored, update checks and
+  installs, recommended-dictionary installs and removals go to the host, which
+  commits them through its ordinary revisioned transactions and pushes the
+  resulting storage batches back;
 - the host's dictionary state, settings, personal dictionary source, update
-  schedules and lookup counts are mirrored into this browser's storage, so the
-  popup, Settings and toolbar read exactly what they read before;
+  schedules, lookup counts and marked words are mirrored into this browser's
+  storage, so the popup, Settings and toolbar read exactly what they read before;
 - this browser's own dictionary state, settings, personal source, update
-  schedule and lookup counts are kept aside untouched, and its engine keeps
-  reading and committing them, so no local dictionary file is ever removed;
+  schedule, lookup counts and marked words are kept aside untouched, and its
+  engine keeps reading and committing them, so no local dictionary file is ever
+  removed;
 - Anki Settings discovery and existing-setup checks, cache-only View readiness,
   availability, preflight, generation validation, duplicate checks, writes and browsing use the host's
   AnkiConnect URL, API key and selected Template. The linked browser never falls
@@ -170,7 +172,10 @@ After linking, the page reloads, and from then on:
   addresses refer to the host computer;
 - the Import and Backup sections show that archives and backups belong to the
   host; recommended dictionaries can still be installed from here, and ZIP
-  files imported here are [sent to the host](#imports-from-linked-browsers).
+  files imported here are [sent to the host](#imports-from-linked-browsers);
+- **Remove all imported dictionaries** and **Reset lookup counts** are
+  unavailable: they act on one browser's own data, and what a linked browser
+  shows belongs to the host. Use them on the host, or unlink first.
 
 ![Settings → Sharing on a linked browser, using the shared Hachidori](assets/sharing-linked.png)
 
@@ -216,11 +221,13 @@ runtime needs nothing beyond the WebSocket.
 
 - lookups, media, styles and engine status;
 - reader and Design settings, dictionary state, groups, aliases and order, the
-  personal dictionary source, update schedules and lookup counts, pushed to
-  every linked browser as the same storage batches the host writes;
-- Note appends, settings and presentation edits, update checks and installs,
-  recommended-dictionary installs and removals made in a linked browser, which
-  the host commits through its ordinary revisioned transactions;
+  personal dictionary source, update schedules, lookup counts and the words
+  marked as known or ignored for word highlighting, pushed to every linked
+  browser as the same storage batches the host writes;
+- Note appends, settings and presentation edits, Mark as known and Ignore,
+  update checks and installs, recommended-dictionary installs and removals made
+  in a linked browser, which the host commits through its ordinary revisioned
+  transactions;
 - Anki Settings discovery and existing-setup checks, status, preflight,
   duplicate and generation checks, note writes and browsing. Endpoint
   credentials or mappings supplied by a linked request are ignored; only the

@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
+import { SETTINGS_PAGE_MODULES } from "./settings-modules.mjs";
 
 const require = createRequire(import.meta.url);
 const { JSDOM } = require(require.resolve("jsdom", { paths: [process.env.HACHIDORI_JSDOM
@@ -62,6 +63,7 @@ function fixture(t, { hash = "#advanced", stored = {}, threaded = true, memory =
     ["memory-settings.js", ["createMemorySettings"]],
     ["dictionary-name-drafts.js", ["createDictionaryNameDrafts"]],
     ["dictionary-groups.js", ["createDictionaryGroupController"]],
+    ["error-text.js", ["describeErrorOrJson"]],
     ["custom-dictionary.js", ["CUSTOM_DICTIONARY_ID", "CUSTOM_DICTIONARY_TITLE"]],
     ["recommended-dictionaries.js", ["RECOMMENDED_DICTIONARIES"]],
     ["managed-dictionary-source.js", ["effectiveDictionarySchedule", "managedDictionarySource",
@@ -69,7 +71,7 @@ function fixture(t, { hash = "#advanced", stored = {}, threaded = true, memory =
   ]) {
     window.eval(`{ ${withoutModules(extension(file))}\nObject.assign(globalThis, {${exports.join(",")}}); }`);
   }
-  const source = withoutModules(extension("settings.js"));
+  const source = withoutModules(SETTINGS_PAGE_MODULES.map(extension).join("\n"));
   assert.ok(source.endsWith("await start();\n"));
   window.eval(source.replace(/await start\(\);\s*$/u, `
     configureBrowserUi();
@@ -248,4 +250,43 @@ test("entry storage saves independently and low memory temporarily overrides its
   await local.window.pollStatus();
   await settle();
   assert.equal(local.el("dictionary-entry-storage").hidden, true);
+});
+
+
+test("Use less ram by default saves independently and yields to explicit hash storage and Low memory mode", async t => {
+  const { window, el } = fixture(t);
+  await settle();
+  const toggle = el("opt-use-less-ram-by-default");
+  assert.equal(toggle.checked, false);
+  assert.equal(toggle.disabled, false);
+  toggle.click();
+  await tick();
+  assert.equal(window.readOptions().useLessRamByDefault, true);
+  assert.equal(window.readOptions().lowMemoryMode, false);
+  assert.equal(JSON.stringify(window.readPending()), JSON.stringify({ useLessRamByDefault: true }));
+  const hashes = el("opt-dictionary-index-storage");
+  hashes.value = "resident";
+  hashes.dispatchEvent(new window.Event("change"));
+  assert.equal(toggle.disabled, true);
+  hashes.value = "auto";
+  hashes.dispatchEvent(new window.Event("change"));
+  assert.equal(toggle.disabled, false);
+  el("opt-low-memory-mode").click();
+  assert.equal(toggle.disabled, true);
+  assert.equal(toggle.checked, true, "Low memory mode preserves the preference");
+  const local = fixture(t, { threaded: false });
+  await local.window.pollStatus();
+  assert.equal(local.el("use-less-ram-by-default").hidden, true);
+});
+
+test("memory separates the index budget, shared cache and entry-paging label", async t => {
+  const memory = { ok: true, heapBytes: 64 * 1048576, hashIndexStorage: "budget", dictionaryIndexStorage: "auto",
+    residentHashBudgetBytes: 32 * 1048576, pageCacheBytes: 2 * 1048576,
+    dictionaries: DICTIONARIES.map((item, index) => ({ id: item.id, bytes: 1048576, paged: true,
+      hashIndexStorage: index ? "resident" : "paged", residentHashBytes: index ? 1048576 : 0 })) };
+  const { el, rowMemory } = fixture(t, { memory });
+  await settle();
+  assert.match(el("memory-indexes").textContent, /1.0 MB resident.*32.0 MB budget; 1 read from disk.*requested: Automatic.*2.0 MB/);
+  assert.match(rowMemory(DICTIONARIES[0].id), /entries and hash index read from disk/);
+  assert.match(rowMemory(DICTIONARIES[1].id), /entries read from disk/);
 });

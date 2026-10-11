@@ -44,6 +44,10 @@ async function run(name, args, overrides = {}) {
   }
 }
 
+// The node:test suites: the spec reporter keeps their logs readable, and the run ends
+// once every test has finished even though the code under test leaves timers behind.
+const NODE_TEST = ["--test-force-exit", "--test-reporter=spec"];
+
 const suite = process.argv[2];
 mkdirSync(OUTPUT, { recursive: true });
 try {
@@ -51,6 +55,9 @@ try {
     const browser = await install({ cacheDir: CACHE, browser: Browser.CHROME, buildId: chromeBuild,
       installDeps: process.argv.includes("--install-deps") });
     console.log(`Chrome ${chromeBuild}: ${browser.executablePath}`);
+  } else if (suite === "lint") {
+    const eslint = resolve(dirname(require.resolve("eslint/package.json")), "bin/eslint.js");
+    await run("lint", [eslint, "--config", "test/tooling/eslint.config.mjs", "."]);
   } else if (suite === "node") {
     const tests = ["test", "benchmark"].flatMap(directory => readdirSync(resolve(ROOT, directory))
       .filter(file => file.endsWith(".test.mjs")).sort().map(file => `${directory}/${file}`));
@@ -62,10 +69,10 @@ try {
     await run("node-threaded-idbfs", ["test/node-smoke.mjs"], { HACHIDORI_WASM_VARIANT: "threaded-idbfs" });
     await run("node-fallback", ["test/node-smoke.mjs"], { HACHIDORI_WASM_VARIANT: "fallback" });
     await run("threaded-bridge", ["test/threaded-bridge-smoke.mjs"]);
-    await run("extension-smoke", ["test/extension-smoke.mjs"]);
+    await run("extension-smoke", [...NODE_TEST, "test/extension-smoke.mjs"]);
   } else if (["chrome-e2e", "chrome-sharing", "chrome-fallback", "chrome-overlay", "chrome-theme-contrast"].includes(suite)) {
     await run("fixture", ["test/make-fixture.mjs"]);
-    await run(suite, [`test/${suite}.mjs`], {
+    await run(suite, [...(suite === "chrome-e2e" ? NODE_TEST : []), `test/${suite}.mjs`], {
       HACHIDORI_DEINFLECTION_SCREENSHOT: process.env.HACHIDORI_DEINFLECTION_SCREENSHOT || resolve(OUTPUT, "deinflection.png"),
       HACHIDORI_SETTINGS_THEME_FILMSTRIP: process.env.HACHIDORI_SETTINGS_THEME_FILMSTRIP || resolve(OUTPUT, "settings-theme-first-frame.png"),
       HACHIDORI_SHARING_SCREENSHOTS: process.env.HACHIDORI_SHARING_SCREENSHOTS || resolve(OUTPUT, "sharing"),
@@ -73,7 +80,7 @@ try {
     if (suite === "chrome-e2e") await run("chrome-popup-scale", ["test/chrome-popup-scale.mjs"]);
   } else {
     throw new Error(
-      "Choose node, smoke, chrome-e2e, chrome-sharing, chrome-fallback,"
+      "Choose lint, node, smoke, chrome-e2e, chrome-sharing, chrome-fallback,"
         + " chrome-overlay, chrome-theme-contrast or install-chrome.",
     );
   }

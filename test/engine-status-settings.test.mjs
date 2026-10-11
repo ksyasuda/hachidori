@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
+import { SETTINGS_PAGE_MODULES } from "./settings-modules.mjs";
 
 const require = createRequire(import.meta.url);
 const { JSDOM } = require(require.resolve("jsdom", { paths: [process.env.HACHIDORI_JSDOM
@@ -65,6 +66,7 @@ function fixture(t, { failedDictionaries = [] } = {}) {
     ["memory-settings.js", ["createMemorySettings"]],
     ["dictionary-name-drafts.js", ["createDictionaryNameDrafts"]],
     ["dictionary-groups.js", ["createDictionaryGroupController"]],
+    ["error-text.js", ["describeErrorOrJson"]],
     ["custom-dictionary.js", ["CUSTOM_DICTIONARY_ID", "CUSTOM_DICTIONARY_TITLE"]],
     ["recommended-dictionaries.js", ["RECOMMENDED_DICTIONARIES"]],
     ["managed-dictionary-source.js", ["effectiveDictionarySchedule", "managedDictionarySource",
@@ -72,7 +74,7 @@ function fixture(t, { failedDictionaries = [] } = {}) {
   ]) {
     window.eval(`{ ${withoutModules(extension(file))}\nObject.assign(globalThis, {${exports.join(",")}}); }`);
   }
-  const source = withoutModules(extension("settings.js"));
+  const source = withoutModules(SETTINGS_PAGE_MODULES.map(extension).join("\n"));
   assert.ok(source.endsWith("await start();\n"));
   window.eval(source.replace(/await start\(\);\s*$/u, `
     configureBrowserUi();

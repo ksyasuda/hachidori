@@ -6,6 +6,21 @@ import "../extension/reader-options.js";
 const { DEFAULT_OPTIONS, KEYBIND_TOGGLE_OPTIONS, normaliseOptions, projectStoredOptions, validateOptionsPatch }
   = globalThis.HDReaderOptions;
 
+test("useLessRamByDefault starts off for new and existing installs and accepts only boolean changes", () => {
+  assert.equal(DEFAULT_OPTIONS.useLessRamByDefault, false);
+  assert.equal(normaliseOptions({}).useLessRamByDefault, false);
+  assert.equal(normaliseOptions({ useLessRamByDefault: false }).useLessRamByDefault, false);
+  assert.equal(normaliseOptions({ useLessRamByDefault: true }).useLessRamByDefault, true, "preserve explicit opt-in");
+  assert.deepEqual(validateOptionsPatch({ useLessRamByDefault: true }), { useLessRamByDefault: true });
+  for (const garbage of ["false", 0, null]) {
+    assert.equal(normaliseOptions({ useLessRamByDefault: garbage }).useLessRamByDefault, false);
+  }
+  assert.deepEqual(projectStoredOptions({ useLessRamByDefault: "off" }), { useLessRamByDefault: false });
+  assert.deepEqual(validateOptionsPatch({ useLessRamByDefault: false }), { useLessRamByDefault: false });
+  assert.throws(() => validateOptionsPatch({ useLessRamByDefault: "off" }), /invalid reader option/);
+  assert.ok(!KEYBIND_TOGGLE_OPTIONS.includes("useLessRamByDefault"));
+});
+
 test("lowMemoryMode is a boolean option that starts off", () => {
   assert.equal(DEFAULT_OPTIONS.lowMemoryMode, false);
   assert.equal(normaliseOptions({}).lowMemoryMode, false, "missing");
@@ -40,5 +55,18 @@ test("dictionary entry storage defaults to automatic and validates explicit poli
   for (const value of [true, "disk", null]) {
     assert.equal(normaliseOptions({ dictionaryEntryStorage: value }).dictionaryEntryStorage, "auto");
     assert.throws(() => validateOptionsPatch({ dictionaryEntryStorage: value }), /invalid reader option/);
+  }
+});
+test("dictionary index storage defaults to automatic and validates explicit policies", () => {
+  assert.equal(DEFAULT_OPTIONS.dictionaryIndexStorage, "auto");
+  assert.equal(normaliseOptions({ lowMemoryMode: false }).dictionaryIndexStorage, "auto",
+    "existing installations keep automatic index selection without rewriting stored options");
+  for (const value of ["auto", "paged", "resident"]) {
+    assert.equal(normaliseOptions({ dictionaryIndexStorage: value }).dictionaryIndexStorage, value);
+    assert.deepEqual(validateOptionsPatch({ dictionaryIndexStorage: value }), { dictionaryIndexStorage: value });
+  }
+  for (const value of [true, "disk", null]) {
+    assert.equal(normaliseOptions({ dictionaryIndexStorage: value }).dictionaryIndexStorage, "auto");
+    assert.throws(() => validateOptionsPatch({ dictionaryIndexStorage: value }), /invalid reader option/);
   }
 });

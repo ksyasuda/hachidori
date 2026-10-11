@@ -1,5 +1,108 @@
 # Browser benchmark
 
+## Hash index residency
+
+`index-residency.mjs` compares the original resident baseline (`43535b1b`), the rebuilt resident
+control, 16/32/64 MiB aggregate budgets, and fully paged hashes on threaded OPFS,
+all on the same installed files. Use Node 22 and the locked Chrome/Puppeteer
+tooling described below. Build the pinned native engine with its CLI and
+benchmark enabled (it needs a C++23 standard library), then generate fixtures:
+
+```sh
+cmake -S third_party/hoshidicts -B /tmp/index-native -DCMAKE_BUILD_TYPE=Release \
+  -DHOSHIDICTS_CLI=ON -DHOSHIDICTS_BENCHMARK=ON -DHOSHIDICTS_TESTS=ON
+cmake --build /tmp/index-native --parallel 8
+importer=/tmp/index-native/hoshidicts-cli
+node benchmark/index-residency-fixture.mjs /tmp/index-reporter "$importer" reporter
+node benchmark/index-residency-fixture.mjs /tmp/index-many "$importer" 200000 58
+node benchmark/index-residency-fixture.mjs /tmp/index-large "$importer" 1600000 1
+node benchmark/index-residency-fixture.mjs /tmp/index-small "$importer" 20 2
+export HACHIDORI_CHROME=/path/to/chrome HACHIDORI_PUPPETEER=/path/to/puppeteer-core.js
+for fixture in reporter many large small; do
+  node benchmark/index-residency.mjs --fixture /tmp/index-$fixture \
+    --output /tmp/index-$fixture-results --before-ref 43535b1b --samples 3 \
+    --variants baseline,resident,16,32,64,paged
+done
+TMPDIR=/path/on/a/disk node benchmark/index-residency.mjs --fixture /tmp/index-reporter \
+  --output /tmp/index-reporter-cold-results --before-ref 43535b1b --samples 3 \
+  --variants baseline,resident,16,32,64,paged --os-cold true
+node benchmark/index-residency-native.mjs /tmp/index-native/benchmark-lookup \
+  /tmp/index-reporter /tmp/index-reporter-native
+node benchmark/index-residency-report.mjs /tmp/index-*-results /tmp/index-*-native
+```
+
+`--before-ref` extracts the unmodified `extension/` of a commit (or pass an
+extracted copy with `--before`) and runs it as the `baseline` variant. `--low-memory
+false` measures normal mode with its full import pool and no post-mutation recycle;
+the default `true` retains the original Low memory mode measurements. Use
+`--variants baseline,65 --low-memory false` to compare the 65 MiB default with
+an earlier revision on the same files. The selected mode and its default hash
+budget are recorded in `definition.json`. Output
+directories must be fresh. `--os-cold true` syncs and evicts every file of the
+seeded profile and temporary extension from the OS page cache (`dd
+iflag=nocache`) before the measured launch, so startup and the first pass read
+from the storage device; it needs `TMPDIR` on a disk filesystem, because tmpfs
+pages cannot be evicted. Without it the OS cache is warm. Each repetition reverses
+the policy order, seeds a fresh profile with the same native files, and restarts Chrome before
+timing startup, two full lookup passes and real pointer hovers. Complete ordered
+results, kanji, inflection, dictionary selection and media must match. Each sample
+also disables/re-enables packages, restarts with disabled packages, reimports,
+waits for the idle worker replacement in Low memory mode, and removes a package. The first 32 or 65 MiB
+sample checks all three Settings choices and saves both palettes after timing.
+
+Fixtures contain synthetic Japanese terms and production importer output. The
+reporter-shaped fixture sizes its 58 packages so their resident index files
+approximate the #496 inventory (249 MiB of hash tables), nests their
+vocabularies by rank and samples a Zipf corpus. The uniform 58-package fixture
+repeats one dictionary's terms under distinct canonical titles: every hit is
+present in every package, a demanding upper bound on index reads. Neither is
+the reporter's private collection. The
+temporary setup workers write and close the installed files before measurement.
+Setup stores the chosen options before the native engine starts; real Settings
+writes are checked separately after timing. The temporary extension has a
+stable public key, disables relay hosting, adds
+the existing hover probe, and clocks the native WASM call. Numerical budget
+variants change only its budget constant. Production bundles and formats remain
+unchanged between candidate policies. Pure C++ timings come from the pinned
+engine's existing `benchmark-lookup`, extended with paged-hash and JSON options.
+
+`definition.json` records source fingerprints, fixture file/archive checksums,
+environment and boundaries; `raw.jsonl` retains each completed sample, and each
+run ends by writing `summary.md`/`summary.json` (re-create them with
+`index-residency-report.mjs`). Latency percentiles pool every query of the three
+repetitions; other figures are medians across repetitions. Cold is the first
+pass after a fresh engine start, warm the second. Throughput is lookups per
+second of summed round-trip time in one pass. The WASM heap never shrinks, so
+the heap after both passes is the session's peak. Extension RSS is the
+extension renderer that hosts the offscreen document and its engine worker,
+sampled every 100 ms from launch through the warm pass (peak) and read right
+after it (steady), before Low memory mode's idle recycle can replace the
+worker. Native timings exclude serialization; WASM call timings include it;
+round trips exclude rendering; hovers include the first and complete rendered
+results. RSS counts shared pages once per process, the OS file cache is warm
+unless `--os-cold` is set, and startup has already touched header and warmup pages. The
+[measured report](../docs/benchmarks/index-residency.md) uses the runs kept in
+`results/index-residency/<run>/`: gzip-compressed definitions, raw samples and
+failed attempts with the hostname and home directory redacted, plus each
+`summary.md`. `node benchmark/index-residency-report.mjs
+benchmark/results/index-residency/*/` reads them in place.
+
+To count the fixed corpus's exact-hit hash pages (a lower bound that excludes
+additional prefixes, Bloom false positives and entry pages):
+
+```sh
+c++ -std=c++20 -O2 -Ithird_party/hoshidicts/external/xxHash \
+  benchmark/index-working-set.cpp -o /tmp/index-working-set
+/tmp/index-working-set '/tmp/index-many/Index residency synthetic 00/hash.table' \
+  /tmp/index-many/words.txt
+```
+
+Multiply that page count by 4 KiB and the package count for this repeated-term
+fixture. `--measure-total true` adds a separate, untimed final
+`hd_memory_total` snapshot; it records an unavailable result after 30 seconds if
+Chrome's GC-based API has not replied. Do not compare its observation time with
+lookup or startup timings.
+
 This framework measures the production Chrome-extension path rather than the
 Node/MEMFS smoke-test path.
 
@@ -131,6 +234,170 @@ isolates scanning and rendering overhead and does not represent a large library.
 Its `deep-nesting-*` scans hover 深層, whose gloss sits under 40 nested
 elements, alternating with the flat entries (`deep-nesting-flat-*`); compact
 summaries are on, so those timings include the summary walkers.
+
+## Content-script injection per frame
+
+`content-injection.mjs` measures what the manifest's content scripts cost every
+frame before any hover, and what loading the popup renderer
+(`render/glossary.js`, `render/popup.js`) on demand would cost instead:
+
+```sh
+HACHIDORI_CHROME=/path/to/chrome HACHIDORI_PUPPETEER=/path/to/puppeteer-core.js \
+  node benchmark/content-injection.mjs /tmp/content-injection
+```
+
+It reads Linux `/proc`, so it runs on Linux only. Set
+`HACHIDORI_ALLOW_NO_SANDBOX=1` where sandboxed Chrome cannot start.
+
+Each sample loads one page in a fresh profile and browser: a plain page, or 20
+same-site iframes (one renderer process) or 20 cross-site iframes (a process
+each, through `--host-resolver-rules`), each frame holding one line of text.
+Each round rotates three copies of the extension: `none` without content
+scripts (the control), `production` with the manifest's list, and
+`no-renderer` without the two renderer files and with a stub for the two
+`HDPopup` members `content.js` reads before a popup exists. That last copy only
+estimates what deferring the renderer saves before the first hover; it cannot
+show a popup. All three wait for their frames through Puppeteer, whose utility
+script then sits in every frame's main world, so the deltas leave it out.
+`summary.json` reports distributions (n, quartiles, p95 and range) of:
+
+- the synchronous injection task of each frame, per file, from timing marks run
+  between the files, pooled over every frame of every round. A cold frame is
+  the first in its renderer process; later same-site frames reuse V8's
+  compilation cache and are warm;
+- per-frame deltas across rounds from the same round's `none` page
+  (`contentScripts`) and `no-renderer` page (`renderer`): main-thread CPU of
+  the page renderers and CPU of every Chrome process (Linux `schedstat`) from
+  navigation until `HACHIDORI_INJECTION_SETTLE_MS` (3000) after load, which
+  includes the asynchronous start-up after injection; V8 heap after two forced
+  collections; page-renderer USS and PSS; and the load event.
+  `perAdditionalFrame` is a warm same-site frame: the same-site delta less the
+  plain page's, per iframe;
+- in `no-renderer`'s cross-site page, each iframe loading the renderer on
+  demand, timed in the frame until its globals exist: through the worker's
+  `chrome.scripting.executeScript` (cold, then again warm) or through `import()`
+  (the copy lists the two files as web-accessible).
+
+`HACHIDORI_INJECTION_SAMPLES` (5) and `HACHIDORI_INJECTION_FRAMES` (20) size the
+run and `HACHIDORI_BENCH_REPO` measures another checkout. Every row is kept in
+`raw.jsonl`, with `definition.json` beside it. Puppeteer's network monitoring is
+off: with it, Chrome records each content-script request's initiator stack and
+collects the requesting script's source positions, about 5 ms more per cold
+frame than with no DevTools client at all. The profile is a fresh install with no
+dictionaries, so the start-up storage read is the smallest it can be.
+Content-script clocks are coarsened to 0.1 ms, the timing marks add up to 15
+tiny scripts, and USS after collection can still hold pages V8 has not returned.
+First-hover latency is the hover-popup harness's `cold` scan.
+
+## Netflix line audio (#542)
+
+`netflix-line-audio.mjs` measures what Netflix mining's line audio costs while a
+video plays: routing the `<video>` through Web Audio and keeping the last 30
+seconds of its 1× sound in the page.
+
+```sh
+HACHIDORI_CHROME=/path/to/chrome HACHIDORI_PUPPETEER=/path/to/puppeteer-core.js \
+  node benchmark/netflix-line-audio.mjs /tmp/line-audio <before-ref>
+```
+
+It reads Linux `/proc`, so it runs on Linux only. Set
+`HACHIDORI_ALLOW_NO_SANDBOX=1` where sandboxed Chrome cannot start.
+
+Each sample starts a fresh profile and browser with Netflix mining switched on,
+in the extension at `<before-ref>` (`before`, without the line audio) or in this
+checkout (`after`), the order alternating by round. A fixture watch page, served
+at `https://www.netflix.com/watch/81000001` by request interception, plays a
+stereo 48 kHz WAV (two tones and noise) on a loop; every host resolves to
+nothing, so no request leaves the machine. After `HACHIDORI_LINE_AUDIO_WARMUP_MS`
+(10000) the run counts `HACHIDORI_LINE_AUDIO_MEASURE_MS` (60000) of playback.
+`summary.json` reports per second of playback the main-thread and all-thread CPU
+of the page renderer, the audio service and every Chrome process (Linux
+`schedstat`), and, after two forced collections, the page's V8 heap, its array
+buffer backing store (where the 30-second ring lives) and the page renderer's
+USS and PSS; then the `after` less `before` delta of the same round. For `after`
+it adds the AudioContext's render capacity from `WebAudio.getRealtimeData`, the
+media seconds per wall second, and the time to cut a 4.5 s line from a 30 s ring
+and encode it as the base64 WAV the page sends (20 per sample). It requires one
+running AudioContext with the video's source and its copy in `after` and none in
+`before`. `HACHIDORI_LINE_AUDIO_SAMPLES` (3) sets the rounds; every row is in
+`raw.jsonl`, with `definition.json` beside it. `--disable-audio-output` gives
+Chrome a clocked fake output device, so it measures decoding and the graph, not
+a sound card's driver.
+
+## Word segmentation (#520)
+
+`segmentation.mjs` measures `hdw_segment`, the word-highlighting feature's
+engine call, on the frozen C ABI in MEMFS (like `node-smoke.mjs`), isolating the
+engine cost from messaging, OPFS and paint. It reports:
+
+- segmentation throughput: lines, segments and code points per second, with the
+  per-line p50/p95, with the frequency tie-break (`auto`) and without it
+  (`disabled`);
+- one call on the largest chunk `hd_segment` accepts, 4 KiB of UTF-8 built from
+  the corpus lines. `hd_segment` yields the engine only between chunks, so a
+  hover that arrives during a chunk waits for the rest of it: up to the
+  per-line time when a chunk is one line, up to this time for the largest
+  chunk. Callers should send a line or a text node per chunk;
+- the latency of a hover `hdw_lookup` on an idle engine and right after a
+  one-line segment call has returned, which is what interleaving costs a hover
+  beyond that wait;
+- the reference-set scores (`test/segmentation-reference.mjs`) of the best
+  split and the greedy parse with the loaded dictionaries, with and without the
+  frequency tie-break: matching words (span and headword), matching boundaries
+  (span only, whatever spelling the dictionary's headword has) and exact lines.
+
+```sh
+# Self-contained: the small reference dictionary from the segmentation test set.
+node benchmark/segmentation.mjs
+
+# A real corpus: any Yomitan term archive plus a frequency archive.
+HACHIDORI_SEGMENT_TERM_ZIP=/path/to/jitendex-yomitan.zip \
+HACHIDORI_SEGMENT_FREQ_ZIP=/path/to/frequency.zip \
+  node benchmark/segmentation.mjs
+```
+
+`HACHIDORI_SEGMENT_SAMPLES` (400) and `HACHIDORI_SEGMENT_WARMUP` (50) size the
+run; the largest chunk is segmented a twentieth as many times, at least five.
+`HACHIDORI_WASM_VARIANT` selects the threaded-idbfs or fallback build. These
+are per-call engine timings; they exclude messaging, the content script's
+chunking, the hover delay and popup rendering, which the hover-popup harness
+above measures end to end.
+
+### Word highlighting end to end
+
+`word-highlights.mjs` measures word highlighting in the real extension and
+Chrome on a long page of lines built from the segmentation reference lines
+(2,000 by default, `HACHIDORI_WORD_LINES`), under a fixed header holding two
+hover words. `HACHIDORI_WORD_LAYOUT=block` (the default) puts them in one block
+of `<br>`-separated lines, as Aozora Bunko lays a novel out; `paragraphs` gives
+each line its own `<p>`, as news sites and texthookers do, so the blocks a
+scroll reveals are segmented at once rather than after the 100 ms recheck.
+AnkiConnect is a local fake whose index gives those words cards, so status is
+available and no real Anki is contacted. Each session imports the given
+dictionaries into a fresh profile and reports:
+
+- the time from load to the first marks and to settled marks, and the ranges
+  kept then and after scrolling twenty viewports;
+- hover latency, from the pointer's `mousemove` to the popup showing the word,
+  on the idle page and right after each scroll, while the new text is being
+  segmented;
+- how long the line in the middle of the viewport takes to be marked after each
+  scroll;
+- the main thread's long tasks over the run.
+
+```sh
+git archive origin/main extension | tar -x -C /tmp/main
+HACHIDORI_WORD_TERM_ZIP=/path/to/jitendex-yomitan.zip \
+HACHIDORI_WORD_MAIN_EXTENSION=/tmp/main/extension \
+  node benchmark/word-highlights.mjs /tmp/word-highlight-results
+```
+
+It compares `main` (the extension directory `HACHIDORI_WORD_MAIN_EXTENSION`
+names, if any), this checkout with the switch off (`off`) and on (`on`), in
+`HACHIDORI_WORD_SESSIONS` (3) rounds that alternate their order.
+`HACHIDORI_WORD_HOVERS` (20) sets the hovers per state, after three excluded
+warmups, and `HACHIDORI_WORD_FREQ_ZIP` adds a frequency dictionary. It writes
+every sample to `word-highlights.json`.
 
 ## Linked-browser relay latency
 
@@ -630,7 +897,7 @@ corpus, query fixture, and correctness boundary.
 
 ## Runtime overrides
 
-The defaults match `test/chrome-e2e.mjs`. Override them when necessary:
+The defaults match the real-Chrome suite's (`test/chrome-e2e/session.mjs`). Override them when necessary:
 
 ```bash
 HACHIDORI_CHROME=/path/to/chrome \

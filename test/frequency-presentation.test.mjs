@@ -204,6 +204,38 @@ test("tags keep dictionary order, so each first value is the one averaged, as in
     ["Avg rank372", ["462 · 24459㋕", "312 · 19896㋕"]]);
 });
 
+test("every supplied frequency dictionary keeps its tag in the first and later entries, in any order (#505)", t => {
+  const f = fixture(t);
+  // monogatari's row for 答案, as the #427 archive stores it, after enough
+  // other sources to pass the twelve-tag metadata display budget.
+  const monogatari = { dictionary: "monogatari", frequencies: [{ value: 13337, displayValue: "13337/37459" }] };
+  const sources = count => [...Array.from({ length: count - 1 }, (_, index) => ({ dictionary: `Rank ${index + 1}`,
+    frequencies: [{ value: 100 * (index + 1), displayValue: String(100 * (index + 1)) }] })), monogatari];
+  for (const frequencies of [sources(13), sources(20), sources(60), sources(13).toReversed()]) {
+    const titles = frequencies.map(({ dictionary }) => dictionary);
+    const first = { ...RESULT, term: { ...RESULT.term, frequencies } };
+    const second = { ...first, term: { ...first.term, expression: "食う", reading: "くう" } };
+    // Every value is a rank, so the one average is their harmonic mean.
+    const average = Math.floor(frequencies.length
+      / frequencies.reduce((sum, group) => sum + 1 / group.frequencies[0].value, 0));
+    for (const averageFrequency of [false, true]) {
+      f.view.renderResults([first, second], f.candidate, { ...f.options.normaliseOptions({}), averageFrequency,
+        dictionaryPresentation: titles.map(title => ({ title, frequencyMode: "rank-based" })), expandAll: true });
+      const [primary, later] = f.popup.querySelectorAll(".gsm-hoshidicts-entry");
+      for (const container of [primary.querySelector(".gsm-hoshidicts-primary-frequencies"),
+        later.querySelector(".gsm-hoshidicts-frequency-metadata")]) {
+        const tags = [...container.querySelectorAll(".gsm-hoshidicts-tag-frequency:not([data-frequency-average])")];
+        assert.deepEqual(tags.map(tag => tag.dataset.dictionary), titles);
+        assert.equal(tags.find(tag => tag.dataset.dictionary === "monogatari").textContent, "13337/37459");
+        // Averaging hides the individual tags but keeps every one in the DOM.
+        assert.deepEqual(tags.map(tag => tag.hidden), titles.map(() => averageFrequency));
+        assert.deepEqual([...container.querySelectorAll("[data-frequency-average] .gsm-hoshidicts-frequency-value")]
+          .map(node => node.textContent), averageFrequency ? [String(average)] : []);
+      }
+    }
+  }
+});
+
 test("averaged hidden tags take no pitch budget, hide all-hidden groups and follow live toggles and aliases", t => {
   const f = fixture(t);
   const pitch = dictionary => ({ dictionary, pitches: [{ position: 0, pattern: "", nasal: [], devoice: [] }],
@@ -325,4 +357,29 @@ test("abbreviated frequency numbers pick the unit after rounding", t => {
   const { api } = fixture(t);
   assert.deepEqual([999, 1000, 51499, 99950, 999949, 999950, 1234567, 999950000].map(api.formatCompactFrequencyNumber),
     ["999", "1k", "51.5k", "100k", "999.9k", "1m", "1.2m", "1b"]);
+});
+
+test("a kanji view shows its kanji frequencies beside the glyph and follows live display choices (#512)", t => {
+  const f = fixture(t);
+  const defaults = f.options.normaliseOptions({});
+  const kanji = { character: "日", entries: [{ dictionary: "KANJIDIC", onyomi: "ニチ", kunyomi: "ひ", tags: "",
+    definitions: ["day"], stats: [] }], frequencies: [
+    { dictionary: "Aozora Bunko", frequencies: [{ value: 4, displayValue: "4 (12732)" }] },
+    { dictionary: "JPDB Kanji", frequencies: [{ value: 6, displayValue: "6" }] },
+  ] };
+  f.view.renderKanji(kanji, f.candidate, defaults);
+  const capsule = f.popup.querySelector(".gsm-hoshidicts-kanji-navigation > .gsm-hoshidicts-kanji-frequencies");
+  assert.ok(capsule, "the frequencies sit in the kanji header");
+  assert.equal(capsule.hidden, false);
+  assert.deepEqual([...capsule.querySelectorAll(".gsm-hoshidicts-tag-frequency")].map(tag => tag.dataset.dictionary),
+    ["Aozora Bunko", "JPDB Kanji"]);
+  assert.equal(capsule.textContent, "4 (12732)6");
+  f.view.updateDictionaryPresentation({ ...defaults, showFrequencyDictionaryNames: true });
+  assert.equal(capsule.textContent, "Aozora Bunko4 (12732)JPDB Kanji6");
+
+  f.view.renderKanji({ ...kanji, frequencies: [] }, f.candidate, defaults);
+  assert.equal(f.popup.querySelector(".gsm-hoshidicts-kanji-frequencies").hidden, true);
+  f.view.renderKanji({ character: "日", entries: kanji.entries }, f.candidate, defaults);
+  assert.equal(f.popup.querySelector(".gsm-hoshidicts-kanji-frequencies").hidden, true,
+    "a reply without frequencies renders as before");
 });

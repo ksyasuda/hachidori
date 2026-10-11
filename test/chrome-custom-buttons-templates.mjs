@@ -214,7 +214,7 @@ async function showSection(page, id) {
       picker.value = section;
       picker.dispatchEvent(new Event("change", { bubbles: true }));
     } else {
-      document.querySelector(`.settings-nav a[href="#${section}"], #library-navigation a[href="#${section}"]`).click();
+      document.querySelector(`.settings-nav a[href="#${section}"], .section-tabs a[href="#${section}"]`).click();
     }
   }, id);
   await page.waitForFunction((section) => {
@@ -1128,7 +1128,6 @@ async function mineFromPage(browser, extensionId, configured) {
   await tab.mouse.move(2, 2);
   await tab.mouse.move(word.x + word.width * 0.15, word.y + word.height / 2);
   const sentenceSelector = `[data-custom-button-id="${configured.sentenceButtonId}"]`;
-  const missingSelector = '[data-custom-button-id="missing-template"]';
   const ready = await popup.waitFor((state) => {
     const builtIn = state.actions.find(action => action.id === "built-in");
     const sentence = state.actions.find(action => action.id === configured.sentenceButtonId);

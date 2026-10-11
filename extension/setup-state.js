@@ -46,7 +46,7 @@ export function withOverlayLookupDefault(record) {
 export const OVERLAY_LOCAL_OPTION_KEYS = Object.freeze([
   "anki", "audioSources", "customButtons", "customLinks",
   "hoverEnabled", "onlyScanJapaneseText", "personalDictionaryEnabled", "showNoResultNotice", "lookupMode", "activationKey",
-  "definitionLookupMode", "popupHideDelayMs",
+  "definitionLookupMode", "scanDelayMs", "definitionScanDelayMs", "popupHideDelayMs",
   "hidePopupOnCursorExit", "hidePopupOnCursorExitDelayMs",
   "sourceHighlightEnabled", "popupWidthPx", "popupHeightPx", "popupScalePercent", "popupColumns", "popupToolbarPosition", "popupNestingMaxDepth",
 ]);

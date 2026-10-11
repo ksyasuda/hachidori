@@ -256,7 +256,7 @@ export async function checkActionRow(browser, { screenshotDirectory } = {}) {
       const { root } = window.rowFixture;
       const audio = root.querySelector(".gsm-hoshidicts-audio-button");
       const note = root.querySelector(".gsm-hoshidicts-note-button");
-      return ["loading", "error", "idle"].map(state => {
+      return ["loading", "playing", "idle"].map(state => {
         audio.dataset.state = state;
         audio.disabled = state === "loading";
         return { audio: audio.getBoundingClientRect().toJSON(), note: note.getBoundingClientRect().toJSON() };
@@ -331,7 +331,9 @@ export async function checkActionRow(browser, { screenshotDirectory } = {}) {
       "remaining controls keep their size without Anki");
     assert.equal(new Set(absent.buttons.map(({ top }) => Math.round(top))).size, 1,
       "Back, audio, Note and links stay aligned without Anki");
-    console.log("PASS action row geometry", JSON.stringify(evidence));
+    // One line per layout: `gh run view --log` stops reading a step's log at its
+    // first line over 64 KiB, and the whole list is over 100 KiB.
+    for (const layout of evidence) console.log("PASS action row geometry", JSON.stringify(layout));
   } finally {
     await page.close();
   }

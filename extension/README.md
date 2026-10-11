@@ -25,8 +25,9 @@ new reading session with the saved Design dimensions. Dragging does not change
 those saved settings or other tabs.
 
 The popup action row is one non-wrapping keyboard and visual group: a nested
-Close or Back control first, then Anki, pronunciation, personal-dictionary
-edit, and custom buttons in saved order. A custom button opens a URL template
+Close or Back control first, then Anki, pronunciation, Mark as known and Ignore
+(while word highlighting is on), personal-dictionary edit, and custom buttons
+in saved order. A custom button opens a URL template
 or mines with a chosen Anki Template. The Default renderer's header shows the
 result being read, so its Anki, pronunciation and custom buttons act on the
 result whose definitions are at the top. Actions share a 32-pixel height and a
@@ -41,10 +42,10 @@ validated URL in the system browser.
 
 | File | Runs as | Role |
 | --- | --- | --- |
-| `background.js` | the service worker | Routes every runtime message and owns everything in `chrome.storage.local`: dictionary metadata, options, the personal dictionary, update schedules, lookup counts, automatic-backup metadata, first-run and sharing state. It also owns the alarms, the Anki gateway and the sharing host and client. It holds no engine state, so Chrome may stop it whenever it is idle. |
-| `content.js`, with the classic scripts listed under `content_scripts` | every frame of a web page | Scans the Japanese text near the pointer and renders a popup in that frame, bounded by its viewport. The popup uses a shadow root through `theme-host.js` and the selected renderer (`render/popup.js` for Default), with Anki and pronunciation controls (`anki-content.js`, `audio-content.js`). `content.css` is the only style the page itself receives: the source highlight. |
-| `offscreen.html`, `offscreen.js` | Chrome’s offscreen document | Owns the dictionary engine. `engine-worker.js` runs the pthread build with direct OPFS once `opfs-capability-worker.js` has proved the browser can, and imports each archive in a short-lived second instance, `import-worker.js`, so lookups keep working; `engine-worker-idbfs.js` runs the pthread build on IDBFS when the browser has shared memory but no OPFS access handles (Electron), and `engine-worker-local.js` the single-thread build on IDBFS when there is no shared memory, all through `engine-worker-runtime.js`; `engine-service.js` runs in the document only where workers are unavailable. `engine-recycler.js` decides when Low memory mode replaces the worker ([docs/memory.md](../docs/memory.md)). Pronunciation, Anki and the first-run installer load here on demand. |
-| `settings.html`, `settings.js` | the options page | Dictionaries, groups, updates, the personal dictionary, Reading, Design, pronunciation, Anki, keybinds, backup and sharing, and global search. The larger sections have their own `*-settings.js` controller; `design-preview.html` is the live preview inside Design. |
+| `background.js`, with the `background-*.js` modules it imports | the service worker | Routes every runtime message and owns everything in `chrome.storage.local`: dictionary metadata, options, the personal dictionary, update schedules, lookup counts, the words marked as known or ignored, automatic-backup metadata, first-run and sharing state. It also owns the alarms, the Anki gateway and the sharing host and client. It holds no engine state, so Chrome may stop it whenever it is idle. `background.js` registers the listeners and runs the start-up; `background-core.js` holds the targets, storage keys, offscreen relay, storage queue and dictionary-state rules, `background-requests.js` the requests the worker answers itself, recommended installs, linked browsers' requests and the Anki gateway, and `background-anki.js`, `background-backup.js`, `background-updates.js`, `background-sharing.js` and `background-netflix.js` those features. |
+| `content.js`, with the classic scripts listed under `content_scripts` | every frame of a web page | Scans the Japanese text near the pointer and renders a popup in that frame, bounded by its viewport. `content-scan.js` holds how it reads page text (the caret, scans, sentences, selections and word-highlight runs) and `content-dictionaries.js` how it reads the stored dictionary list and a kanji group's replies; both load just before `content.js` and publish on `globalThis.HDContent`. The popup uses a shadow root through `theme-host.js` and the selected renderer (`render/popup.js` for Default), with Anki and pronunciation controls (`anki-content.js`, `audio-content.js`). `content.css` is the only style the page itself receives: the source highlight and the word highlights. |
+| `offscreen.html`, `offscreen.js` | Chrome’s offscreen document | Owns the dictionary engine. `engine-worker.js` runs the pthread build with direct OPFS once `opfs-capability-worker.js` has proved the browser can, and imports each archive in a short-lived second instance, `import-worker.js`, so lookups keep working; `engine-worker-idbfs.js` runs the pthread build on IDBFS when the browser has shared memory but no OPFS access handles (Electron), and `engine-worker-local.js` the single-thread build on IDBFS when there is no shared memory, all through `engine-worker-runtime.js`; `engine-service.js` runs in the document only where workers are unavailable. `engine-recycler.js` decides when Low memory mode replaces the worker, and `dictionary-index-storage.js` which hash indexes stay in memory ([docs/memory.md](../docs/memory.md)). Pronunciation, Anki and the first-run installer load here on demand. |
+| `settings.html`, `settings.js` | the options page | Dictionaries, groups, updates, the personal dictionary, Reading, Design, pronunciation, Anki, keybinds, backup and sharing, and global search. `settings.js` navigates the sections, constructs their controllers and starts the page; the larger sections have their own `*-settings.js` controller or module (see **Pages** below); `design-preview.html` is the live preview inside Design. |
 | `startup.html`, `startup.js` | a tab opened once after install | First-run setup: recommended dictionaries, Anki detection, a practice lookup, and the offer to use a Hachidori that another browser on this computer already shares. Overlay mode skips it. |
 | `toolbar.html`, `toolbar.js` | the toolbar button's popup | Turns lookups on and off, shows the sharing state and opens Settings. |
 
@@ -70,6 +71,8 @@ the service worker and both engine runtimes run the same code.
   `setup-installer.js` the offscreen recommended installer, observed from startup
   and Settings by `recommended-install-client.js`. `json-value.js` and `response-limits.js`
   are the comparison and size rules the transaction boundaries share.
+  `error-text.js` turns a caught error into the text of a log line, status or
+  reply, in the variants the module contexts use.
 - **Lookup statistics.** `lookup-stats-identity.js`, a classic script so the
   content script can use it, and `lookup-stats.js`.
 - **Sentences.** `sentence.js` is Yomitan's sentence extraction: the content
@@ -94,8 +97,8 @@ the service worker and both engine runtimes run the same code.
   media crossing a linked-browser boundary. `anki-mining.js` and
   `anki-worker.js` are the mining service in the
   service worker. `anki-index.js` and `anki-index-cache.js` provide the shared
-  scoped duplicate and maturity index, including cache-only View readiness and
-  click-time live ID repair. `anki-offscreen.js` launches
+  scoped duplicate and maturity index, including cache-only View readiness,
+  click-time live ID repair and page-wide word status. `anki-offscreen.js` launches
   `anki-index-worker.js` for complete refreshes without moving note fields
   through the service worker.
 - **Pronunciation.** `audio-sources.js`, `audio-repository.js`,
@@ -119,12 +122,53 @@ the service worker and both engine runtimes run the same code.
   main-world script on `docs.google.com` that asks Docs to draw its SVG
   annotation layer, which `content.js` then scans through an SVG `<text>`
   imposter.
+- **Netflix mining.** While the experimental flag is on, `netflix.js`
+  registers `netflix-page.js` (main world: the subtitle hooks adapted from
+  Subadub, and the line replay, pause and resume through Netflix's player) and
+  `netflix-subtitles.js`, `netflix-audio.js` and `netflix-content.js`
+  (WebVTT/TTML cue timelines, the last 30 seconds of the video's sound, the
+  hovered line's cue, and pausing while a line is hovered) on
+  `www.netflix.com`; `background-netflix.js` adds the same scripts to a
+  Netflix page that was open before the switch went on, when its reader asks.
+  `{sentence-audio}` attaches the line's WAV, cut from what
+  `netflix-audio.js` kept. `netflix-recorder.html`
+  (`netflix-recorder.js`, `netflix-capture.js`) is the hidden frame that
+  records the replayed line inside the Netflix tab for `{gif}`, a looping GIF
+  of the line (`netflix-gif.js`, encoded with the vendored `vendor/gifenc.js`),
+  or the page screenshot where there is none, and for `{sentence-audio}` while
+  the video's sound does not yet go through Hachidori.
+- **Netflix preview screenshots.** A separate experimental switch uses
+  `netflix-preview.js` on demand in the watch page's main world to obtain the
+  player's timeline JPEG for `{screenshot}`. It avoids screen capture but has
+  lower resolution and approximate timing. It needs no recording or subtitle
+  integration; missing previews leave a warning on the saved note. See the
+  [capture research](../docs/netflix-screenshot-research.md).
+- **Word highlighting.** While the experimental flag and its switch are on,
+  `word-highlights.js`, a content script beside `content.js`, marks a page's
+  Japanese words by their Anki status: it segments the text near the viewport
+  with `hd_segment`, reads the statuses with `hd_anki_word_status` and paints
+  them with the CSS Custom Highlight API, in the line styles `content.css`
+  gives each status. It also adds the popup's Mark as known and Ignore, which
+  write the worker's `wordStatusOverrides` through `hd_word_status_override`;
+  `word-status-overrides.js` is that record's shape for every context.
 - **Pages.** `settings-search.js` and `settings-dom.js` serve Settings;
   `settings-theme.js` is the classic script in its `<head>` that applies the
   saved theme before the first paint, ahead of the `settings.js` module;
-  `experimental-settings.js` renders the Advanced → Experimental features
+  `library-settings.js` (Dictionaries → Dictionaries: the rows, their order,
+  selection and bulk actions, the revision-checked commit queue and removal),
+  `import-settings.js` (Add dictionaries and the recommended installer),
+  `update-settings.js` (Updates), `custom-dictionary-settings.js` (Personal
+  dictionary), `lookup-stats-settings.js` (Reading's lookup counts and
+  definition blur) and `option-settings.js` (the other option controls and
+  their autosave) are the page's own modules: they import from `settings.js`
+  and from each other, and assign a binding only in the module that declares
+  it; `experimental-settings.js` renders the Advanced → Experimental features
   switches from the registry in `reader-options.js`; `memory-settings.js`
-  the Advanced → Memory readout and each Library row's *In memory* line;
+  the Advanced → Memory readout and each Dictionaries row's *In memory* line;
+  `debug-info.js` the Advanced → Troubleshooting *Get debug info* JSON report,
+  with credentials redacted and reader content reduced to counts, and
+  `debug-log.js` the recent warnings, errors and failed replies each
+  extension context keeps for it;
   `activation-settings.js` the Reading → Activation key or button picker and
   its *Press to set* recorder;
   `keybind-settings.js`, `custom-button-settings.js` and `external-links.js`
@@ -152,6 +196,8 @@ the service worker and both engine runtimes run the same code.
   `vendor/hoshidicts-threaded-idbfs.{mjs,wasm}` and
   `vendor/hoshidicts.{mjs,wasm}` are the three builds of the hoshidicts engine
   from `wasm/build.sh`, and `vendor/zip.js` the pinned zip.js runtime.
+  `vendor/gifenc.js` is the pinned gifenc runtime (the experimental Netflix
+  mining GIF encoder), its source and checksum in `scripts/store-sources.json`.
   `vendor/yomitan/structured-content-style.js` is Yomitan's
   `structured-content-style.json` as an ES module, its revision and checksum
   in `vendor/yomitan/source.json`. `vendor/kanjidic/kanji-readings.json` is
@@ -176,6 +222,11 @@ the service worker and both engine runtimes run the same code.
   closed. Stored values are revisioned and written only by the service
   worker; a page edits them by compare-and-set. The offscreen document never
   touches `chrome.storage` itself.
+- `message-types.js` lists every `hd_*` type the code spells out; a reply
+  named at run time after its request (`hd_lookup_result`) is not listed.
+  Call sites still write the names themselves;
+  `test/message-types.test.mjs` fails when code names a type the list lacks,
+  or the list keeps one nothing uses.
 - Nothing here is generated except `vendor/`. There is no bundler,
   transpiler or minifier: what is committed is what ships.
 

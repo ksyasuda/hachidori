@@ -15,11 +15,16 @@ Dictionary lookup runs inside your browser. There is no Hachidori analytics,
 advertising or remote lookup service.
 
 Your browser profile stores imported dictionaries and their indexes, personal
-dictionary entries, preferences, dictionary update settings, and local lookup
-statistics. Statistics contain each looked-up term and reading, its count, and
+dictionary entries, preferences, dictionary update settings, local lookup
+statistics, and the words you mark as known or ignored for word highlighting.
+Statistics contain each looked-up term and reading, its count, and
 first/last lookup times. Turning off lookup counts in Reading settings pauses
 new recording and keeps your existing history. Statistics do not contain a list
-of visited page URLs.
+of visited page URLs. **Reset lookup counts** in Reading settings deletes that
+history, and **Remove all imported dictionaries** in Dictionaries deletes the
+imported dictionaries (and, if you choose, your personal entries). Backups you
+exported and the automatic backups this browser keeps still contain what they
+held when they were made.
 
 Settings can contain custom-button URLs, CSS, Anki Templates and an optional
 AnkiConnect API key. Each Template includes its deck, note type, tags, field
@@ -82,6 +87,17 @@ checks this local index first: a warm positive shows View in Anki without
 contacting Anki, while an unknown miss continues to the ordinary live mining
 check. Clicking View validates the matching IDs live before opening Anki and
 repairs or removes the compact row. These reads and checks do not create notes.
+Page-wide word status reads this same local index for the words on a page and
+never contacts Anki; a linked browser asks its host's index instead. With the
+experimental **Word highlighting** on, Hachidori reads the Japanese text near
+the visible part of every page and splits it into words with your local
+dictionaries, so it can mark them by that status; nothing leaves the browser
+for this unless it is linked to another Hachidori (below). The marks do not
+change the page's markup, but the page's own scripts can read which of its
+words are marked and with which status, and so learn which words have cards in
+your Anki collection. **Mark as known** and **Ignore** in the popup keep the
+words you set in local browser storage, beside your settings and in your
+backups; they create no Anki note and contact nothing.
 Frequency definition blur uses only native numeric values already
 returned by the selected local dictionary lookup; it adds no request or
 external disclosure. A linked browser suspends its own duplicate-index refresh and alarm; the
@@ -105,15 +121,18 @@ computers** in Settings, which makes it accept links from the network this
 computer is on (Tailscale, your home network) and shows the addresses that
 reach it; anyone on that network could then connect, as with AnkiConnect
 bound to all interfaces. A linked browser receives dictionary results,
-personal entries, lookup counts and settings, including custom URLs and the
-AnkiConnect API key, and its edits are stored here. Nothing is sent to other
+personal entries, lookup counts, the Anki status of the words it asks about,
+the words marked as known or ignored and settings, including custom URLs and
+the AnkiConnect API key, and its edits are stored here. Nothing is sent to other
 computers while that switch is off, and nothing is sent at all while Anki is
 closed. Another program or extension on your computer could connect to the
 relay while it runs, as with AnkiConnect. **Share this Hachidori** in Settings
 turns it off. A browser linked to a shared Hachidori sends the text it looks up
-and its settings, presentation and personal-dictionary edits to that Hachidori,
-and keeps a mirror of its settings, personal entries and lookup counts until it
-unlinks. An explicit mining action also sends its selected note context and
+or, with Word highlighting on, splits into words, the words on a page whose
+Anki status it reads, the words it marks as known or ignored, and its
+settings, presentation and personal-dictionary edits to that Hachidori,
+and keeps a mirror of its settings, personal entries, lookup counts and
+marked words until it unlinks. An explicit mining action also sends its selected note context and
 final screenshot bytes through the
 relay. The host validates them and performs Settings discovery and setup
 checks, availability checks, duplicate checks, generation validation, media
@@ -131,12 +150,36 @@ own privacy practices govern their handling of those requests.
 ## Page screenshots
 
 **Page screenshots.** When **Screenshot the page when mining** is enabled and
-a field maps `{screenshot}`, choosing Add or Overwrite takes one picture of the
+a field maps `{screenshot}`, or `{gif}`, which falls back to it, choosing Add or
+Overwrite takes one picture of the
 whole visible reading page. The switch is on by default. This single screenshot
 uses the active reading tab directly. The picture stays in temporary memory and
 is sent to your configured AnkiConnect server with the note. When linked, it is
 captured in this browser, transferred to the host only for that submission, and
 sent by the host to its configured AnkiConnect server.
+
+## Netflix sentence audio and GIF (experimental)
+
+Settings → Advanced → Experimental features → **Netflix mining** is off by
+default. While it is on, Hachidori reads the Japanese subtitle files that
+Netflix's own player requests on `https://www.netflix.com/watch/…` pages, in
+that page, and keeps their text and timing only in the page's memory. Once
+Chrome lets the page play sound through Web Audio (after you click or press a
+key on it), the video's sound plays through Hachidori, which keeps the last 30
+seconds you heard at normal speed in the page's memory, overwriting older audio
+as it goes. Nothing of it leaves the page unless you add a note: then a field
+mapping `{sentence-audio}` gets that line cut from it, playing on or replaying
+the line first if you had not heard all of it. When a field maps `{gif}`, or
+before the sound goes through Hachidori, Hachidori replays that one line and
+records the tab while it plays: its audio, and for `{gif}` also its video
+frames. That recording exists only in the memory of a hidden Hachidori frame in
+that tab until it is cut to the line and encoded. The line is sent as a WAV for
+`{sentence-audio}` and a short looping GIF for `{gif}` to your configured
+AnkiConnect server with the note. Audio that no field maps is discarded, and
+turning the switch off frees the kept audio and keeps no more. Where no GIF can
+be made, a `{gif}` field gets the ordinary page screenshot instead. Still
+pictures are otherwise taken only by the ordinary page screenshot above. A
+browser linked to another Hachidori does not record Netflix lines.
 
 ## Backups, retention and deletion
 
@@ -148,8 +191,8 @@ storage.
 Hachidori keeps the newest automatic daily snapshots in this device's
 browser profile; Settings → Backup & restore chooses how many days are kept
 (two by default). They use the same saved-state payload as an exported backup,
-including personal entries, lookup statistics, custom URLs, settings and a
-configured AnkiConnect API key. Hachidori does not upload them. Clearing a value
+including personal entries, lookup statistics, the words marked as known or
+ignored, custom URLs, settings and a configured AnkiConnect API key. Hachidori does not upload them. Clearing a value
 from current settings does not erase it from an older snapshot; it remains
 until later successful snapshots replace that record or the extension is
 uninstalled. A linked browser pauses local snapshot creation and keeps its
@@ -157,7 +200,7 @@ existing local snapshots until it is unlinked and local backup scheduling
 resumes.
 
 An exported backup is an **unencrypted file** containing dictionaries, personal
-entries, settings and lookup statistics. It can include custom URLs and your
+entries, settings, lookup statistics and the words marked as known or ignored. It can include custom URLs and your
 AnkiConnect API key. The derived Anki duplicate index is not included. Export the
 backup only to a location you trust. Hachidori does not upload backups to a cloud
 service. You control any later sharing or syncing of

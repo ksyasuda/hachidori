@@ -7,7 +7,7 @@ import json
 
 ROOT = Path(__file__).resolve().parents[1]
 REVISION = "9cf8af0f95a555918a60b8147a2f33a6a1248442"
-NAMES = ["add", "document-add", "key", "document-edit", "book-search", "speaker-2", "edit", "checkmark", "error-circle", "more-horizontal", "arrow-clockwise", "arrow-sync", "subtract", "dismiss", "open", "arrow-up", "arrow-down", "arrow-right", "star", "reorder", "settings", "desktop"]
+NAMES = ["add", "document-add", "key", "document-edit", "book-search", "speaker-2", "edit", "checkmark", "error-circle", "more-horizontal", "arrow-clockwise", "arrow-sync", "subtract", "dismiss", "open", "arrow-up", "arrow-down", "arrow-right", "star", "reorder", "settings", "desktop", "prohibited"]
 BASE = f"https://raw.githubusercontent.com/microsoft/fluentui-system-icons/{REVISION}/"
 DEST = ROOT / "extension/icons/fluent"
 DEST.mkdir(parents=True, exist_ok=True)
@@ -26,7 +26,7 @@ icons = list(ThreadPoolExecutor(max_workers=8).map(download, NAMES))
 ALIASES = {
     "speaker-2": ['.gsm-hoshidicts-audio-button::before'],
     "more-horizontal": ['.gsm-hoshidicts-audio-button[data-state="loading"]::before', '.operational-status.is-working::before'],
-    "error-circle": ['.gsm-hoshidicts-audio-button[data-state="error"]::before', '.operational-status.is-error::before'],
+    "error-circle": ['.operational-status.is-error::before'],
     "checkmark": ['.operational-status.is-ready::before'],
     "subtract": ['.operational-status:not(.is-working):not(.is-ready):not(.is-error)::before'],
     "dismiss": ['.gsm-hoshidicts-popup-close::before'],

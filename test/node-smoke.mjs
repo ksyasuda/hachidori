@@ -37,6 +37,8 @@ import {
   TRAINED_TITLE,
   TRAINING_SAMPLE_FLOOR,
   buildDataDescriptorZip,
+  buildUncompressedSizeDescriptorZip,
+  buildZip64Zip,
   buildEntryCountZip,
   buildEntryExpandedZip,
   buildFixtureZip,
@@ -60,6 +62,15 @@ import {
   customDictionarySemanticRevision,
   parseCustomDictionary,
 } from '../extension/custom-dictionary.js';
+import {
+  SEGMENTATION_DICTIONARY_TITLE,
+  SEGMENTATION_FREQUENCY_TITLE,
+  buildSegmentationDictionaryZip,
+  buildSegmentationFrequencyZip,
+  formatReferenceScore,
+  greedySpans,
+  scoreReferenceSet,
+} from './segmentation-reference.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const VARIANT = { fallback: 'hoshidicts', 'threaded-idbfs': 'hoshidicts-threaded-idbfs' }[process.env.HACHIDORI_WASM_VARIANT] ?? 'hoshidicts-threaded';
@@ -161,6 +172,16 @@ const LOOKUP_RESULT = {
   preprocessorSteps: 'int',
 };
 const LOOKUP_RESPONSE = { results: arrayOf(LOOKUP_RESULT), dictionaryCount: 'int' };
+const SEGMENT_CANDIDATE = { expression: 'string', reading: 'string' };
+const SEGMENT_WORD = { start: 'int', length: 'int', functionWord: 'boolean', candidates: arrayOf(SEGMENT_CANDIDATE) };
+const SEGMENT_SPAN = {
+  start: 'int',
+  length: 'int',
+  functionWord: 'boolean',
+  candidates: arrayOf(SEGMENT_CANDIDATE),
+  alternative: arrayOf(SEGMENT_WORD),
+};
+const SEGMENT_RESPONSE = { spans: arrayOf(SEGMENT_SPAN) };
 const KANJI_STAT = { name: 'string', value: 'string' };
 const KANJI_ENTRY = {
   dictionary: 'string',
@@ -170,7 +191,7 @@ const KANJI_ENTRY = {
   definitions: arrayOf('string'),
   stats: arrayOf(KANJI_STAT),
 };
-const LOOKUP_KANJI = { character: 'string', entries: arrayOf(KANJI_ENTRY) };
+const LOOKUP_KANJI = { character: 'string', entries: arrayOf(KANJI_ENTRY), frequencies: arrayOf(FREQUENCY_ENTRY) };
 const STYLE = { dictionary: 'string', styles: 'string' };
 const TAG = { name: 'string', category: 'string', order: 'number', notes: 'string', score: 'number' };
 const DICTIONARY_TAGS = { dictionary: 'string', tags: arrayOf(TAG) };
@@ -298,6 +319,10 @@ const markerOf = (entries) => MARKER_FILES.find((m) => entries.includes(m));
 // logical /dicts path.
 M.FS.mkdir('/work');
 G('hdw_init_storage');
+check('native import exceptions keep their decoding and release helpers', () => {
+  eq(typeof M.getExceptionMessage, 'function', 'getExceptionMessage');
+  eq(typeof M.decrementExceptionRefcount, 'function', 'decrementExceptionRefcount');
+});
 check('memory storage initializes /dicts', () => {
   eq(initStorage(0), 1, `storage init failed: ${lastError()}`);
   ok(Array.isArray(M.FS.readdir('/dicts')), '/dicts was not created');
@@ -449,14 +474,27 @@ check('the fixture carries every file the loader reads', () => {
 // how often. Padding past the records changes no lookup.
 const PAD_BYTES = 16 * 1024 * 1024;
 const PARITY_WORDS = ['食べる', '食べたかった', '漢字', 'ありがとう', '読む', '食', 'みつからない'];
-async function loadPaddedCopy({ padded, kinds, paged }) {
+async function loadPaddedCopy({ padded, kinds, paged, indexPaged = 0 }) {
   const F = await createHoshidicts();
   const fcall = (name, ret, types, args) => F.ccall(name, ret, types, args);
   eq(fcall('hdw_init_storage', 'number', ['number'], [0]), 1, 'fresh module storage');
   F.FS.mkdir(DICT_DIR);
   for (const name of entriesOf(DICT_DIR)) {
     let bytes = M.FS.readFile(`${DICT_DIR}/${name}`);
-    if (name === padded) {
+    if (name === padded && name === 'hash.table') {
+      const old = Buffer.from(bytes);
+      const capacity = old.readUInt32LE(0) + PAD_BYTES / 16;
+      const grown = Buffer.alloc(4 + capacity * 16);
+      grown.writeUInt32LE(capacity);
+      for (let at = 4; at < old.length; at += 16) {
+        const hash = old.readBigUInt64LE(at);
+        if (hash === 0n) continue;
+        let pos = Number(hash % BigInt(capacity));
+        while (grown.readBigUInt64LE(4 + pos * 16) !== 0n) pos = (pos + 1) % capacity;
+        old.copy(grown, 4 + pos * 16, at, at + 16);
+      }
+      bytes = grown;
+    } else if (name === padded) {
       const grown = new Uint8Array(bytes.length + PAD_BYTES);
       grown.set(bytes);
       bytes = grown;
@@ -464,11 +502,13 @@ async function loadPaddedCopy({ padded, kinds, paged }) {
     F.FS.writeFile(`${DICT_DIR}/${name}`, bytes);
   }
   const before = heapOf(F);
+  const allocatedBefore = JSON.parse(fcall('hdw_memory_stats', 'string', [], [])).liveAllocatedBytes;
   for (const kind of kinds) {
-    eq(fcall('hdw_add_dict', 'number', ['string', 'number', 'number'], [DICT_DIR, kind, paged]), 1,
+    eq(fcall('hdw_add_dict', 'number', ['string', 'number', 'number', 'number'], [DICT_DIR, kind, paged, indexPaged]), 1,
       `add kind ${kind}: ${fcall('hdw_last_error', 'string', [], [])}`);
   }
   const growth = heapOf(F) - before;
+  const allocationDelta = JSON.parse(fcall('hdw_memory_stats', 'string', [], [])).liveAllocatedBytes - allocatedBefore;
   const lookups = PARITY_WORDS.map((word) =>
     fcall('hdw_lookup', 'string', ['string', 'number', 'number', 'string'], [word, 32, 16, '']));
   const kanjiJson = fcall('hdw_kanji', 'string', ['string'], ['食']);
@@ -476,10 +516,33 @@ async function loadPaddedCopy({ padded, kinds, paged }) {
   const mediaPtr = fcall('hdw_media_data', 'pointer', [], []);
   const mediaCopy = Uint8Array.from(F.HEAPU8.subarray(mediaPtr, mediaPtr + mediaLength));
   const pageCacheBytes = fcall('hdw_page_cache_bytes', 'number', [], []);
-  return { F, growth, lookups, kanjiJson, mediaCopy, pageCacheBytes };
+  return { F, growth, allocationDelta, lookups, kanjiJson, mediaCopy, pageCacheBytes };
 }
 
 const ALL_KINDS = Object.values(KINDS);
+const residentIndex = await loadPaddedCopy({ padded: 'hash.table', kinds: ALL_KINDS, paged: 1 });
+const pagedIndex = await loadPaddedCopy({ padded: 'hash.table', kinds: ALL_KINDS, paged: 1, indexPaged: 1 });
+check('paged hashes avoid the padded index allocation', () => {
+  eq(residentIndex.allocationDelta >= PAD_BYTES, true, 'resident hash allocation');
+  eq(pagedIndex.allocationDelta < PAD_BYTES, true, 'paged hash allocation');
+});
+check('paged hashes preserve complete term, inflection, frequency, pitch, kanji and media results', () => {
+  eq(JSON.stringify(pagedIndex.lookups), JSON.stringify(residentIndex.lookups), 'lookup structures and order');
+  eq(pagedIndex.kanjiJson, residentIndex.kanjiJson, 'kanji');
+  eq(JSON.stringify([...pagedIndex.mediaCopy]), JSON.stringify([...residentIndex.mediaCopy]), 'media');
+});
+check('entry and hash pages use one cache and unload together', () => {
+  const F = pagedIndex.F;
+  const stats = JSON.parse(F.ccall('hdw_memory_stats', 'string', [], []));
+  eq(stats.entries.bytes + stats.indexes.bytes, pagedIndex.pageCacheBytes, 'combined cache accounting');
+  eq(stats.pageCacheBudgetBytes, 32 * 1024 * 1024, 'shared cache budget');
+  eq(stats.indexes.reads > 0, true, 'index storage reads');
+  eq(F.ccall('hdw_hash_index_paged', 'number', ['string'], [DICT_DIR]), 1, 'actual index storage');
+  eq(F.ccall('hdw_remove_dict', 'number', ['string'], [DICT_DIR]), 4, 'all kinds removed');
+  eq(F.ccall('hdw_page_cache_bytes', 'number', [], []), 0, 'cached generation released');
+});
+for (const copy of [residentIndex, pagedIndex]) if (copy.F.PThread) copy.F.PThread.terminateAllThreads();
+
 const sharedCopy = await loadPaddedCopy({ padded: 'blobs.bin', kinds: ALL_KINDS, paged: 0 });
 const sharedResident = fileBytes(sharedCopy.F, DICT_DIR, [...INDEX_FILES, 'blobs.bin']);
 console.log(`  four kinds, blobs.bin padded: resident ${sharedResident}, heap growth ${sharedCopy.growth}`);
@@ -785,8 +848,43 @@ check('kanji hit conforms and carries sorted stats', () => {
 
 check('kanji miss returns the documented empty sentinel', () => {
   for (const character of ['犬', '']) {
-    same(kanji(character), { character: '', entries: [] }, `kanji(${show(character)})`);
+    same(kanji(character), { character: '', entries: [], frequencies: [] }, `kanji(${show(character)})`);
   }
+});
+
+// MarvNC's kanji frequency lists hold nothing but a kanji_meta_bank (#512).
+// Loaded as a frequency dictionary, their rows reach a kanji lookup and not a
+// term spelled with the same character.
+const KANJI_FREQUENCY_TITLE = 'kanji-frequency-fixture';
+const KANJI_FREQUENCY_OUT = '/work/kanji-frequency';
+M.FS.mkdir(KANJI_FREQUENCY_OUT);
+M.FS.writeFile('/work/kanji-frequency.zip', buildTitledZip(KANJI_FREQUENCY_TITLE, {
+  banks: false,
+  frequencyMode: 'rank-based',
+  kanjiMeta: [['食', 'freq', { value: 7, displayValue: '7 (12732)' }], ['飲', 'freq', 9]],
+}));
+const kanjiFrequencyReport = hdwImport('/work/kanji-frequency.zip', KANJI_FREQUENCY_OUT);
+check('a kanji_meta_bank-only archive imports as a frequency dictionary', () => {
+  eq(kanjiFrequencyReport.success, true, `import failed: ${kanjiFrequencyReport.error}`);
+  eq(kanjiFrequencyReport.termCount, 0, 'termCount');
+  eq(kanjiFrequencyReport.kanjiCount, 0, 'kanjiCount');
+  eq(kanjiFrequencyReport.frequencyCount, 2, 'frequencyCount');
+});
+eq(addDict(`${KANJI_FREQUENCY_OUT}/${KANJI_FREQUENCY_TITLE}`, KINDS.freq), 1, `add kanji frequencies: ${lastError()}`);
+
+check('a kanji lookup carries the kanji frequencies', () => {
+  const result = kanji('食');
+  conforms(result, LOOKUP_KANJI, 'LookupKanji');
+  same(
+    result.frequencies,
+    [{ dictionary: KANJI_FREQUENCY_TITLE, frequencies: [{ value: 7, displayValue: '7 (12732)' }] }],
+    'frequencies',
+  );
+});
+
+check('a term spelled like the kanji gets no kanji frequency', () => {
+  const dictionaries = (lookup('食').results[0]?.term.frequencies ?? []).map(({ dictionary }) => dictionary);
+  ok(!dictionaries.includes(KANJI_FREQUENCY_TITLE), `term frequencies: ${JSON.stringify(dictionaries)}`);
 });
 
 check('styles come from the imported index.json', () => {
@@ -986,6 +1084,15 @@ check('a forged local/central size disagreement is refused', () =>
 check('entries that defer their sizes to data descriptors import like the fixture (#491)', () =>
   acceptedWithoutResourceCap(buildDataDescriptorZip(), 'data descriptors'));
 
+check('data-descriptor entries whose local headers keep the uncompressed size import (#512)', () =>
+  acceptedWithoutResourceCap(buildUncompressedSizeDescriptorZip(), 'uncompressed-size descriptors'));
+
+check('entries whose sizes and offsets are in Zip64 extra fields import like the fixture', () =>
+  acceptedWithoutResourceCap(buildZip64Zip('both'), 'Zip64 extra fields'));
+
+check('Zip64 entries whose local headers keep only the sentinel, as zip.js writes them, import', () =>
+  acceptedWithoutResourceCap(buildZip64Zip('central'), 'zip.js Zip64'));
+
 check('a data-descriptor entry whose local header records other sizes is refused', () =>
   rejectedWith(buildForgedSizeZip({ dataDescriptor: true }), ARCHIVE_ERRORS.forgedSize, 'forged descriptor size'));
 
@@ -1010,7 +1117,7 @@ reset();
 check('reset drops every dictionary', () => {
   eq(lastError(), '', 'hdw_last_error');
   same(lookup('食べる'), { results: [], dictionaryCount: 0 }, 'lookup with zero dictionaries');
-  same(kanji('食'), { character: '', entries: [] }, 'kanji with zero dictionaries');
+  same(kanji('食'), { character: '', entries: [], frequencies: [] }, 'kanji with zero dictionaries');
   same(styles(), [], 'styles with zero dictionaries');
   same(tags(), [], 'tags with zero dictionaries');
   eq(media(TITLE, MEDIA_PATH), 0, 'media with zero dictionaries');
@@ -1034,16 +1141,49 @@ check('the heap keeps the import high-water mark after a reset', () => {
 
 G('hdw_import staging');
 
-// dictionary_importer::import turns the title inside the archive into a
-// directory and remove_all()s that directory on failure, so hdw_import stages
-// every import in a scratch directory and only moves the result into place once
-// it is complete. Without that, a title of ".." deletes the filesystem the
-// dictionaries live in and a failed re-import destroys the copy it replaces.
+// hdw_import stages every import in a scratch directory and only moves the
+// result into place once it is complete, so a failed re-import cannot destroy
+// the copy it replaces. A Yomitan title is any string (MarvNC's own include
+// "Nico/Pixiv", #512): the package lives in folder_name(title), one plain path
+// component, so no title reaches outside /dicts. engine-service.js computes
+// the same folder to find the files again; its function is checked against
+// the folders the engine actually writes.
+const dictionaryFolderName = (() => {
+  const source = readFileSync(join(HERE, '..', 'extension', 'engine-service.js'), 'utf8');
+  const start = source.indexOf('function dictionaryFolderName(');
+  const end = source.indexOf('\n}\n', start) + 3;
+  return new Function(`${source.slice(start, end)}\nreturn dictionaryFolderName;`)();
+})();
 reset();
 M.FS.writeFile('/root-canary.txt', 'canary');
 const rootBefore = M.FS.readdir('/').filter((n) => n !== '.' && n !== '..').sort();
+const dictsNow = () => M.FS.readdir('/dicts').filter((n) => n !== '.' && n !== '..').sort();
 
-for (const title of ['..', '../../..', '../escaped', 'sub/dir', '.', '']) {
+for (const title of ['..', '../../..', '../escaped', 'sub/dir', '.', 'Nico/Pixiv', 'back\\slash', 'Japanese-Mongolian/日・モ辞典']) {
+  check(`a title of ${show(title)} imports into its own folder and escapes nothing`, () => {
+    const archive = `/work/titled-${dictionaryFolderName(title).replace(/[^A-Za-z0-9]/gu, '_')}.zip`;
+    M.FS.writeFile(archive, buildTitledZip(title));
+    const r = hdwImport(archive, '/dicts');
+    conforms(r, IMPORT_REPORT, 'ImportReport');
+    eq(r.success, true, `import failed: ${r.error}`);
+    eq(r.title, title, 'the report keeps the title');
+    const folder = dictionaryFolderName(title);
+    ok(!folder.includes('/') && folder !== '.' && folder !== '..', `folder ${show(folder)} is one path component`);
+    same(dictsNow(), [TITLE, folder].sort(), '/dicts holds the fixture and the new folder, and no staging debris');
+    same(M.FS.readdir('/').filter((n) => n !== '.' && n !== '..').sort(), rootBefore, 'filesystem root');
+    eq(addDict(`/dicts/${folder}`, KINDS.term), 1, `add_dict: ${lastError()}`);
+    eq(lookup('食べたかった').results[0].term.glossaries.some((g) => g.dictionary === title), true,
+      'a lookup names the dictionary by its title');
+    reset();
+    for (const name of M.FS.readdir(`/dicts/${folder}`)) {
+      if (name !== '.' && name !== '..') M.FS.unlink(`/dicts/${folder}/${name}`);
+    }
+    M.FS.rmdir(`/dicts/${folder}`);
+    same(dictsNow(), [TITLE], 'cleanup');
+  });
+}
+
+for (const title of ['', '.hdw-import', '.hdw-remove']) {
   check(`a title of ${show(title)} is refused and destroys nothing`, () => {
     M.FS.writeFile('/work/titled.zip', buildTitledZip(title));
     const r = hdwImport('/work/titled.zip', '/dicts');
@@ -1051,11 +1191,7 @@ for (const title of ['..', '../../..', '../escaped', 'sub/dir', '.', '']) {
     eq(r.success, false, 'success');
     ok(r.error.length > 0, 'error should be populated');
     eq(lastError(), r.error, 'hdw_last_error should mirror report.error');
-    same(
-      M.FS.readdir('/dicts').filter((n) => n !== '.' && n !== '..'),
-      [TITLE],
-      '/dicts should still hold exactly the imported dictionary and no staging debris',
-    );
+    same(dictsNow(), [TITLE], '/dicts should still hold exactly the imported dictionary and no staging debris');
     same(M.FS.readdir('/').filter((n) => n !== '.' && n !== '..').sort(), rootBefore, 'filesystem root');
   });
 }
@@ -1887,6 +2023,197 @@ check('large media imports and loads but only fetches up to 4 MiB', () => {
   eq(media(title, 'media/small.png'), makePng().length, 'healthy media fetch after error');
   eq(lastError(), '', 'healthy media error');
   ok(lookup('食べる').results.length > 0, 'dictionary remains usable');
+});
+
+// ---------------------------------------------------------------------------
+
+G('hdw_segment (word segmentation, #520)');
+
+// A fresh engine instance with the reference dictionary and its frequency
+// dictionary, so segmentation is scored without the fixture's own entries. The
+// reference set and both dictionaries live in segmentation-reference.mjs.
+const S = await createHoshidicts();
+const scall = (name, ret, types, args) => S.ccall(name, ret, types, args);
+S.FS.mkdir('/work');
+scall('hdw_init_storage', 'number', ['number'], [0]);
+const simport = (bytes, out) => {
+  S.FS.writeFile('/work/seg.zip', Buffer.from(bytes));
+  const report = JSON.parse(scall('hdw_import', 'string', ['string', 'string', 'number'], ['/work/seg.zip', out, 0]));
+  S.FS.unlink('/work/seg.zip');
+  return report;
+};
+const segTermReport = simport(buildSegmentationDictionaryZip(), '/dicts');
+const segFreqReport = simport(buildSegmentationFrequencyZip(), '/dicts');
+const segAdd = (title, kind) => scall('hdw_add_dict', 'number', ['string', 'number', 'number'], [`/dicts/${title}`, kind, 0]);
+const segmentS = (text, scanLength = 16, options = '') =>
+  JSON.parse(scall('hdw_segment', 'string', ['string', 'number', 'string'], [text, scanLength, options]));
+const lookupS = (text, maxResults, scanLength) =>
+  JSON.parse(scall('hdw_lookup', 'string', ['string', 'number', 'number', 'string'], [text, maxResults, scanLength, ''])).results;
+
+check('the reference dictionaries import and load', () => {
+  ok(segTermReport.success, `term import failed: ${segTermReport.error}`);
+  ok(segFreqReport.success, `frequency import failed: ${segFreqReport.error}`);
+  eq(segAdd(SEGMENTATION_DICTIONARY_TITLE, 0), 1, `term add_dict: ${scall('hdw_last_error', 'string', [], [])}`);
+  eq(segAdd(SEGMENTATION_FREQUENCY_TITLE, 1), 1, `frequency add_dict: ${scall('hdw_last_error', 'string', [], [])}`);
+});
+
+check('segment conforms to the response contract', () => {
+  conforms(segmentS('今日は朝からとても寒いです。', 16), SEGMENT_RESPONSE, 'segment response');
+});
+
+check('empty text and non-positive scan length are no-ops', () => {
+  same(segmentS('', 16).spans, [], 'empty text');
+  same(segmentS('食べる', 0).spans, [], 'scan length 0');
+  eq(scall('hdw_last_error', 'string', [], []), '', 'a no-op is not an error');
+});
+
+check('spans cover the line in order, with UTF-16 offsets inside the text', () => {
+  const text = '白い猫がいる。';
+  const units = text.length;
+  let previous = 0;
+  for (const span of segmentS(text, 16).spans) {
+    ok(span.start >= previous, 'spans are ordered and non-overlapping');
+    ok(span.start + span.length <= units, 'a span stays inside the text');
+    const surface = text.slice(span.start, span.start + span.length);
+    eq(span.candidates[0]?.expression !== undefined, true, 'a span has at least one candidate');
+    ok(surface.length > 0, 'a span is non-empty');
+    previous = span.start + span.length;
+  }
+});
+
+check('punctuation and whitespace produce no spans', () => {
+  same(segmentS('。、！？　', 16).spans, [], 'punctuation and spaces');
+  eq(scall('hdw_last_error', 'string', [], []), '', 'punctuation is not an error');
+});
+
+check('a conjugated word is one span taking its dictionary form', () => {
+  // 食べなかった -> 食べる, the status feature's keying rule.
+  const spans = segmentS('食べなかった。', 16).spans;
+  eq(spans.length, 1, 'one content span');
+  eq(spans[0].candidates[0].expression, '食べる', 'headword');
+  eq(spans[0].length, '食べなかった'.length, 'the whole surface is covered');
+});
+
+check('function words are flagged and left for the page to leave unmarked', () => {
+  const spans = segmentS('猫が好きだ。', 16).spans;
+  const byHead = new Map(spans.map((s) => [s.candidates[0]?.expression, s]));
+  ok(byHead.get('が')?.functionWord === true, 'が is a function word');
+  ok(byHead.get('だ')?.functionWord === true, 'だ is a function word');
+  ok(byHead.get('猫')?.functionWord === false, '猫 is a content word');
+});
+
+check('a phrase of known words carries its alternative split', () => {
+  // 今日は matches the greeting entry; its alternative is 今日 + は, so the
+  // highlighter can colour it by 今日 when only that has a card.
+  const span = segmentS('今日は', 16).spans[0];
+  eq(span.candidates[0].expression, '今日は', 'the whole phrase is the primary span');
+  same(span.alternative.map((w) => w.candidates[0].expression), ['今日', 'は'], 'alternative split headwords');
+  eq(span.alternative[1].functionWord, true, 'the alternative marks は a function word');
+});
+
+check('a single word has no alternative split', () => {
+  for (const span of segmentS('猫が好きだ。', 16).spans) {
+    if (span.length === 1) same(span.alternative, [], `${span.candidates[0]?.expression} has no alternative`);
+  }
+});
+
+// Score the greedy longest-match parse and the best split against the reference
+// set (segmentation-reference.mjs). The issue ships greedy if the best split
+// scores no better, so this records both.
+const lookupFirstS = (text) => lookupS(text, 1, 16)[0];
+const score = scoreReferenceSet({ segment: (text) => segmentS(text, 16).spans, lookupFirst: lookupFirstS });
+for (const line of formatReferenceScore(score)) console.log(`        ${line}`);
+
+check('the best split scores at least as well as the greedy parse', () => {
+  ok(score.bestWords >= score.greedyWords,
+    `best split ${score.bestWords} words < greedy ${score.greedyWords}; the issue ships greedy only if it scores no worse`);
+  ok(score.bestLines >= score.greedyLines, `best split ${score.bestLines} lines-exact < greedy ${score.greedyLines}`);
+});
+
+check('the best split fixes at least one boundary the greedy parse gets wrong', () => {
+  // 白い猫がいる: greedy takes がい (外) and strands る; the best split keeps
+  // が + いる. This is the Design-2 case the whole-line split is for. The
+  // reference lines use no surrogate pairs, so code-point and UTF-16 offsets
+  // agree.
+  const text = '白い猫がいる。';
+  const best = segmentS(text, 16).spans.map((s) => `${s.start}:${s.length}:${s.candidates[0]?.expression}`);
+  const greedy = greedySpans(text, lookupFirstS).map((s) => `${s.start}:${s.length}:${s.headword}`);
+  ok(best.includes('3:1:が') && best.includes('4:2:いる'), `best split: ${best.join(' ')}`);
+  ok(greedy.includes('3:2:外'), `greedy did not take the がい trap: ${greedy.join(' ')}`);
+});
+
+check('most conjugated reference lines recover their dictionary forms', () => {
+  // The deinflector is Yomitan-equivalent; a few auxiliary-verb chains it joins
+  // (て + しまう, て + くれる) are reported in the score above rather than failed.
+  ok(score.conjugatedRecovered >= Math.ceil(score.conjugatedLines * 0.9),
+    `${score.conjugatedRecovered}/${score.conjugatedLines} conjugated lines recovered; expected at least 90%`);
+});
+
+check('frequency breaks a tie between two-word splits in the selected order', () => {
+  // 今日本 is two words either way: 今日 + 本 (ranks 1 and 38) or 今 + 日本
+  // (75 and 42). Ranks ascending and no frequency both keep 今日 + 本; read
+  // descending, as occurrence counts, the same values choose 今 + 日本.
+  const split = (frequencyOrder) => segmentS('今日本', 16, JSON.stringify({
+    frequencyDictionary: SEGMENTATION_FREQUENCY_TITLE, frequencyOrder, primaryReading: '',
+  })).spans.map((span) => span.candidates[0].expression).join(' + ');
+  eq(split('disabled'), '今日 + 本', 'no frequency');
+  eq(split('ascending'), '今日 + 本', 'ascending ranks');
+  eq(split('descending'), '今 + 日本', 'descending occurrence counts');
+  eq(scall('hdw_last_error', 'string', [], []), '', 'no error');
+});
+
+check('the copula forms and conjunctions a dictionary lists whole are function words', () => {
+  // Jitendex has headwords for the copula's past and presumptive forms and for
+  // conjunctions built on it, so a span lands on だった rather than on だ. A
+  // small dictionary of those headwords is added for this check only.
+  const title = 'segmentation-copula';
+  const words = ['だった', 'だろう', 'だろ', 'でしょう', 'でしょ', 'だけど', 'だったら', 'それでは'];
+  const report = simport(buildTitledZip(title, {
+    terms: words.map((word, index) => [word, word, '', '', 0, [`copula ${word}`], index, '']),
+  }), '/dicts');
+  ok(report.success, `copula import failed: ${report.error}`);
+  eq(segAdd(title, 0), 1, `copula add_dict: ${scall('hdw_last_error', 'string', [], [])}`);
+  try {
+    for (const word of words) {
+      const span = segmentS(`雨${word}`, 16).spans.find((candidate) => candidate.start === 1);
+      eq(span?.length, word.length, `${word} is one span`);
+      eq(span?.functionWord, true, `${word} is a function word`);
+    }
+  } finally {
+    eq(scall('hdw_remove_dict', 'number', ['string'], [`/dicts/${title}`]), 1, 'copula remove_dict');
+  }
+});
+
+check('segment leaves out the words only an excluded dictionary has', () => {
+  // A hover with Use the personal dictionary off drops the personal
+  // dictionary's results (engine-service.js); segmentation passes that
+  // dictionary as excludedDictionary so it marks what the hover shows. ハチドリ
+  // is only there, 猫 is in the reference dictionary as well.
+  const title = 'segmentation-personal';
+  const report = simport(buildTitledZip(title, {
+    terms: [['ハチドリ', 'はちどり', '', '', 0, ['hummingbird'], 0, ''], ['猫', 'ねこ', '', '', 0, ['my cat'], 1, '']],
+  }), '/dicts');
+  ok(report.success, `personal import failed: ${report.error}`);
+  eq(segAdd(title, 0), 1, `personal add_dict: ${scall('hdw_last_error', 'string', [], [])}`);
+  try {
+    const heads = (options) => segmentS('ハチドリと猫', 16, options).spans.map((span) => span.candidates[0].expression);
+    ok(heads('').includes('ハチドリ') && heads('').includes('猫'), `with it: ${heads('').join(' ')}`);
+    const without = heads(JSON.stringify({ excludedDictionary: title }));
+    ok(!without.includes('ハチドリ'), `without it: ${without.join(' ')}`);
+    ok(without.includes('猫'), `a word another dictionary has stays: ${without.join(' ')}`);
+    eq(scall('hdw_last_error', 'string', [], []), '', 'no error');
+  } finally {
+    eq(scall('hdw_remove_dict', 'number', ['string'], [`/dicts/${title}`]), 1, 'personal remove_dict');
+  }
+});
+
+check('segment rejects text above the 4 KiB lookup limit', () => {
+  const tooLong = 'あ'.repeat(1500);
+  const response = JSON.parse(scall('hdw_segment', 'string', ['string', 'number', 'string'], [tooLong, 16, '']));
+  same(response.spans, [], 'oversized text returns no spans');
+  ok(scall('hdw_last_error', 'string', [], []).includes('segment text'), 'oversized text reports an error');
+  // The engine stays usable.
+  ok(segmentS('猫がいる。', 16).spans.length > 0, 'engine usable after a refused segment');
 });
 
 // ---------------------------------------------------------------------------

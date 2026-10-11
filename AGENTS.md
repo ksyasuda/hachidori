@@ -27,11 +27,9 @@ These instructions apply to the entire repository.
 - Open an accessibility-affecting change with the `accessibility` label and screenshots of the affected palettes.
 - Under Windows contrast themes, masked image layers need `forced-color-adjust: none` and a `CanvasText` background in `@media (forced-colors: active)` so the glyph remains visible.
 
-## Issue #9 scope and phases
+## Issue #9 scope
 
-- D1-D9 and E1-E27 are delivered. The user's subsequent request, "work on l2 to l5", authorizes L2 backup/restore, L3 per-dictionary update schedules, L4 lookup/corpus-seen statistics, and L5 definition blur as the current phase. Deliver them in focused pull requests preserving the completed dictionary and reader behavior, using GSM PR #549 as the reference.
-- L2 (#62), L3 (#63) and L4 (#65) are merged; L5 is #67. When asked to "do L1-L5", the user confirmed L2-L5 only: L1 profiles stay excluded.
-- The dictionary-only contract below limits dictionary-only tasks; it does not prohibit separately authorized E-series or L2-L5 work. L3 intentionally extends D6's original global-only schedule; L5 depends on L4. L1 profiles and L6 configurable/custom popup actions remain excluded, as does localization.
+- The dictionary-only contract below limits dictionary-only tasks; it does not prohibit separately authorized E-series or L2-L5 work (L2 backup/restore, L3 per-dictionary update schedules, L4 lookup statistics and L5 definition blur). L3 intentionally extends D6's original global-only schedule. L1 profiles and L6 configurable/custom popup actions remain excluded, as does localization.
 
 ## Dictionary-only issue #9 contract
 
@@ -68,7 +66,7 @@ When implementing the dictionary-only scope from issue #9:
 - Generalize the offscreen import lock to a mutation lock for custom saves/appends. Reuse private staging/import helpers; do not recursively invoke the public queued import handler.
 - The fixed Note form is shared by term and kanji views. Treat append success separately from best-effort lookup refresh so a refresh error cannot invite a duplicate retry. Refresh the exact current request/view only if it is still current and anchored, and make reply/state-event ordering harmless by adopting only newer committed revisions.
 - While the Note form is open, Escape closes the form before document capture can hide the popup, and hover-hide timers must not discard the draft.
-- Library → Personal dictionary → Use the personal dictionary (`personalDictionaryEnabled`) is a reader option, not package state. Off, it stops automatic selection lookups, hides the pencil and filters personal glossaries out of lookup replies in the engine service; it never disables, reorders, recompiles or removes the managed package.
+- Dictionaries → Personal dictionary → Use the personal dictionary (`personalDictionaryEnabled`) is a reader option, not package state. Off, it stops automatic selection lookups, hides the pencil and filters personal glossaries out of lookup replies in the engine service; it never disables, reorders, recompiles or removes the managed package.
 
 ## Lookup statistics and definition blur
 
@@ -84,8 +82,8 @@ Settings → Advanced → Experimental features is the one place a feature that 
 
 - An experimental feature is one entry in `EXPERIMENTAL_FEATURES` in `extension/reader-options.js` (`id`, `label`, `description`, optional `section`) plus its `false` default under `options.experimental`. Add the entry and the default together; do not introduce a parallel storage key, a separate save path, or a second registry. `experimental-settings.js` renders the switches from that registry and needs no per-feature code.
 - Flags are booleans under `options.experimental` and travel through the existing revisioned `hd_options_write`, `normaliseOptions`, and backup paths. A patch must carry the complete record with known ids and boolean values, as the existing feature flags do; stored garbage normalises to the default without throwing.
-- A feature's own settings live where they always did. Turning a flag off hides the feature and keeps those settings; it must not clear them. Runtime code gates on the feature's own enable switch, not on the flag.
-- A feature that names a Settings `section` keeps that section, its rail link and its picker option hidden while off, and a hash request for it resolves to `#advanced`. Real-Chrome suites that open a gated section turn its switch on first.
+- A feature's own settings live where they always did. Turning a flag off hides the feature and keeps those settings; it must not clear them. When a feature has an enable switch that keeps runtime work going (Word highlighting → `wordHighlightEnabled`), the Settings toggle switches it off in the same save so nothing stays active behind a hidden section. Runtime code gates on the feature's own enable switch, not on the flag.
+- A feature that names a Settings `section` keeps that section, its rail link or tab and its picker option hidden while off, and a hash request for it resolves to `#advanced`. Real-Chrome suites that open a gated section turn its switch on first.
 - Removing a flag means deleting its registry entry and default, dropping its gate, and leaving its feature permanently on or removing the feature; do not keep dead flags.
 
 ## Repository map
@@ -102,6 +100,7 @@ Settings → Advanced → Experimental features is the one place a feature that 
 Run the narrowest existing checks that exercise the change:
 
 - Documentation-only changes: inspect the rendered Markdown, links, and final diff; code tests are not required.
+- JavaScript changes, tests and benchmarks included: run `npm --prefix test/tooling run lint`.
 - Fixture, C ABI, or WebAssembly changes: rebuild when needed, then run `node test/make-fixture.mjs` and `node test/node-smoke.mjs`.
 - Extension runtime or renderer changes: run `node test/make-fixture.mjs` and `node test/extension-smoke.mjs`.
 - Palette, theme, popup-styling or dictionary-image styling changes: also run `node test/chrome-theme-contrast.mjs` and attach its `test/tmp/ci/theme-contrast.png` filmstrip.

@@ -7,14 +7,14 @@ extension, with a service worker and offscreen document.
 
 ```text
 web page
-  └─ content.js
+  └─ content.js, with content-scan.js and content-dictionaries.js
        ├─ scans Japanese text near the pointer
        ├─ renders the popup in a closed shadow root
        └─ appends popup Note entries to the managed custom source
 
 settings.html / content.js
   └─ extension runtime messaging
-       └─ background.js
+       └─ background.js, with the background-*.js modules it imports
             ├─ MV3 service worker
             ├─ owns chrome.storage.local dictionary metadata
             ├─ atomically owns the revisioned custom source document
@@ -40,6 +40,19 @@ discarding loaded dictionaries. A later request recreates the routing context
 while the offscreen engine remains authoritative. Runtime requests carry
 explicit IDs, generations, and result message types so stale or malformed
 replies fail closed.
+
+`background.js` registers every service-worker listener and runs its start-up;
+the code they call lives in modules it imports. `background-core.js` holds the
+message targets, storage keys, offscreen relay, serialized storage queue
+(`serialiseStorage`, `writeLocalState`) and the dictionary-state and options
+rules; `background-requests.js` the requests the worker answers itself
+(`WORKER_HANDLERS`, `handleWorkerRequest`), recommended installs, the
+linked-browser dispatcher (`dispatchSharedRequest`) and the Anki gateway, mining
+service and duplicate index; `background-anki.js` the Anki routes
+(`handleAnkiRequest`), screenshots and word status; `background-backup.js`
+backups, `relayEngineRequest` and the alarm handler; `background-updates.js`
+managed updates (`handleUpdatesRequest`); `background-sharing.js` the sharing
+host and client; and `background-netflix.js` Netflix capture and line audio.
 
 ## Primary engine path
 
@@ -83,7 +96,7 @@ Each dictionary import follows one logical transaction:
 
 1. `settings.html` sends the next local ZIP with `hd_import`, or the shared offscreen installer sends the next missing catalogue source's pinned archive URL.
 2. The service worker transfers the archive to the offscreen document.
-3. On the direct-OPFS runtime, the engine worker hands the archive to `import-worker.js`: a second Hoshidicts instance on the same OPFS root, which imports the Yomitan banks through the C++ importer into a fresh `/dicts/.hdw-generation-<UUID>/<title>` root and is terminated once it has reported. A committed root is never overwritten in place, and the live engine keeps answering lookups from the committed generations throughout: `hdw_import` is one synchronous native call, so whichever instance runs it answers nothing until it returns.
+3. On the direct-OPFS runtime, the engine worker hands the archive to `import-worker.js`: a second Hoshidicts instance on the same OPFS root, which imports the Yomitan banks through the C++ importer into a fresh `/dicts/.hdw-generation-<UUID>/<folder>` root (the title, or for a title that is not one path component such as `Nico/Pixiv`, hoshidicts' `folder_name` of it: `Nico_Pixiv #c747f3db`) and is terminated once it has reported. A committed root is never overwritten in place, and the live engine keeps answering lookups from the committed generations throughout: `hdw_import` is one synchronous native call, so whichever instance runs it answers nothing until it returns.
 4. The generated files are flushed to the storage backend before metadata can reference them.
 5. Under the engine queue, the candidate's exact manifest path is strict-loaded, including disabled packages, before the service worker compare-and-set commits it. A replaced package is removed and the new generation added in place (`hdw_remove_dict`, `hdw_add_dict`, `hdw_set_dict_order`), so lookups wait for those few milliseconds rather than fail; the rest of the loaded set is untouched. A package already committed at its path that no longer loads does not block the candidate; see below.
 6. Only a confirmed commit publishes the new dictionary count and generation. A refused commit unloads the new generation again and keeps the committed one; a failed import discards its root without touching the engine.
@@ -173,14 +186,15 @@ was `.hdw-remove`.
 
 `automaticBackups` is a schema-versioned service-worker-owned index containing
 at most `automaticBackupDays` records (a reader option, default 2), pruned when
-the next record is written. Each record carries the same five-key snapshot and
-lookup-statistics rows used by manual backup, but references committed immutable
-dictionary generation paths instead of copying their files. Snapshot creation
-runs inside the background storage queue, captures its timestamp after reaching
-that queue, writes the replacement index once, and schedules
-`hachidori-automatic-backup` for 24 hours after the committed record. Concurrent
-triggers share that serialized result. An absent key becomes schema version 1;
-an unsupported future schema is left untouched.
+the next record is written. Each record carries the same six-key snapshot and
+lookup-statistics rows used by manual backup (a record written before word
+status overrides existed has five keys and restores none), but references
+committed immutable dictionary generation paths instead of copying their files.
+Snapshot creation runs inside the background storage queue, captures its
+timestamp after reaching that queue, writes the replacement index once, and
+schedules `hachidori-automatic-backup` for 24 hours after the committed record.
+Concurrent triggers share that serialized result. An absent key becomes schema
+version 1; an unsupported future schema is left untouched.
 
 The index is authoritative before cleanup. A refused metadata write performs no
 generation deletion. A lost reply is successful only when exact readback matches
@@ -617,7 +631,7 @@ incomplete. The bundled extension-page exercise never needs file access.
 
 ![Dictionary practice and the optional saved-page prompt, dark palette](assets/startup-review-after-practice-desktop-dark.png)
 
-[The UI review](startup-ui-review.md) records before/after comparisons,
+[The UI review](history/startup-ui-review.md) records before/after comparisons,
 narrow layouts and the distinction between controlled screenshot states and
 the real dictionary lookup checks.
 
@@ -640,7 +654,9 @@ the toolbar's Japanese lookups and the toggle shortcut. The **Activation key or
 button** picker lists **No key** first: it writes only `lookupMode: "hover"`,
 and a key writes `activationKey` with `activationSticky` or `activation` as
 **Keep the popup open after releasing the key or button** says. That switch is
-hidden for No key and on when a key is chosen again.
+hidden for No key and on when a key is chosen again. **Hover scan delay** is
+shown for No key, and **Definition hover delay** while Child popups also follow
+the page.
 
 The activation input can also be the middle, Back or Forward mouse button,
 stored as `MouseMiddle`, `MouseBack` or `MouseForward` in the same
@@ -663,10 +679,23 @@ with No key and Child popups set to hold it, only a press over a popup is a
 scan press, and page presses keep their ordinary meaning. Otherwise No key and
 keyboard keys are unchanged, including a middle press closing the popup.
 
-There is no open delay (the never-adjustable `hoverDelayMs` option was removed
-in #401 and is dropped from older records and backups), so a scan runs
-on the next timer turn at the pointer's latest position, and a key pressed over
-a stationary pointer scans at once. The hide/transfer delay defaults to the
+Pointer movement is coalesced into one scan on the next timer turn at the
+pointer's latest position. **Hover scan delay** (`scanDelayMs`, 0–5,000 ms)
+is an opening delay for lookups that need no key: with No key, a word is
+looked up once the pointer has rested on it that long (#502). It is 0 by
+default, which keeps immediate lookups; 150–250 ms skips words the pointer only
+passes over. The dwell belongs to the resolved word and its popup level, not
+to a stationary pointer, so moving within the word never postpones it; moving
+to another word restarts it. When it expires the pointer is scanned again and
+the word is looked up only if it is still the one there, so text that changed
+under a resting pointer waits for the next move. A cancelled dwell sends
+nothing, so lookup counts and autoplay follow executed lookups only, and the
+current popup and a Note draft are untouched while a dwell runs. A held
+activation key or button, a click, a dictionary link, and a selection or
+keybind lookup never wait, and a key pressed over a stationary pointer scans
+at once. The never-adjustable `hoverDelayMs` key removed in #401 is still
+dropped from older records and backups rather than read as the new delay.
+The hide/transfer delay defaults to the
 existing 160 ms, with the pinned source's 0–5,000 ms range. It is one global
 setting, not a per-dictionary policy. Zero hide delay dismisses immediately.
 
@@ -684,6 +713,17 @@ summaries look nothing up. A click child loads like a link child, so pointer
 movement does not cancel it. Dictionary links, clicked kanji, the depth limit and
 protected Note drafts behave the same in every mode. The option is kept local to
 a linked overlay.
+
+Unmodified definition scanning waits for the hover scan delay too, unless
+**Definition hover delay** sets its own (#503), so page lookups can stay
+immediate while children wait, or the reverse. `definitionScanDelayMs: null` is
+**Same as page delay** and keeps following later page edits; a custom value,
+0 included, is used as set. It applies at every popup depth and only to
+opening children by hover, not to popup dismissal or nesting depth; a
+key-gated, clicked or linked child never waits. The page and its panes share
+the one dwell: leaving a pane, an ancestor press, Escape, Note editing, an audio
+chooser change and an option change cancel it. Both delays are kept local to a
+linked overlay.
 
 Glossary scanning continues when a disclosure, link or action button keeps
 focus. Editing fields and protected Note drafts still pause scanning. Internal
@@ -756,7 +796,11 @@ step, or `null` for modifiers only), `modifiers`, `scopes` and `enabled`. Only
 actions that map onto an existing Hachidori control are offered. Close, entry
 and dictionary navigation, Back, Add note, View notes, Play audio, Play audio
 from source, Scan selected text, Scan text at selection and Toggle option are
-available. The defaults are Yomitan's keys for those actions: Escape,
+available, and Hachidori's own Toggle word highlights, in the page scope, which
+shows or hides [word highlighting](#word-highlighting)'s marks in a frame, and
+Mark word as known and Ignore word, which [set the current entry's
+word](#mark-as-known-and-ignore) for those marks and have no default key. The
+defaults are Yomitan's keys for those actions: Escape,
 Alt+PageUp/PageDown (three entries), Alt+ArrowUp/ArrowDown, Alt+Home/End, Alt+B,
 Alt+E, Alt+P and Alt+V. Two rows follow them, Alt+WheelUp/WheelDown (one
 entry): Yomitan's popup moves one entry per Alt+wheel event outside its
@@ -834,7 +878,8 @@ Hachidori has:
 - Open Hachidori settings, unassigned.
 - One unassigned command for each popup keybind action that needs no chosen
   argument: Close, Add to Anki, View in Anki, Play audio, the entry and
-  dictionary moves, Back, and the two selection scans.
+  dictionary moves, Back, the two selection scans, Toggle word highlights,
+  Mark word as known and Ignore word.
 
 The worker toggles `hoverEnabled` inside its storage queue with the same
 revisioned options write as the toolbar switch. A popup-action command goes to
@@ -846,7 +891,8 @@ so the browser's fullscreen layer can paint it; on exit the host returns to the
 document body. Replaced elements and open shadow-root hosts use the body fallback,
 where the fullscreen layer may obscure the popup. Every frame's reader runs the
 matching keybind action, with a count of one for entry moves. Only a frame with
-an open popup, or a selection for the scans, acts on it. Chrome alone can change
+an open popup, or a selection for the scans, acts on it; Toggle word highlights
+toggles every frame's own marks. Chrome alone can change
 these shortcuts, as with Yomitan on Chrome. The Keybinds section lists
 `chrome.commands.getAll()`, refreshes the list when its window regains focus,
 and opens `chrome://extensions/shortcuts`.
@@ -985,7 +1031,7 @@ engine scan window; a prefix-only result is not an exact match. A miss retains
 selection ownership until the selection changes or is dismissed, so pointer
 movement cannot silently replace it with a prefix. Its notice exposes the same
 personal-dictionary pencil as term and kanji results, prefilled with the
-selected word even when no dictionaries are installed. Library → Personal
+selected word even when no dictionaries are installed. Dictionaries → Personal
 dictionary → **Show a popup when a selection has no definition**
 (`showNoResultNotice`, default on) owns that notice: switched off, a miss with
 loaded dictionaries hides the popup and still retains the selection, while the
@@ -995,7 +1041,7 @@ Note append transaction and replays that exact request to show the new
 definition; publisher dictionaries remain unchanged.
 
 Automatic selection lookups are the personal dictionary's entry point, so
-Library → Personal dictionary → **Use the personal dictionary**
+Dictionaries → Personal dictionary → **Use the personal dictionary**
 (`personalDictionaryEnabled`, default on) owns them. Switched off, the reader
 behaves like Yomitan: a selection change or drag release never looks anything
 up, in any lookup mode, and a live selection no longer outranks the pointer, so
@@ -1009,7 +1055,12 @@ pencil sentence. Every term lookup carries `options.personalDictionary`, and
 with `false` the engine service removes Hachidori Custom Dictionary glossaries
 from `hd_lookup` and `hd_lookup_dictionary` replies, dropping a result that had
 no others. It filters after the engine's `maxResults` cut, so a personal-only
-term can use up one result slot. The option is a reader preference: it never
+term can use up one result slot. [Word highlighting](#word-highlighting)'s
+`hd_segment` carries the same option; with `false` the engine service names
+the custom dictionary as `hdw_segment`'s `excludedDictionary`, whose split
+skips a result every glossary of which comes from it, so a word only the
+personal dictionary has is no span and is left unmarked, as a hover would show
+nothing there. The option is a reader preference: it never
 disables, reorders, recompiles or removes the managed package, and turning it
 back on shows the entries again without an engine reload.
 
@@ -1110,6 +1161,12 @@ including light themes.
 When IPA sources exceed the existing metadata display budget, a collapsed
 disclosure builds their tags on first expansion. Every ordered transcription
 remains available; this is lazy presentation, not a source or data limit.
+Frequency tags never count against that budget for themselves (#505): every
+frequency dictionary a result carries keeps its tag in the first and every
+later entry, however many are installed and wherever they sit in the
+dictionary order. Their wrapped rows grow with the collection. Visible
+frequency tags still count against the budget for the pitch badges after
+them.
 
 Averages retain GSM PR #549's floored harmonic mean, with two corrections for
 the standalone contract: arithmetic uses the native positive numeric value, not
@@ -1199,6 +1256,28 @@ The `ankiDuplicateIndex` storage key holds a snapshot, refresh attempt and
 revision counters. Each word row is exactly `[wordKey, maturityFlag,
 sortedNoteIds]`; rows never retain note fields, note-type names, deck names or
 card data. The index is derived state and is excluded from backups.
+
+`hd_anki_word_status` answers a page's batch of headwords from the same rows,
+held in the worker's memory and keyed only by the first Anki Template's
+source, without reading storage or contacting Anki: each headword resolves to
+`known` (a mature row), `learning` (an immature row) or `unknown` (no row), and
+the reply carries those rows' `rowRevision`. A source with no cached snapshot
+— a different Template source, or no Anki configuration — answers
+`{ revision, statuses: null }` so the reader treats word status as unavailable
+rather than a page of unknown words. The worker sends
+`hd_anki_word_status_changed` to every reading tab (`hachidori-anki-content`)
+so content scripts re-read status for the headwords already shown rather than
+resegmenting. After a row change (an add, a click-time repair or the 30-minute
+refresh) it carries the new `rowRevision`. It carries `revision: null` when
+the evidence itself changes: for another Template source (whose rows arrive
+with its first pull), when a linked browser's link completes its hello (on
+connecting and reconnecting), and on unlinking. Revisions on either side of a
+`null` count different rows and cannot be compared. While hosting, the same
+signal goes to
+linked browsers over the sharing socket as a `word-status` frame; a linked
+browser forwards the batch to its host (which owns the evidence) and relays
+the host's signal to its own tabs. [Word highlighting](#word-highlighting)
+paints these statuses on the page.
 
 The selected scope is one of the exact configured note type across all decks,
 the exact configured deck and its subdecks across recognized note types, or all
@@ -1306,6 +1385,132 @@ selection. A paused notice links to the count recording toggle when recording
 is disabled. Any active condition shows the common reveal controls. The Design
 preview passes fixed count, maturity and native frequency samples through the
 same helpers, hover and timer without making lookups or Anki requests.
+
+## Word highlighting
+
+Settings → Advanced → Experimental features → **Word highlighting**
+(`options.experimental.wordHighlighting`, #520) reveals Reading → Word
+highlighting. Its **Highlight words by Anki status** (`wordHighlightEnabled`,
+off by default) is the runtime switch, together with Enable lookups; turning
+the experimental switch off turns it off in the same save and keeps the rest:
+one switch per status (`wordHighlightUnknown` and `wordHighlightLearning` on,
+`wordHighlightKnown` and `wordHighlightIgnored` off) and the style
+(`wordHighlightStyle`: underline, text colour or background).
+
+`word-highlights.js` runs in every frame beside `content.js`, which supplies
+how page text is read (`content-scan.js`): the blocks whose own text includes
+Japanese, and each block's runs as a hover scan reads them, with ruby readings
+and other opaque text left out, whitespace collapsed and CJK segment breaks
+dropped. A run ends where a hovered word ends, at a `<br>`, a block separator,
+a nested block, a control or a preserved line break. Text in editors and text
+fields, inside open shadow roots and Google Docs' imposter is not marked.
+
+An `IntersectionObserver` with a margin of one viewport watches the blocks,
+and a `MutationObserver` over the document notices text that arrives, changes or
+leaves. A mutation re-reads only the block whose own text it changed, so a line
+appended to a list leaves the wrapper around it alone even when the wrapper has
+text of its own. A block within the margin has its run boundaries found in one walk; the
+runs within the margin themselves are found by bisection along the block's
+direction (down, or across for vertical text; a block set in columns is checked
+run by run), at most every 100 ms while the page scrolls, and only their
+characters are read. So a long page, or one huge block such as an Aozora Bunko
+novel's `<br>`-separated lines, keeps ranges only near the viewport. That
+matters beyond the work saved: Chrome revalidates every registered range
+whenever any highlight changes, the hover's source highlight included. Text that
+leaves the margin keeps no ranges, and its segmentation stays cached.
+
+Each run is cut into sentences of at most 128 code units, cut at a clause break,
+since a hover can wait behind the chunk being segmented. They go through
+`hd_segment` in batches of up to 32 chunks or 2,048 code units, one batch in
+flight per frame, and are cached by their exact text (the latest 4,096), so
+repeated texthooker lines and redrawn subtitles cost nothing. A reply from
+another engine generation is discarded with the cache. A dictionary change, or
+a scan length, frequency or Use the personal dictionary change, segments the
+shown text again, and each run keeps its marks until its new segmentation
+arrives. Each batch carries the hover's frequency options and its
+`personalDictionary` flag, so with the personal dictionary off its words are
+not split out at all.
+
+Status comes from `hd_anki_word_status`. Its first request carries no
+headwords: an index with no rows for the first Template (`statuses: null`)
+leaves the page unsegmented and unmarked until the worker's change signal.
+Otherwise the headwords of the spans shown are asked in one batch:
+
+- A headword marked as known or ignored (below) takes that status instead of
+  its card's.
+- A span takes the status of its first candidate, the popup's first result.
+  When that is unknown, a candidate whose reading, or kana headword, is the
+  surface text lends its status (かわいい against 可愛い).
+- An unknown span whose alternative split runs around a function word
+  (今日は as 今日 + は), and whose content words are all known, learning or
+  ignored, is marked as those words. A compound of content words alone (学生
+  as 学 + 生) keeps its own status.
+- Function words and spans without Japanese stay unmarked.
+
+`hd_anki_word_status_changed` re-reads the statuses of the words shown without
+segmenting again, unless they were all read at its revision; a read of new
+words alone does not count, since it can be answered at a revision whose
+signal is still on its way. A newer signal makes an answer still in flight
+stale.
+
+Each status has one `Highlight` (`hd-word-unknown`, `hd-word-learning`,
+`hd-word-known`, `hd-word-ignored`) at priority −1, so the hover's source
+highlight paints above it. A word's ranges are `StaticRange`s, one per text node it covers, so ruby
+readings stay unmarked and the page's own mutations do no range upkeep. A
+status switched off is unregistered, not recomputed. The page's DOM never
+changes: only the frame's popup host is added, once the frame shows Japanese
+text, because the marks take its palette; a frame without Japanese text near
+its viewport sends nothing. A mining screenshot unregisters the marks while it
+captures, and Toggle word highlights (a keybind action and a browser shortcut)
+hides and shows a frame's marks until it reloads or highlighting is switched
+off. The page's own scripts can read
+`CSS.highlights`, so a page can see which of its words are marked and how.
+
+`content.css` draws unknown with a solid line, learning dashed, known dotted
+and ignored with two thin lines, so a status never depends on colour alone. An
+owned document sheet colours them with the popup palette's error, warning and
+success colours, and ignored with its faint text (`--hoshidicts-text-faint`,
+the content colour 56% into the base), or the default palette's for a renderer
+without them, moved toward black or white
+until a line reaches 3:1 against the page background, or text 4.5:1;
+backgrounds are tinted at 34%. The page background is the body's or the root's,
+otherwise the canvas, so text a page paints on another background inside them
+gets colours legible against its main background. Under forced colours Chrome
+paints every highlight in Highlight and HighlightText whatever its author
+colours, so the sheet applies only outside `forced-colors: active` and the line
+styles tell the statuses apart. Only the text box behind a word is painted
+Highlight there, and HighlightText is the page's Canvas colour, so the line
+moves up to 0.12em below the baseline, just under the glyphs, where it stays
+inside the box rather than merging into the page below it. Two lines do not
+fit there, so an ignored word is marked by its box alone.
+
+### Mark as known and Ignore
+
+The popup's **Mark as known** and **Ignore** buttons and the Mark word as known
+and Ignore word keybinds set the current entry's headword, the popup's own
+`expression`, to that status in the `wordStatusOverrides` record, or clear it
+when it already has it; no Anki note is involved. The record is `{ revision,
+known: [headword…], ignored: [headword…] }` (`word-status-overrides.js`, shared
+by the worker, the reader, backups and debug info). The service worker owns it:
+`hd_word_status_override { headword, status }`, with `status` `known`,
+`ignored` or `null`, runs in its storage queue and changes only that headword,
+so writes from several tabs compose without a base revision, and a repeated
+change writes nothing. Each reader takes the record from its storage events,
+which arrive in commit order, so it adopts each one whatever its revision, and
+re-marks the words shown from the statuses already read, without segmenting or
+asking the index again. The record is in backups and shared like the other
+user data (below): a linked browser's change goes to its host, which owns the
+record, and comes back through the mirror.
+
+`word-highlights.js` adds the two toggle buttons (`aria-pressed`) to each
+entry's action row after its Anki and pronunciation buttons, and moves them
+with the shown result in the pinned header, while Highlight words by Anki
+status is on. Only Default's stylesheet styles them; with another renderer the
+keybinds act alone. The keybinds are browser shortcuts too, like the other
+popup actions, and either acts only on an open popup's current entry.
+A failed write names its error in the button's label until it is pressed
+again, and the stored record alone decides which button is pressed, in every
+tab at once.
 
 ## Lookup response boundary
 
@@ -2015,20 +2220,24 @@ The real-Chrome fixture retains its ordinary structured formatting after contain
 ## Settings interface
 
 Settings is one document with native hash links and one visible task section.
-The primary rail exposes ten destinations. Library owns five local,
-hash-addressable task views: Dictionaries, Add, Updates, Groups, and Personal
-dictionary. Backup and restore remains a global destination. Advanced is the
+The primary rail exposes nine destinations. Dictionaries owns five local,
+hash-addressable task views shown as tabs: Dictionaries, Add, Updates, Groups,
+and Personal dictionary. Reading shows Reading and Word highlighting the same
+way. Backup and restore remains a global destination. Advanced is the
 last destination and holds Experimental features: one switch per entry in the
 `EXPERIMENTAL_FEATURES` registry in `reader-options.js`, stored as booleans
 under `options.experimental` and saved through the same revisioned option
 writes. A feature that names a Settings section keeps that section, its rail
-link and its picker option hidden while the switch is off; a hash request for
+link or tab and its picker option hidden while the switch is off; a hash request for
 the hidden section resolves to Advanced and is re-resolved when the stored
-options arrive or change. The feature's own settings stay where they were, so
-turning a switch off preserves them. The compact picker
-keeps all fourteen task views available and groups those five Library choices.
-Global search matches settings across every section, includes the Library
-hierarchy in matching and result breadcrumbs, opens a result's enclosing
+options arrive or change. Global search leaves the hidden section's settings
+out too. The feature's own settings stay where they were, so
+turning a switch off preserves them. Word highlighting is such a section: its
+tab under Reading is hidden while it is off, and Reading then shows no tab row.
+The compact picker keeps all fourteen task views available and groups the
+Dictionaries and Reading choices.
+Global search matches settings across every section, includes the Dictionaries
+and Reading hierarchy in matching and result breadcrumbs, opens a result's enclosing
 disclosures and focuses its control without changing values or discarding drafts.
 The Activation key or button picker stays editable in every lookup mode, and
 search finds it by "no key", "hover" or "mouse".
@@ -2040,12 +2249,12 @@ external option changes; startup pages retain their independent system light/dar
 fallback. Inactive sections mirror pending work, errors, and unseen operation
 completions next to their links. Visiting a section clears its completion notice,
 not its source output or draft. The compact navigation mirrors inactive notices,
-and shared options feedback stays near the section heading. Notices from Library
-children are labelled and aggregated on the primary Library destination while
-the local navigation identifies the active child. Status setters own these
+and shared options feedback stays near the section heading. Notices from a
+tab are labelled and aggregated on its rail destination while the tab row
+identifies the active tab. Status setters own these
 notices; there are no observers or additional polling loops.
 
-[The Settings UI review](settings-ui-review.md) records the layout decisions
+[The Settings UI review](history/settings-ui-review.md) records the layout decisions
 behind this section, unedited browser captures of each state and the targeted
 timings taken while it was reworked.
 
@@ -2059,11 +2268,22 @@ Bulk actions appear when a selection exists, including selections outside the
 current search. Source editing remains lazy, and lookup preferences apply
 immediately; custom source still requires Save.
 
+**Remove all imported dictionaries**, under Start over at the end of Dictionaries,
+lets pending dictionary edits settle, rereads the inventory and asks once with
+the number of ordinary packages, disabled and search-hidden ones included. It
+then sends one ordinary `hd_remove` per package in order and names each package
+still installed afterwards; it is not one library transaction. The personal
+dictionary goes only when **Also erase the personal dictionary source** is
+ticked: Settings reads the source revision before asking and saves an empty
+source against it with `hd_custom_save`, so a Note or save made after the
+confirmation is refused rather than erased. Neither this nor **Reset lookup
+counts** changes Anki or retained backups, and both are disabled while linked.
+
 Reading owns local lookup history and definition blur. Design contains appearance
 and displayed-content controls; its reset leaves reading behaviour and history
 preferences untouched. The preview and advanced CSS use native disclosures.
 Recommended sources remain reachable while any are missing, including after a
-local ZIP import; the empty Library offers both installation and import actions.
+local ZIP import; the empty Dictionaries view offers both installation and import actions.
 
 Reader options carry a worker-owned monotonic `revision` in the existing
 `options` storage value. Legacy values start at revision zero. Settings coalesces
@@ -2109,10 +2329,31 @@ a visible error. Only natural completion reports success; the Settings Test has
 the reference's 15-second deadline. Leaving Audio, editing its tested source, or
 closing Settings stops its owned Test.
 
+A failure names the request that failed, the pronunciation list or the
+recording, with its HTTP status or network error (#499). A recording Chrome
+cannot decode reports the browser's media error and the size and content type
+the provider sent. Only a recording that has already failed is read, so an
+imprecise MIME type never rejects one that plays. A Yomitan list saved as an
+Audio URL fails this way, which is what pasting a provider's list link under
+**Add source**'s default type produces; Test then says to choose Yomitan JSON.
+A Yomitan JSON source that answers with something other than JSON is told the
+reverse. Anki mining reports the same explanation.
+
 Each term result shows Audio when an enabled speech or nonempty URL source is
-configured. Loading and playback use the button's icon state; only errors appear
-beside it, with no persistent success text. Shift-click, right-click or Down opens
-the source/name chooser; Escape closes it before dismissing the popup. A choice
+configured. Loading and playback use the button's icon state, and nothing
+appears beside it (#501): a missing recording, a failed source and a cancelled
+request all return it to Play, whether autoplay or a click started it.
+Settings → Audio → Test explains why a source fails, and the chooser shows each
+source's discovery error. Shift-click, right-click or Down opens
+the source/name chooser beside that button: below it, or above when only that side
+has room, at least 6px inside its popup and shortened to the room there, so a long
+list scrolls inside it. The chooser is the popup's own out-of-flow child, placed in
+popup pixels with the reader's scale and browser-zoom conversion, so opening it
+moves no definition. It follows its button when a pane scrolls or the popup is
+placed or resized, and closes when the button is hidden or scrolled away, its owner
+retires, or a press lands elsewhere in the reader. Escape closes it before
+dismissing the popup. While it is open, a child pane over it closes unless a Note
+draft protects it, and definition scans wait. A choice
 pins the source descriptor, term, candidate index, name and URL. The offscreen
 owner revalidates it against current discovery, including provider reordering
 after expiry. Failed choices are forgotten so ordinary playback can fall back.
@@ -2539,7 +2780,11 @@ shows minutes later. Concealment is counted, so one capture cannot
 reveal the reader while another still owns it. The worker validates the request against
 its sender before every attempt: `tabs.captureVisibleTab` takes the window's
 active tab, so the asking tab must still be that tab, and a top-level frame must
-still show the document that asked. The post-capture check also requires the
+still show the page recorded in `sender.tab.url` when the request arrived.
+The content script's `sender.url` can retain its original address after
+`history.pushState` or `history.replaceState`, as on Netflix; it is only the
+fallback when Chrome supplies no tab URL. A route change after the request
+still fails the check. The post-capture check also requires the
 same window ID: dragging the reading tab to another window can otherwise leave
 it active while the original window captures a different tab.
 Before and after each attempt, a read-only message addressed to the original
@@ -2587,6 +2832,364 @@ configuration. A note type without a picture field maps nothing and captures
 nothing, and `{screenshot}` is refused in the first Anki field for the same
 reason that a note's identity cannot be a fresh picture
 name.
+
+Netflix and other streaming sites may render protected video as black in a
+browser screenshot while leaving subtitles and page controls visible. This is
+separate from Hachidori's “reading tab moved” error, which occurs before the
+capture API runs. Hachidori uses Chrome's normal
+[`tabs.captureVisibleTab`](https://developer.chrome.com/docs/extensions/reference/api/tabs#method-captureVisibleTab)
+API and cannot guarantee capture of DRM-protected video. A successful capture
+response does not tell the extension whether the browser omitted that video,
+and Hachidori does not guess DRM from black pixels: a video can show a black
+frame.
+
+**Netflix preview screenshots** is a separate experimental switch, off by
+default. On a top-frame Netflix watch page it substitutes Netflix's own timeline
+preview JPEG for `{screenshot}`. These images are lower resolution and can show
+a nearby moment rather than the exact video frame; they contain no page UI or
+subtitle overlay. This is the preview-image approach used by Language Reactor,
+not protected-video readback. See the [capture investigation](netflix-screenshot-research.md)
+for the inspected implementations and their limitations.
+
+The worker invokes `netflix-preview.js` in the exact requesting document's main
+world only when a screenshot is requested with this switch on. It uses the
+current watch player's `getTrickPlayFrame` and feeds the JPEG into the same
+pending screenshot, upload and cleanup lifecycle. Existing active-tab,
+document, route and window checks still apply. A missing player or preview is
+a screenshot warning on the otherwise successful note. It does not silently
+substitute a potentially black viewport capture. Other pages and the switch-off
+path retain their ordinary screenshots. It needs neither the Netflix mining
+switch nor a subtitle timeline, recording grant, replay or additional permission.
+
+Migaku takes its card screenshot with `tabs.captureVisibleTab`. Its Chrome Web Store
+package (version 1.30.15.0, inspected for #507) calls `tabs.captureVisibleTab`
+for the reading tab's window as PNG and crops the picture to the video;
+Hachidori's default screenshot path keeps the whole viewport. Migaku's audio clip comes from a
+`tabCapture` stream. Both calls receive what Chrome composites for that window,
+so in the same browser, graphics settings and frame, Chrome decides for both
+whether the picture includes protected video:
+
+- Software-decrypted video is composited into the capture. On Windows, a
+  capture request turns off DirectComposition overlays unless the frame holds
+  hardware-protected video
+  ([`dc_layer_overlay.cc`](https://source.chromium.org/chromium/chromium/src/+/main:components/viz/service/display/dc_layer_overlay.cc),
+  [graphics-dev](https://groups.google.com/a/chromium.org/g/graphics-dev/c/R14cLG4dRrY)).
+  In headless Chrome for Testing 152 on Linux, with software compositing, a
+  Widevine-encrypted MSE stream that the page itself read back from a canvas
+  as black appeared in captures made with Hachidori's JPEG call and Migaku's
+  PNG call, as the unencrypted stream of the same title did. A Windows
+  screenshot of the browser window can still show that video as black: while
+  nothing is being captured, Chrome presents protected video in an overlay
+  marked display-only
+  ([`swap_chain_presenter.cc`](https://source.chromium.org/chromium/chromium/src/+/main:ui/gl/swap_chain_presenter.cc)),
+  which the operating system's screen capture cannot read.
+- Hardware-protected video, from hardware secure decryption on Windows, stays
+  in an overlay while the capture is taken, so the captured frame is black
+  where the video plays. When Migaku's screenshot and audio both come back
+  blank, it tells the user to turn off Chrome's graphics acceleration and
+  restart. Hachidori's capture is the same call, so that setting applies to it
+  too. Neither that remedy nor Netflix itself has been tested for Hachidori.
+
+### Netflix mining (experimental)
+
+Settings → Advanced → Experimental features → **Netflix mining**
+(`options.experimental.netflixMining`, off by default) gives notes mined from a
+Netflix subtitle the line's own audio, a looping GIF of it, and the whole line
+as the sentence, and pauses the video while a subtitle line is hovered. It is
+Netflix only, and every part fails closed: a note that cannot get its line is
+added with its other fields and a warning.
+
+**Scripts.** While the flag is on, `netflix.js` registers two scripts for
+`https://www.netflix.com/*` at `document_start`, top frame only because Netflix
+reaches `/watch/<id>` by navigating inside one document: `netflix-page.js` in
+the page's main world, before Netflix's own bundle, and `netflix-subtitles.js`,
+`netflix-audio.js` and `netflix-content.js` beside the manifest's content
+scripts. The worker
+applies the flag at startup and on every options change, serialised like the
+Google Docs flag; turning it off unregisters both. Chrome adds a registered
+script only to pages that load after it is registered, so a Netflix page that
+was open when the switch went on has the reader without `netflix-content.js`
+(#548). The reader of such a page, in its top frame, asks the worker once with
+`hd_netflix_load`, which adds the same scripts to that exact document with
+`scripting.executeScript` (the page's script in its main world and the
+reader's), and then follows the switch with them. Hover pause and the line
+audio start at once, but Netflix read the playing episode's subtitle list
+before the page's hooks were there, so that episode's notes say its timing was
+not found and to reload the page, which gives it its timing. The reader and the
+worker also check the switch themselves, so a page that still has the scripts
+records nothing once it is off, though its page hooks stay until the page
+reloads.
+
+**Subtitles.** The page script adapts Subadub's two hooks (MIT, see
+`distribution/THIRD_PARTY_NOTICES.md`). `JSON.stringify` finds the manifest
+request's list of profile names by searching rather than by property name and
+adds `webvtt-lssdh-ios8` once, so Netflix lists a WebVTT download for each text
+track. Only a call whose own output names a `profiles` list or a known profile
+is searched and stringified again; every other call returns the original
+output untouched (about 0.5–0.8 µs extra on a small object and 0.05–0.08 ms on a
+5,000-node one in Node 22, against 4 ms for searching every value). Only a
+non-empty list of strings named `profiles` or holding a known profile counts, a
+visited set keeps the search finite on a cyclic value (which the original
+`JSON.stringify` rejects with its own `TypeError` first), and any inspection
+failure leaves the call exactly as Netflix made it. `JSON.parse` reads a `result` with `movieId`
+and `textTracks`, and only on a `/watch/` page, so browse-page previews fetch
+nothing. Forced-narrative, "Off", image-based and non-Japanese tracks are
+skipped. The page fetches each remaining track's WebVTT download, or its TTML,
+IMSC or DFXP download when there is no WebVTT, and posts
+`{ kind: "subtitle", movieId, trackId, closedCaptions, format, text }`; a movie
+without a usable Japanese track posts `{ kind: "status", subtitles }` with
+`image`, `none` or `failed`. Posts are `hachidori-netflix-page` DOM events whose
+detail is a JSON string, so nothing but plain data crosses between the worlds.
+The page keeps what it posted for the watched movie and the latest manifest's
+movie (the next episode Netflix prepares) so a reader that missed them can ask
+again with a `resend` command.
+
+`netflix-content.js` checks every post's shape before using it, since any
+script on the page can dispatch the same events, and parses the text with
+`netflix-subtitles.js`: WebVTT, and TTML through the platform's XML parser with
+tick, clock, offset and frame times, `dur`, container offsets, `<br>` and ruby
+styles. Both produce `{ startMs, endMs, text }` cues of plain text without
+direction marks, tags or ruby readings; nothing is rendered as HTML. It keeps
+one timeline per movie. A new `/watch/<id>` drops the previous movie's timeline
+and ignores its late posts, while a prepared next episode's timeline is kept.
+With Japanese and Japanese [CC] tracks, the first line found in only one of
+them chooses that track for the episode.
+
+**The line.** When the root popup opens for page text inside
+`.player-timedtext`, the content script records an observation: the movie, the
+`<video>`'s time and the text of the hovered subtitle container and of the
+hovered line, without ruby readings. It is taken at that moment so a note added
+after the line has gone still records it, and resolved when the mining request
+is built: the cue must be the only one active within ±500 ms of that time whose
+text, compared NFC and without spaces, line breaks or direction marks, contains
+the container's text, or else the hovered line's. The request gains
+`netflix: { cue: { movieId, startMs, endMs } }`, or
+`netflix: { unavailable: reason }` naming why there is no cue (no timing for
+the episode, image subtitles, no Japanese track, an unreadable file, no match or
+several). For the root lookup, `sentence` and `matchOffset` become the whole
+cue, its lines joined without a separator as Japanese subtitles wrap, with the
+match at the reader's sentence found inside it; when that sentence is not in the
+cue exactly once, the reader's own sentence is kept. Nested lookups inherit the
+cue but keep their own sentence.
+
+**Anki.** `{sentence-audio}` renders `[sound:hachidori-sentence-audio-<uuid>.wav]`
+once a recording is held and stored, and is refused in the first field like
+`{screenshot}`. For a recognised Kiku or Lapis note type a blank
+`SentenceAudio`, and for Senren a blank `sentenceAudio`, receive
+`{sentence-audio}` in a Netflix request's copy of the templates only, as the
+removed media mining did; saved templates and a filled field are never changed.
+The switch is part of the checked configuration, so toggling it between
+preflight and Add refuses the stale Add. Preflight adds `sentenceAudio: true`
+when a Netflix request's mapping contains the marker; without that key the
+reader records nothing.
+
+`{gif}` renders `<img src="hachidori-gif-<uuid>.gif">` when a GIF of the line
+is held and stored, and otherwise the screenshot's `<img>`, so off Netflix,
+with the switch off, or when the line could not be recorded a `{gif}` field
+still gets the viewport picture. A held GIF that Anki refused or that a newer
+recording replaced leaves the field empty with a `GIF:` warning instead: the
+worker had released the screenshot unstored, because no applied field
+referenced it, and the pronunciation re-render must not name it. Because of
+that fallback a mapped `{gif}` makes
+`ankiCaptureRequirements` require the screenshot as well, and preflight adds
+`gif: true` on a Netflix request whose mapping contains the marker. `{gif}` is
+refused in the first field and is hidden from the marker picker while Netflix
+mining is off, like `{sentence-audio}`; a saved mapping stays valid and renders
+as the screenshot. Both markers and the preset note types are left otherwise
+unchanged.
+
+**Line audio.** `netflix-content.js` cannot read the switch, so the content
+script calls `HDNetflix.setLineAudio` with it on every options change, as it
+does `setHoverPause`, and turns it off when the reader stops. While it is on,
+`netflix-audio.js` routes the watch page's `<video>` into a Web Audio graph
+(`createMediaElementSource`): on to the speakers as before, and as a mono copy
+(a `MediaStreamAudioDestinationNode` with one channel) to a
+`MediaStreamTrackProcessor` with a 100-block queue, since Chrome 152's default
+of 10 dropped half a second of a 600 ms main-thread stall. Web Audio receives
+the element's decoded sound, protected playback included where Chrome decrypts
+it in software; `captureStream()` refuses EME media outright. An element routed
+into a graph plays only through that graph until the page reloads, and Chrome
+lets a page start an `AudioContext` only after a click or key press in it, or
+once the site has high media engagement. So the video joins the graph only when
+the context is running: until then a capture-phase `pointerdown` or `keydown`
+listener resumes it, and the same listener restarts a context Chrome suspends
+later, with the switch off too, so the video is never left silent. Another
+graph that already has the element leaves it alone, and the tab-capture path
+below records its lines.
+
+The copy's blocks fill one `Float32Array` of 30 seconds at the context's rate,
+about 5.3 MB at 44.1 kHz, in the page's memory and nowhere else. Only playback
+at 1× is kept: a played stretch opens while the element plays at 1× with
+enough data, and closes on `pause`, `waiting`, `seeking`, `ended`, a speed
+change or a new `/watch/<id>`. Each stretch takes its media clock from the
+median of its first 64 blocks' estimates: the element's time when a block
+arrives, less the time since it was rendered and the frames before it.
+Contiguous blocks are placed by counting samples, because Chrome stamps one 10
+ms block in nine about 9 ms late. A stretch starts at the time the video stood
+at when it opened, and the block being rendered then is its first, so a line
+played on after a pause joins the part heard before it; Chrome 152 can have
+rendered up to one 2.9 ms render quantum by the time the `play` event is
+handled, which the cut leaves out, and about 2 ms more when it resamples the
+video's sound to the context's rate. On a busy page the event is handled
+later: in `test/chrome-netflix-mining.mjs`, with the popup open and the page
+animating, a 48 kHz line paused partway and played on had a 2–12 ms gap at
+the join in Chrome 152 and Edge 154. A stretch ends at the latest media time
+seen while it played, or at the time the video stood when it paused or
+stalled, so the silence Chrome renders between a pause and its event is not
+counted as heard. Turning the switch off cancels the reader, stops the track,
+disconnects the copy and frees the buffer.
+
+On Add, `record` cuts the cue ± 250 ms from the buffer once it has the blocks
+rendered until then (at most 500 ms). A line heard at 1× is cut at once, with
+no seek, replay or recorder frame. When the video stands inside the padded cue
+and its start was heard, as when hover pause stops a line partway, the page
+plays the line on (`replay` with `playOn`: no seek, and no seek back; it pauses
+at the clip's end, keeping the paused state the reader asked for) and the
+buffer keeps the rest. Otherwise the page replays the line through the player,
+which the viewer now hears, and the clip is cut afterwards. A line not all
+heard at 1× in the end is `unheard`. A clip of exact zeros is reported as
+silent; otherwise its 16-bit mono WAV (base64, as extension messages are JSON)
+goes to the worker as `hd_netflix_line_audio`, which requires the switch and
+the top-frame watch document that asked, as `hd_netflix_capture_start` does but
+not the active tab, since nothing is captured, and holds it with the same
+`sentenceAudio` lifecycle as a recorded one. The reader stays visible: nothing
+is captured.
+
+**Recording.** For a `{gif}` field, and for sentence audio while the line audio
+is not running, the reader records the line with tab capture, after the
+screenshot. It adds a hidden recorder frame, `netflix-recorder.html`, to the
+Netflix page (outside Netflix's app root) and
+sends `hd_netflix_capture_start` with the cue. The worker requires the switch, a
+top-frame sender in the active tab at a `https://www.netflix.com/watch/` address
+whose exact document still answers `hd_anki_document`, and stops any earlier
+recording. The frame connects to the worker on a `hachidori-netflix-recorder`
+port, which the worker accepts only from this extension's recorder page framed
+in a Netflix watch tab; the manifest exposes that one page to
+`https://www.netflix.com/*` only. On the worker's `record` request the frame
+asks `chrome.tabCapture.getMediaStreamId({ targetTabId })` for its own tab.
+Chrome grants that only on a tab where the user has invoked Hachidori, by its
+toolbar button or one of its keyboard shortcuts, and the grant lasts across
+Netflix's same-site navigation; without it the answer is
+`{ unavailable: "grant" }`. The frame, not the offscreen document, opens the
+stream: Chrome lets only a context in the requesting context's process use a
+stream ID, and the offscreen document is cross-origin isolated for the threaded
+engine, which puts it in another process than the service worker (its
+`getUserMedia` fails with "Error starting tab capture"). The frame opens the
+stream with `getUserMedia` and reads it with `MediaStreamTrackProcessor`,
+placing each `AudioData` block on the wall clock
+(`performance.timeOrigin + performance.now()`) by counting samples from the
+first block's timestamp, as the removed recorder did. When a `{gif}` field
+needs it, the `record` request also sets `gif`, so the frame asks for the
+stream's video track too and reads it with a second `MediaStreamTrackProcessor`:
+it draws each `VideoFrame` into an `OffscreenCanvas` at most 480 px wide, reads
+back its RGBA and closes the frame at once, keeping no more than ten frames a
+second by the frames' own timestamps and placing each on the same wall clock.
+When no field maps `{sentence-audio}`, or the line audio records it, the request
+sets `audio: false`: the frame still opens the audio track, which mutes the tab
+for the replay and tells it when the capture has caught up, but encodes no WAV
+and the worker holds none. Chrome mutes a captured tab, so the replay is silent,
+but its sound reaches the line audio's graph before that mute, so the buffer
+keeps the line and the reader cuts its sentence audio from that once the
+recording is over. A recording nobody
+finishes stops itself a minute after the cue's length, and removing the frame
+or closing its port stops it at once.
+
+With Hachidori's overlays concealed, the reader asks the page to replay the
+cue. Writing `<video>.currentTime` makes Netflix stop with error M7375, so the
+page seeks through Netflix's player API
+(`netflix.appContext.state.playerApp.getAPI().videoPlayer`), to 250 ms before
+the cue and 2 s earlier again if the seek lands past that, plays at 1×, and
+reports `(wall ms, media ms)` pairs every 25 ms until 250 ms after the cue. It
+then restores the position, paused state and speed, each step independently;
+a replay sent with `keepPaused`, as hover pause sends it, restores a playing
+video paused (see **Hover pause**). The replay, the play-on and hover pause
+use the watch page's own player session, chosen as `netflix-preview.js`
+chooses it: the `watch…` session whose movie is the address's and whose
+element is inside `.watch-video`, or the only session when Netflix lists one.
+Netflix keeps other sessions beside it, such as the next episode it prepares,
+and need not list the watch page's last (#548).
+`hd_netflix_capture_finish` has the frame wait up to 500 ms for the last audio,
+stop the stream, take the median wall-minus-media offset of the pairs, and cut
+the PCM to the cue ± 250 ms. A clip of exact zeros is reported as silent;
+otherwise it is encoded as a 16-bit mono WAV (the removed recorder's encoder)
+and passed to the worker on the port. When video was captured, the frame places
+the kept frames by the same offset, keeps those inside the cue's own window
+(not padded), and encodes a looping GIF of them with the pinned MIT encoder
+gifenc (`extension/vendor/gifenc.js`, see `distribution/THIRD_PARTY_NOTICES.md`),
+each frame's delay the gap to the next and the loop set to repeat forever. The
+frames share one 256-colour palette quantised from all of them: gifenc's
+quantiser costs nearly as much for one detailed frame as for the whole line, so
+a palette per frame took 7–9 s for a 4 s line of anime-style frames against
+about 0.7 s for one. A GIF
+it cannot make is simply absent, so `{gif}` falls back to the screenshot. The
+GIF is passed to the worker beside the WAV, even when the audio was silent. The
+worker holds each like the screenshot:
+one pending recording, stored with `storeMediaFile` inside the queued write,
+its fields emptied and a warning added when the upload is refused, released
+after an authoritative no-write, deleted after a definitively rejected write,
+kept after an uncertain one, and discarded by token
+(`hd_anki_screenshot_discard`, which releases any kind) when the reader
+abandons the submission. A replay that fails cancels the recording with
+`hd_netflix_capture_cancel`, and the reader removes the frame whatever happens.
+
+**Hover pause.** The video pauses while a subtitle line or the popup is
+hovered. `netflix-content.js` cannot read the switch, so the content script
+calls `HDNetflix.setHoverPause` with it on every options change and turns it
+off when the reader stops; a page that kept the scripts after the switch went
+off pauses nothing. On a `/watch/` page, a passive capture `mousemove` listener
+tests the pointer against the bounds of the text in each
+`.player-timedtext-text-container`, taken from its text nodes' client rects,
+because Netflix's subtitle layer covers the player and may not receive pointer
+events. The bounds include the gap between a box's lines; a layer with no line
+showing has no text and so no bounds. Entering a line while the `<video>` plays
+sends the page a `pause` command, which it carries out through Netflix's player
+API like the replay, never by writing `currentTime`. The pause holds while the
+pointer stays on the line or the reader's popup is shown (from
+`hachidori-popup-shown` to `hachidori-popup-hidden` on `window`, which nested
+popups share), and leaving both sends `resume`. A `play` or `seeking` event on
+the video outside a replay drops the resume, so the viewer's own play, pause
+(which follows a play) or seek wins; a new `/watch/<id>` and the switch going
+off also drop it and leave the video as it is. Nothing is paused or resumed
+while a line is recorded: the reader sends neither command until the line is
+recorded, and the page ignores both while it replays or plays a line on.
+Chrome mutes the tab until a tab recorder stops, and a line played on stops at
+its end, so the reader sends the replay `keepPaused`, and the page restores a
+video that was playing paused. The
+reader then holds that pause like its own, whether it paused the video or the
+viewer had played it on, and resumes once the line is recorded and the pointer
+has left the line and the popup; a leave during the recording takes effect
+then. The page's seek back reports itself after its answer and is not taken
+for the viewer's; a line played on has no seek back, so the viewer's next seek
+is the viewer's.
+
+**Warnings.** No timing (with its reason), no capture grant (click the toolbar
+button once on the tab, or add notes with the **Add the current popup entry to
+Anki** shortcut), a missing Netflix player or an unfinished replay are each a
+warning on the added note, named for the media its fields map: `Sentence
+audio:`, `GIF:` or `Sentence audio and GIF:`. A silent recording (a muted video
+or protected playback; turning off Chrome's graphics acceleration can help) is a
+`Sentence audio:` warning, and a recording that made no GIF a `GIF:` one, while
+the field gets the screenshot. When the line audio records the sentence audio
+and tab capture the GIF, each medium gets its own reason, and a line that did
+not play through at 1× is a `Sentence audio:` warning that says so. A browser
+linked to another Hachidori records
+nothing: its worker marks a Netflix request's linked preflight replies
+`netflixLinked`, and the reader adds a `Netflix mining:` warning instead, since
+the host never sees the cue and so cannot say which media are mapped. No DRM
+workaround is attempted, and black pictures are not detected.
+
+Netflix's subtitle data, the profile name and the player API are Netflix's
+private interfaces and may change without notice; when they do, notes keep their
+text and screenshot and say why they have no line audio or GIF. Nothing of
+Netflix is stored: timelines and the last 30 seconds of sound live in the
+page's memory, a tab recording in the recorder frame's, and only the final WAV
+and GIF reach Anki. Routing the video through Web Audio has costs: the picture
+can lead the sound by the context's output latency, because Chrome's Web Audio
+source tells the media clock of no output delay, which is small on wired output
+and can be noticeable over Bluetooth; and the video plays through Hachidori's
+graph until the page reloads, even with the switch off. The research behind
+this design, and how other tools get line audio, is in
+[netflix-audio-research.md](netflix-audio-research.md).
 
 ## Managed custom dictionary
 
@@ -2665,7 +3268,7 @@ must start with `chrome-extension://`, `/host` is accepted from loopback peers
 only, a client is refused (503) while no host is connected, and turning the
 network off closes the clients that came over it. There is no token. A linked
 browser speaks JSON text frames: `hello` (answered with the host's version,
-browser name, dictionary count, capabilities and a snapshot of the five shared
+browser name, dictionary count, capabilities and a snapshot of the six shared
 keys), `request` carrying an ordinary runtime message, and `pong` to the
 relay's `ping`. `linked-anki-v1` advertises the legacy singleton host-owned
 Anki transaction. `linked-anki-v2` adds stable Template identity to readiness,
@@ -2704,9 +3307,12 @@ setup detection carries only the selected Template ID. The host reads its own
 saved mapping, URL and API key for both. Every
 `chrome.storage.onChanged` batch touching
 `dictionaryState`, `options`, `customDictionarySource`, `dictionaryUpdates`,
-`lookupStats` or a `lookupStats:` row is broadcast whole, so a linked browser
-can replay it as one write. A browser install shares by default; the overlay
-copy (`OVERLAY_MODE`) does not.
+`lookupStats`, `wordStatusOverrides` or a `lookupStats:` row is broadcast
+whole, so a linked browser can replay it as one write. The host also
+broadcasts the Anki duplicate index's word-status signal (its `rowRevision`, or `null` after a Template source
+change) as a `word-status` frame, which the relay forwards verbatim like any
+broadcast; the index itself is derived state the host never mirrors. A
+browser install shares by default; the overlay copy (`OVERLAY_MODE`) does not.
 
 A linked install runs `extension/sharing-client.js`: one WebSocket to the
 relay's `/link`, on this computer or another, `hello` on open, requests
@@ -2722,7 +3328,7 @@ Advanced, which is also what the startup page and Settings → Sharing probe.
 while linked and return the host's reply verbatim; the storage batches the
 host pushes are written with one `chrome.storage.local` `set()` outside
 `writeLocalState()`, the only other writer of shared keys. At link time the
-install's own five shared values are kept in `sharingLocalState`, the host's
+install's own six shared values are kept in `sharingLocalState`, the host's
 snapshot takes their place under the live keys, and the engine's
 `hd_state_read` / `hd_state_cas` / `hd_custom_read` / `hd_custom_cas` are served
 from that kept record, so no local generation is judged against the mirror.
@@ -2777,6 +3383,7 @@ uncertain write leaves it for inspection and an explicit retry.
 | Revisioned logical-package inventory, order, presentation, capabilities, source metadata, and global dictionary groups | service worker | `chrome.storage.local` key `dictionaryState` |
 | Revisioned custom-dictionary source text and semantic hash | service worker | `chrome.storage.local` key `customDictionarySource` |
 | Global managed-update schedule and last completed check time | service worker | `chrome.storage.local` key `dictionaryUpdates` |
+| Revisioned words marked as known or ignored for word highlighting | service worker; readers adopt its storage events | `chrome.storage.local` key `wordStatusOverrides` |
 | Newest `automaticBackupDays` automatic complete-state snapshots and lookup-statistics rows | service worker; the engine validates referenced immutable dictionary roots during restore and cleanup | `chrome.storage.local` key `automaticBackups`; dictionary blobs remain in shared OPFS or IDBFS generation roots |
 | Sharing configuration: whether this install shares, on which port and whether with other computers, or which host it is linked to | service worker | `chrome.storage.local` key `sharing` |
 | A linked install's own shared values, kept while the live keys mirror the host | service worker; the local engine reads and commits it through the worker | `chrome.storage.local` key `sharingLocalState` |
@@ -2784,7 +3391,7 @@ uncertain write leaves it for inspection and an explicit retry.
 | Capture tab/document routing identities | service worker; recovered by validating the surviving offscreen host and reader | transient memory only |
 | Watched DOM nodes/ranges, cue/DOM observers, and collector epochs | linked content script | transient memory only |
 
-The engine holds each loaded dictionary's index files in WebAssembly linear memory once, however many kinds it loads as (Emscripten emulates `mmap` by copying), and that memory never shrinks. Direct OPFS workers default to paged entries (`blobs.bin`) through the existing shared page cache; `options.dictionaryEntryStorage` selects `auto` (OPFS paged, IDBFS resident), `paged`, or `resident` independently of import threading and low-memory recycling; changing the policy restarts the idle worker. Existing stored options adopt `auto` without reimporting dictionaries; media (`media.bin`) is read from the file when `hd_media` asks for it. On direct OPFS an import's high-water mark belongs to the terminated `import-worker.js` instance and is returned to the browser; the engine's heap grows only by the new generation's resident files. On IDBFS the import runs inside the engine, so its high-water mark stays for the life of the engine worker. `hd_memory` reports the heap and each loaded package's resident bytes; Settings → Advanced → Memory shows them, and its **Low memory mode** switch (`options.lowMemoryMode`) makes `offscreen.js` recycle the engine worker once idle after a dictionary change and start it with a two-thread pool that imports single-threaded and loads every package paged: only its index stays in the heap and `blobs.bin` is read through a bounded page cache (`engine-recycler.js`, `engine-worker-runtime.js`, `hd_engine_config`, `hdw_add_dict`'s `paged` argument). Any worker loads a package paged when it does not fit in the heap mapped. [memory.md](memory.md) explains the model, the readout, the mode's costs and the two failure regimes.
+The engine holds each loaded dictionary's selected resident files in WebAssembly linear memory once, however many kinds it loads as (Emscripten emulates `mmap` by copying), and that memory never shrinks. Direct OPFS workers default to paged entries (`blobs.bin`) through the existing shared page cache; `options.dictionaryEntryStorage` selects `auto` (OPFS paged, IDBFS resident), `paged`, or `resident` independently of import threading and low-memory recycling; changing the policy restarts the idle worker. Existing stored options adopt `auto` without reimporting dictionaries; media (`media.bin`) is read from the file when `hd_media` asks for it. On direct OPFS an import's high-water mark belongs to the terminated `import-worker.js` instance and is returned to the browser; the engine's heap grows only by the new generation's resident files. On IDBFS the import runs inside the engine, so its high-water mark stays for the life of the engine worker. `hd_memory` reports the heap and each loaded package's resident bytes; Settings → Advanced → Memory shows them, and its **Low memory mode** switch (`options.lowMemoryMode`) makes `offscreen.js` recycle the engine worker once idle after a dictionary change and start it with a two-thread pool that imports single-threaded and loads every package paged: small metadata stays resident, hashes follow the aggregate residency policy, and `blobs.bin` is read through the shared page cache (`engine-recycler.js`, `engine-worker-runtime.js`, `hd_engine_config`, `hdw_add_dict`'s `paged` argument). Any worker loads a package paged when it does not fit in the heap mapped. `options.dictionaryIndexStorage` independently selects resident, paged or automatic hashes on threaded OPFS. Automatic uses one 65 MiB resident budget in normal mode while `options.useLessRamByDefault` is on (off by default), and 32 MiB in Low memory mode. Turning the new switch off retains all hashes in normal mode; explicit resident or paged hash choices override it. The plan is selected before loading or validating packages; paged hashes and entries share the existing 32 MiB cache. Changing either preference uses the same idle recycler without changing entry storage or import threading. IDBFS retains resident hashes. [memory.md](memory.md) explains the model, the readout, the mode's costs and the two failure regimes.
 
 The offscreen document deliberately has no direct `chrome.storage` access. It asks the service worker to read or compare-and-set dictionary metadata. Those writes are serialized so a settings-page edit cannot be silently overwritten by a stale engine write. Dictionary-state commits prune removed package IDs from global groups and invalid selectors in the same storage transaction, and every Settings option write is revalidated there so a stale page cannot restore them.
 
@@ -2851,12 +3458,15 @@ and in-flight dictionary commits when leaving Settings.
 | `hd_import` | Import one Yomitan ZIP and return an exact report; optionally validate a built-in catalogue source in the same transaction |
 | `hd_apply_state` | Apply a package change, then compare-and-set it atomically. An unchanged manifest set uses native order only, retaining failed-package diagnostics and skipping load/warmup; other changes load incrementally when verified, otherwise rebuild. The reply's `loadPath` and `hd_status.lastLoadPath` report `order-only`, `incremental`, or `full`. |
 | `hd_lookup` | Run a bounded scan/deinflection lookup |
+| `hd_segment` | Split a batch of text chunks into the words a hover would show, for word highlighting (#520): each chunk's spans carry their candidate headwords, a function-word flag, and a known-words alternative split, in UTF-16 offsets. With `options.personalDictionary: false` the split leaves out words only the personal dictionary has, as a hover does. Unqueued; it serializes one engine turn per chunk and, before each later chunk, lets the messages that reached the engine worker meanwhile take theirs, so a hover's `hd_lookup` runs between chunks, and it stays available during imports. A hover still waits for the chunk being segmented: with Jitendex a line takes about 3 ms at p95 and a 4 KiB chunk about 190 ms (`benchmark/segmentation.mjs`), so callers send a line or a text node per chunk. The reply's `generation` is read after the last chunk and a dictionary commit can land between chunks, so a caller that expects one generation treats a reply carrying another as stale |
 | `hd_anki_maturity` | Read whether the first term's expression has a mature card in the selected duplicate-index scope; independent of engine and mutation queues |
+| `hd_anki_word_status` | Read `known`/`learning`/`unknown` for a page's headwords from the first Template's duplicate-index rows held in memory, with their `rowRevision`; never reads storage or contacts Anki, and forwarded to the host while linked |
+| `hd_word_status_override` | Set one headword to `known` or `ignored`, or clear it with `null`, in the revisioned `wordStatusOverrides` record (#520), in the storage queue and without a base revision; forwarded to the host while linked |
 | `hd_open_external` | Validate and open a user-activated HTTP(S) dictionary link in a browser tab, outside storage and engine queues |
-| `hd_status` | Report readiness, loading state, dictionary count, generation, storage backend, threading mode, and whether the worker is the low-memory one (`lowMemory`) and its entry storage policy (`dictionaryEntryStorage`) and whether every package's entries are read from disk (`pagedDictionaries`); while the offscreen bridge runs an import, `updating: { id, phase, fallback }` names the replaced package and phase |
-| `hd_memory` | Report the engine heap size, the paged entries' cache (`pageCacheBytes`), and each loaded package's resident bytes (its index files and, unless it is `paged`, its entries, once however many native kinds it loads as); see [memory.md](memory.md) |
+| `hd_status` | Report readiness, loading state, registered-kind count (`dictionaryCount` and `registeredKindCount`), unique `packageCount`, generation, storage backend, threading mode, and whether the worker is the low-memory one (`lowMemory`) and its entry storage policy (`dictionaryEntryStorage`) and whether every package's entries are read from disk (`pagedDictionaries`), requested hash policy (`dictionaryIndexStorage`), the normal-mode RAM default (`useLessRamByDefault`), actual policy (`hashIndexStorage`) and resident hash budget; while the offscreen bridge runs an import, `updating: { id, phase, fallback }` names the replaced package and phase |
+| `hd_memory` | Report WASM capacity (`heapBytes`), live/free allocator bytes, combined cache (`pageCacheBytes`) with `entries`/`indexes` activity, requested/actual hash policy, `useLessRamByDefault` and budget, package/kind counts, and each package's hash, other-resident and resident-entry bytes plus actual hash residency; see [memory.md](memory.md) |
 | `hd_memory_total` | Answered by the offscreen document itself, outside the engine queue: `performance.measureUserAgentSpecificMemory()` over the document and its workers, with the engine heap (`heapBytes`, from `hd_memory`) counted once rather than once per engine thread; `bytes` is `null` where the API is unavailable; see [memory.md](memory.md) |
-| `hd_engine_config` | Read `options.lowMemoryMode` and `options.dictionaryEntryStorage` for the offscreen document (its sender only) before it creates the engine worker; the service worker pushes the same message to the document when the stored option changes |
+| `hd_engine_config` | Read `options.lowMemoryMode`, `options.dictionaryEntryStorage`, `options.dictionaryIndexStorage` and `options.useLessRamByDefault` for the offscreen document (its sender only) before it creates the engine worker; the service worker pushes the same message to the document when a stored option changes |
 | `hd_reload` | Reload enabled dictionaries from persisted metadata |
 | `hd_remove` | Stage a package's files, commit its removal, then delete the staged copy |
 | `hd_state_read` | Read revisioned dictionary state through the service worker |
@@ -2866,6 +3476,7 @@ and in-flight dictionary commits when leaving Settings.
 | `hd_custom_cas` | Atomically compare-and-set the source document and bound package state |
 | `hd_custom_save` | Parse and save Settings source, compiling or repairing its fixed package when needed |
 | `hd_custom_append` | Append one validated popup Note entry to the latest queued source and compile it |
+| `hd_lookup_stats_record`, `hd_lookup_stats_read`, `hd_lookup_stats_reset`, `hd_lookup_stats_cleanup` | Record or read one term/reading count in the serialized storage queue; from Settings, start a new empty history generation (refused while linked); after a restore, remove rows outside the current generation |
 | `hd_backup_read`, `hd_backup_export`, `hd_backup_prepare`, `hd_backup_restore`, `hd_backup_cancel` | Read the complete manual payload, export it, stage and confirm a complete replacement, or discard staged roots |
 | `hd_backup_auto_list`, `hd_backup_auto_get`, `hd_backup_auto_roots`, `hd_backup_auto_prepare`, `hd_backup_auto_cleanup` | List independently valid retained records, fetch one for the engine, protect every retained record's immutable roots, validate one in place for restore, or reconcile deferred generation cleanup |
 | `hd_updates_schedule` | Save the one global update interval and reconcile its Chrome alarm |
@@ -2873,6 +3484,9 @@ and in-flight dictionary commits when leaving Settings.
 | `hd_updates_install` | Recheck and install the requested available managed packages |
 | `hd_sharing_status`, `hd_sharing_host_enable`, `hd_sharing_host_disable` | Report the sharing state (connection, dictionaries, the network listener and its addresses, linked browsers), or start and stop this install's connection to Anki's relay with a port and the network preference |
 | `hd_sharing_client_probe`, `hd_sharing_client_link`, `hd_sharing_client_unlink` | Ask what shares itself at an address (empty: this computer), link this install to it (turning its own hosting off, keeping its own state aside and mirroring the host's), or unlink and restore |
+| `hd_anki_screenshot_discard` | Release the held capture (a screenshot, or a recorded Netflix line) whose token a reader abandoned; answered locally when linked |
+| `hd_netflix_capture_start`, `hd_netflix_capture_finish`, `hd_netflix_capture_cancel` | Experimental Netflix mining: from the asking Netflix player document only, start a tab recording of its cue in the tab's recorder frame, finish it into a held WAV and GIF for the note's mapped fields, or cancel it; the worker drives the frame over its `hachidori-netflix-recorder` port ([Netflix mining](#netflix-mining-experimental)) |
+| `hd_netflix_load` | Experimental Netflix mining, switch on: add the Netflix scripts to the asking top-frame `www.netflix.com` document, which was open before the switch went on and so has the reader without them |
 
 ## Build outputs
 
