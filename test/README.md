@@ -166,7 +166,7 @@ see [benchmark/README.md](../benchmark/README.md).
 | `anki-addon` | The pinned GitHub add-on URL, binary preservation, HTTP and network errors. |
 | `anki-audio`, `anki-offscreen-audio` | First decodable pronunciation exported without playback, exact TTS voice capture, linked TTS planned without host capture. |
 | `anki-client-media` | Linked screenshot and browser-speech WAV bytes are allowlisted against the request; stale and malformed media are refused. |
-| `anki-content` | The reader's Anki action across cold/warm cache, live repair, stale IDs, failures, retries and nested popups; an unresolved action is a disabled, busy Arrow Clockwise; a renderer can name the result owning the custom Anki buttons. |
+| `anki-content` | The reader's Anki action across cold/warm cache, live repair, stale IDs, failures, retries and nested popups; an unresolved action is an enabled, busy Arrow Clockwise that adds anyway when clicked; a renderer can name the result owning the custom Anki buttons. |
 | `anki-duplicates` | Duplicate options keep Anki's race guard on the configured type; browse searches escape HTML and query syntax. |
 | `anki-enrichment` | Audio enrichment applies overwrite modes once and preserves a late external edit. |
 | `anki-glossary` | Rich and plain glossary markers: ordered senses, aliases, safe media, `<br>`, one `li[data-dictionary]` per row, image sizes, style escaping, Yomitan's inline structured-content styles at 67db60d, and dictionary CSS scoped by selector prefix (the cascade itself is checked in Chrome). |
@@ -242,9 +242,13 @@ pinned/latest package commands and the schema-only boundary.
   regression, all four kinds, lookups by structure and value, kanji, styles,
   tags, media, error paths, reset, import staging, every on-disk layout,
   interrupted-install recovery, dictionary-scoped lookups, response and media
-  bounds, MDX import, definition order and `hdw_segment` against
-  `segmentation-reference.mjs`. Exits 0 on success, 1 on a failed check, 2 when
-  the wasm module has not been built. See [node-smoke details](#node-smoke-details).
+  bounds, MDX import, definition order, `hdw_segment` against
+  `segmentation-reference.mjs`, and the Yomitan conjugation rules through the
+  importer: historical kana, emphatic negatives, one-character stems,
+  whole-word honorifics, kanji variants and excluded spellings (the engine's
+  own test runs Yomitan's full corpus natively). Exits 0 on success, 1 on a
+  failed check, 2 when the wasm module has not been built. See
+  [node-smoke details](#node-smoke-details).
 - **`threaded-bridge-smoke.mjs`** imports the real offscreen bridge with
   controlled worker and fallback endpoints (through Node 22.15's
   `module.registerHooks`): the 128-request admission bound, responsive status,

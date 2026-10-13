@@ -209,6 +209,15 @@ filesystem read, validates the referenced files in place, and then uses the
 manual restore transaction and explicit replacement confirmation. Open Settings
 refreshes when the index changes and after a persisted page is restored.
 
+Manual and automatic restores validate dictionaries independently of reader
+settings. Missing, malformed or incompatible archived reader settings keep the
+current reader settings and show a warning in the preview and success message.
+Incompatible update settings likewise keep the current update schedule.
+Compatible settings still migrate through the existing stored-options projection.
+Dictionary selectors are pruned against the restored library before the same
+atomic complete-state commit. Incompatible reader settings do not hide a retained
+automatic backup or invalidate its protected dictionary roots.
+
 Linking clears the local automatic-backup alarm and suppresses snapshots of the
 host mirror while retaining the local index. Unlink restores the kept local
 state before reconciling local snapshots and scheduling again.
@@ -1896,6 +1905,22 @@ own marker with `list-style-position: outside`, so the thin triangle hangs in th
 gutter. A dictionary's own scoped `styles.css` can restyle it; Bee's Ultimate
 Grammar Dictionary draws its own chevron on its per-source blocks this way.
 
+### Deinflection rules
+
+The engine's Japanese deinflector carries Yomitan's Japanese conjugation rules
+at [e7334a9](https://github.com/yomidevs/yomitan/blob/e7334a96106a6c74e6fa75bd33a5ea1219d92712/ext/js/language/ja/japanese-transforms.js)
+beside HoshiDicts' own auxiliary rules. They include the historical kana of
+[Yomitan #2474](https://github.com/yomidevs/yomitan/pull/2474) and
+[#2501](https://github.com/yomidevs/yomitan/pull/2501) (思ふ, 思ひたい, 食べませう,
+してゐる), the emphatic -やしない and -やしません, one-character continuative stems
+(来 → 来る) and honorifics that match only as a whole word (ございます → ござる).
+These forms resolve through the same part-of-speech conditions and traces as
+modern forms, and kanji variant normalization composes with them
+(讀みませう → 読む). This is suffix deinflection, not a general historical
+spelling converter: 思へる and 思ほう do not become 思う, and historical large
+つ spellings such as 買つてゐる are not covered. The engine's own test runs
+Yomitan's complete Japanese conjugation corpus.
+
 ### Deinflection explanation
 
 Each eligible term header has a native, initially closed `details` disclosure.
@@ -2606,8 +2631,13 @@ buttons use the same controller with their selected stable Template ID. Each
 action adds, and once there is a note to show it opens Anki instead, at the
 duplicates that block adding, the note it just wrote, or a search for the
 expression after a write it could not confirm. While cache and live readiness
-are unresolved, the disabled button exposes its busy state and an Arrow
-Clockwise icon. It resolves to Add or the green View in Anki book action.
+are unresolved, the button exposes its busy state and an Arrow Clockwise icon.
+Clicking it adds a new note regardless of duplicates, overriding Prevent or
+Overwrite for that submission only. The reader obtains its media requirements
+without a duplicate lookup, and the write sends `allowDuplicate: true` to Anki.
+Configuration, dictionary generation and field checks still apply. Late
+readiness replies cannot replace an in-progress or confirmed submission.
+Otherwise it resolves to Add or the green View in Anki book action.
 Missing Template IDs remain visible as disabled errors and send no Anki
 request.
 The content controller preflights each Template's rendered candidates in one

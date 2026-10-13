@@ -684,6 +684,20 @@ check('deinflection survives a five-step chain', () => {
   eq(primary.term.expression, '食べる', 'expression');
 });
 
+check('Yomitan historical kana and emphatic negative chains reach dictionary forms', () => {
+  for (const [source, expression, trace] of [
+    ['食べてゐる', '食べる', ['-いる', '-て']],
+    ['食べやしなかった', '食べる', ['-た', '-やしない']],
+    ['食べやしませんでした', '食べる', ['-た', '-やしません']],
+    ['読まう', '読む', ['volitional']],
+  ]) {
+    const result = lookup(source).results[0];
+    eq(result?.term.expression, expression, source);
+    eq(result?.matched, source, 'full surface form');
+    same(result?.trace.map(step => step.name), trace, source + ' trace');
+  }
+});
+
 check('kana-only entry (empty reading in the bank)', () => {
   const { results } = lookup('ありがとう');
   eq(results.length, 1, 'result count');
@@ -2257,6 +2271,48 @@ if (VARIANT === 'hoshidicts') {
     eq(result.results[0]?.term.expression, '食べる', 'expression');
   });
 }
+
+G('Yomitan engine dependency parity');
+check('rebuilt WASM recognizes historical u-verbs, one-character stems and whole-word honorifics', () => {
+  reset();
+  const title = 'yomitan-conjugation-parity';
+  M.FS.writeFile('/work/conjugation-parity.zip', buildTitledZip(title, {
+    terms: [
+      ['思う', 'おもう', '', 'v5', 0, ['to think'], 1, ''],
+      ['来る', 'くる', '', 'vk', 0, ['to come'], 2, ''],
+      ['ござる', 'ござる', '', 'v5', 0, ['honorific to be'], 3, ''],
+      ['偽ござる', 'にせござる', '', 'v5', 0, ['honorific suffix trap'], 4, ''],
+      ['読む', 'よむ', '', 'v5', 0, ['to read'], 5, ''],
+    ],
+  }));
+  const report = hdwImport('/work/conjugation-parity.zip', '/dicts');
+  ok(report.success, report.error);
+  eq(addDict('/dicts/' + title, 0), 1, lastError());
+  for (const source of ['思ふ', '思はない', '思ひたい', '思ひなさい', '思ひすぎる', '思ひ過ぎる', '思ひやがる']) {
+    const result = lookup(source).results[0];
+    eq(result?.term.expression, '思う', source);
+    eq(result?.matched, source, 'full historical form');
+  }
+  eq(lookup('来').results[0]?.term.expression, '来る', 'single-character continuative');
+  eq(lookup('ございました').results[0]?.term.expression, 'ござる', 'chained honorific');
+  ok(!lookup('偽ございます').results.some(result => result.term.expression === '偽ござる'), 'honorific must match a whole word');
+});
+
+// The engine's own Yomitan corpus covers each rule; these are the parts of the
+// lookup it cannot see: kanji variant normalization ahead of deinflection, and
+// the selected-dictionary path. The dictionary is the one imported above.
+check('historical conjugations compose with kanji variants, also in a selected dictionary, and skip excluded spellings', () => {
+  const path = '/dicts/yomitan-conjugation-parity';
+  const full = (results, source, expression) =>
+    results.some(result => result.matched === source && result.term.expression === expression);
+  for (const source of ['讀みませう', '讀んでゐる']) {
+    ok(full(lookup(source).results, source, '読む'), source);
+    ok(full(lookupDictionary(source, path).results, source, '読む'), source + ' in the selected dictionary');
+  }
+  // Yomitan #2474 excludes these spellings: a shorter prefix may still match,
+  // never the whole scanned form.
+  for (const source of ['思へる', '思ほう']) ok(!full(lookup(source).results, source, '思う'), source);
+});
 
 console.log(`\n${passed} passed, ${failures.length} failed`);
 if (failures.length) {
