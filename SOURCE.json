@@ -1,18 +1,18 @@
 {
   "repository": "https://github.com/bee-san/hachidori",
-  "revision": "0a00a389910a078429b1d0e53278d199ce7c260e",
+  "revision": "dfc5e0ca6b02b9ed737739797205a7d622f4f6af",
   "hoshidicts": {
     "repository": "https://github.com/bee-san/hoshidicts",
-    "revision": "080d47e74e8209f4cf0d04a56730088dea6db923"
+    "revision": "20019e4b2043234dfde13df5e9f361900c93d4ba"
   },
   "license": "GPL-3.0-or-later",
   "artifacts": {
     "extension/vendor/hoshidicts-threaded-idbfs.mjs": "8767c37b8804a983a34480da1405295cc3a04f93af839199b8f6c71bbb23c04f",
-    "extension/vendor/hoshidicts-threaded-idbfs.wasm": "d21f71c1ae590fa071dfd0f65b07d2a75a07635fffc5dc3cac669e3576a474d4",
+    "extension/vendor/hoshidicts-threaded-idbfs.wasm": "23586acd2b50cf1745ea06dc86492ff2c73ec405f3bec30cbd4d8a494a156882",
     "extension/vendor/hoshidicts-threaded.mjs": "9a151c5c139f02dd8ee50ab099f832d17d312442bd2b168b1af5afdca8a771e8",
-    "extension/vendor/hoshidicts-threaded.wasm": "c34070512089d79fed67c465f359964c5e43efcf4548e3d95672f3029a912646",
+    "extension/vendor/hoshidicts-threaded.wasm": "ea9cf8f1b71164871529dbbf70c196465db4f0407c4cd91c7aec70c57ca386c3",
     "extension/vendor/hoshidicts.mjs": "028d2d76aee8a2102475b20b64046b1262621d37da3eead785aaea159770abcf",
-    "extension/vendor/hoshidicts.wasm": "7a39c442a6647df4aeb726a1171847abf13f3329b7fc010cc269d05f25cd4cc3"
+    "extension/vendor/hoshidicts.wasm": "cd4605449775a816b5a6f87b4debe3db761033eaf8c3af0f3584933d71d5b158"
   },
   "localChanges": [
     "Expose popup host attributes, successful lookups, mouse events and host commands to SubMiner; visibility uses native Hachidori events.",
