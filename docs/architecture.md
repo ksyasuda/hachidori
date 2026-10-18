@@ -70,14 +70,18 @@ reloads cannot race each other.
 The offscreen bridge reserves one of its existing 128 pending-request slots
 before awaiting capability selection or fallback module loading. The same
 admission and mutation lock cover both backends: while a mutation is pending,
-other non-status requests fail busy. A saturated or mutating bridge answers
+reads fail busy at once, so a hover never waits out an import, and every other
+request it blocks (an import, a library change, a cleanup) waits in arrival
+order and is admitted as the lock is released (#578). A waiting request counts
+against the 128 slots. A saturated or mutating bridge answers
 status from its last-known snapshot; before backend selection this snapshot
-reports loading without claiming a storage backend. Normal status requests
+reports loading without claiming a storage backend. Every status reply carries
+`mutating`, whether a change holds the lock. Normal status requests
 still reach the engine, including its reload recovery path.
 
 Replies, local handler failures, and thrown worker dispatches release their slot
 and mutation lock through one settlement path. Engine startup or worker failure
-settles every admitted request once; a late worker reply cannot settle it again.
+settles every admitted or waiting request once; a late worker reply cannot settle it again.
 There is no mutation deadline: a slow custom append must not appear failed while
 it can still commit. This admission limit is a transport bound, not a dictionary,
 archive, source-document, or background-storage-queue limit.
@@ -118,6 +122,16 @@ Settings row uses to say *Updating…*.
 
 Multiple selected local archives remain separate transactions. Settings runs
 them sequentially, keeps an outcome for each file, and continues after a failure.
+Before each one it waits while the engine starts or another change holds it
+(an automatic backup's generation cleanup, another tab's import, a managed
+update), polling `hd_status` with a backoff from 250 ms to 2 s for up to 30
+minutes; the row says *Waiting for the previous import to finish…* meanwhile
+(`dictionary-import-attempts.js`). A failed attempt is retried after that wait,
+up to three attempts, but only while the library revision is unchanged: an
+import whose reply was lost after it committed never runs twice. Memory, full
+storage and engine-start failures are not retried. **Cancel import** ends a
+wait at once and starts no further archive; an import the engine has begun
+finishes and keeps its outcome.
 Staging checks the returned memory mapping before copying archive bytes, and a
 cleanup failure cannot replace the original write error. Native exceptions from
 filesystem calls are decoded with the module's exception helpers; their storage
@@ -2132,6 +2146,9 @@ There is no document-wide observer, polling or per-image observer.
 Keyboard focus inside the popup cancels hover dismissal, while genuine focus
 departure rearms it. Focusout waits for removal/focus transfer to settle so
 replacing a focused Note form cannot schedule dismissal of its refreshed result.
+A control that disables itself while it works, such as an Anki action or the
+lookup failure's Retry, loses focus without the reader leaving, so its
+focusout schedules no dismissal either.
 Escape, outside clicks and a new lookup still explicitly dismiss or replace the
 view. Real-WASM and Chrome checks import genuine AVIF and SVG resources and
 verify exact bytes, MIME types, decoded dimensions and preview source reuse.
@@ -2638,6 +2655,11 @@ without a duplicate lookup, and the write sends `allowDuplicate: true` to Anki.
 Configuration, dictionary generation and field checks still apply. Late
 readiness replies cannot replace an in-progress or confirmed submission.
 Otherwise it resolves to Add or the green View in Anki book action.
+An action disables itself while it saves or opens Anki. Pressed from the
+keyboard, it keeps the popup open and gets focus back once it is enabled
+again, unless focus has moved elsewhere, so Enter can then open the note it
+added. A mouse press takes no focus back, because focus inside the popup
+holds page hover.
 Missing Template IDs remain visible as disabled errors and send no Anki
 request.
 The content controller preflights each Template's rendered candidates in one
@@ -3420,6 +3442,15 @@ uncertain write leaves it for inspection and an explicit retry.
 | Hover enablement, activation mode/key, Japanese-only scanning, open/hide delays, cursor-exit hiding, child popup depth, scan/result limits, frequency ordering, dictionary selectors, ordered custom buttons, Anki Templates,  | service worker writes; extension pages read a projected subset | `chrome.storage.local` key `options` |
 | Capture tab/document routing identities | service worker; recovered by validating the surviving offscreen host and reader | transient memory only |
 | Watched DOM nodes/ranges, cue/DOM observers, and collector epochs | linked content script | transient memory only |
+| Debug log: redacted warnings, errors, failed requests and fetches, shown errors and named page actions, newest 5,000 entries within 2 MiB | each extension context appends its own entries (`debug-log.js`); Get debug info reads them | IndexedDB database `hachidori-debug-log` (`events` records, `meta` totals); each context also keeps its newest 200 in memory |
+
+The debug log is the one store every context writes directly: each context's
+entries from one task go in one transaction that also updates the ring's
+count and byte totals and deletes the oldest records past either limit, so
+concurrent writers keep the totals exact without the service worker's storage
+queue. Get debug info asks each live context for its log, which writes what it
+still holds, then reads the ring, so the report has earlier sessions as well as
+entries a context could not save.
 
 The engine holds each loaded dictionary's selected resident files in WebAssembly linear memory once, however many kinds it loads as (Emscripten emulates `mmap` by copying), and that memory never shrinks. Direct OPFS workers default to paged entries (`blobs.bin`) through the existing shared page cache; `options.dictionaryEntryStorage` selects `auto` (OPFS paged, IDBFS resident), `paged`, or `resident` independently of import threading and low-memory recycling; changing the policy restarts the idle worker. Existing stored options adopt `auto` without reimporting dictionaries; media (`media.bin`) is read from the file when `hd_media` asks for it. On direct OPFS an import's high-water mark belongs to the terminated `import-worker.js` instance and is returned to the browser; the engine's heap grows only by the new generation's resident files. On IDBFS the import runs inside the engine, so its high-water mark stays for the life of the engine worker. `hd_memory` reports the heap and each loaded package's resident bytes; Settings → Advanced → Memory shows them, and its **Low memory mode** switch (`options.lowMemoryMode`) makes `offscreen.js` recycle the engine worker once idle after a dictionary change and start it with a two-thread pool that imports single-threaded and loads every package paged: small metadata stays resident, hashes follow the aggregate residency policy, and `blobs.bin` is read through the shared page cache (`engine-recycler.js`, `engine-worker-runtime.js`, `hd_engine_config`, `hdw_add_dict`'s `paged` argument). Any worker loads a package paged when it does not fit in the heap mapped. `options.dictionaryIndexStorage` independently selects resident, paged or automatic hashes on threaded OPFS. Automatic uses one 65 MiB resident budget in normal mode while `options.useLessRamByDefault` is on (off by default), and 32 MiB in Low memory mode. Turning the new switch off retains all hashes in normal mode; explicit resident or paged hash choices override it. The plan is selected before loading or validating packages; paged hashes and entries share the existing 32 MiB cache. Changing either preference uses the same idle recycler without changing entry storage or import threading. IDBFS retains resident hashes. [memory.md](memory.md) explains the model, the readout, the mode's costs and the two failure regimes.
 

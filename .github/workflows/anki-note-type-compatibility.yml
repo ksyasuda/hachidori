@@ -15,8 +15,8 @@ on:
       - docs/anki-note-type-compatibility.md
       - .github/workflows/anki-note-type-compatibility.yml
   workflow_dispatch:
-  schedule:
-    - cron: '23 9 * * 1'
+  # The weekly schedule was removed (GitHub Actions cost audit, 2026-10-13); pull requests
+  # touching the paths above still run it, and it can be run by hand.
 
 permissions:
   contents: read
@@ -34,7 +34,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .node-version
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -59,7 +59,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .node-version
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -79,7 +79,7 @@ jobs:
         run: node scripts/anki-note-type-compatibility.mjs "anki-report-$MODE.json"
       - name: Retain schemas and provenance only
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: anki-note-types-${{ matrix.mode }}
           path: anki-report-${{ matrix.mode }}.json

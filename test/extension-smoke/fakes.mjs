@@ -903,7 +903,8 @@ function loadSettingsScript(window, { overlayMode = false, recommendedInstall = 
     .replace(/^export\s+/gmu, "");
   const memorySettings = readFileSync(resolve(EXTENSION, "memory-settings.js"), "utf8")
     .replace(/^import[^\n]+\n/gmu, "").replace(/^export\s+/gmu, "");
-  const settingsDom = readFileSync(resolve(EXTENSION, "settings-dom.js"), "utf8").replace(/^export\s+/gmu, "");
+  const settingsDom = readFileSync(resolve(EXTENSION, "settings-dom.js"), "utf8")
+    .replace(/^import[^\n]+\n/gmu, "").replace(/^export\s+/gmu, "");
   const anki = readFileSync(resolve(EXTENSION, "anki.js"), "utf8")
     .replace(/^import[^\n]+\n/gmu, "").replace(/^export\s+/gmu, "");
   const ankiTemplates = readFileSync(resolve(EXTENSION, "anki-templates.js"), "utf8")
@@ -938,6 +939,8 @@ function loadSettingsScript(window, { overlayMode = false, recommendedInstall = 
   const dictionaryImport = readFileSync(resolve(EXTENSION, "dictionary-import.js"), "utf8")
     .replace(/^export\s+/gmu, "");
   const importErrors = readFileSync(resolve(EXTENSION, "dictionary-import-errors.js"), "utf8")
+    .replace(/^export\s+/gmu, "");
+  const importAttempts = readFileSync(resolve(EXTENSION, "dictionary-import-attempts.js"), "utf8")
     .replace(/^export\s+/gmu, "");
   const setupState = readFileSync(resolve(EXTENSION, "setup-state.js"), "utf8")
     .replace(/import\s*\{[\s\S]*?\}\s*from\s*"\.\/recommended-dictionaries\.js";\s*/u, "")
@@ -986,7 +989,7 @@ function loadSettingsScript(window, { overlayMode = false, recommendedInstall = 
     };
   }
   window.eval(
-    `${externalLinks}\n${customButtonSettings}\n${readerOptions}\n${recommended.replace(/^export\s+/gmu, "")}\n${customDictionary}\n${managedSource}\n${groupState}\n${groups}\n${nameDrafts}\n${dictionaryProgress}\n${dictionaryImport}\n${importErrors}\nasync function readDictionaryArchiveIdentity(file) { return window.__readDictionaryArchiveIdentity(file); }\n${setupState}\n${settingsDom}\n${audioSettings}\n${ankiTemplates}\n${anki}\n${ankiSettings}\n${automaticBackups}\n${backupSettings}\n${experimentalSettings}\n${themeStore}\n${activationSettings}\n${memorySettings}\n${localFileAccess}\n${debugLog}\n${errorText}\n${settingsModules}\n${settings}`,
+    `${externalLinks}\n${customButtonSettings}\n${readerOptions}\n${recommended.replace(/^export\s+/gmu, "")}\n${customDictionary}\n${managedSource}\n${groupState}\n${groups}\n${nameDrafts}\n${dictionaryProgress}\n${dictionaryImport}\n${importErrors}\n${importAttempts}\nasync function readDictionaryArchiveIdentity(file) { return window.__readDictionaryArchiveIdentity(file); }\n${setupState}\n${settingsDom}\n${audioSettings}\n${ankiTemplates}\n${anki}\n${ankiSettings}\n${automaticBackups}\n${backupSettings}\n${experimentalSettings}\n${themeStore}\n${activationSettings}\n${memorySettings}\n${localFileAccess}\n${debugLog}\n${errorText}\n${settingsModules}\n${settings}`,
   );
 }
 
@@ -1097,7 +1100,9 @@ async function navigateSettingsSection(window, id) {
 
 function loadStartupScript(window) {
   window.canDiscoverSharingHost = canDiscoverSharingHost;
-  window.eval(readFileSync(resolve(EXTENSION, "settings-dom.js"), "utf8").replace(/^export\s+/gmu, ""));
+  window.eval(readFileSync(resolve(EXTENSION, "debug-log.js"), "utf8").replace(/^export\s+/gmu, ""));
+  window.eval(readFileSync(resolve(EXTENSION, "settings-dom.js"), "utf8")
+    .replace(/^import[^\n]+\n/gmu, "").replace(/^export\s+/gmu, ""));
   window.eval(readFileSync(resolve(EXTENSION, "recommended-install-client.js"), "utf8").replace(/^export\s+/gmu, ""));
   const readerOptions = readFileSync(resolve(EXTENSION, "reader-options.js"), "utf8");
   const localAudioSource = readFileSync(resolve(EXTENSION, "local-audio-source.js"), "utf8")
@@ -1121,7 +1126,7 @@ function loadStartupScript(window) {
     .replace(/^export\s+/gmu, "");
   const errorText = readFileSync(resolve(EXTENSION, "error-text.js"), "utf8").replace(/^export\s+/gmu, "");
   const startup = readFileSync(resolve(EXTENSION, "startup.js"), "utf8")
-    .replace(/^import .* from "\.\/(?:settings-dom|sharing-protocol|error-text)\.js";\s*/gmu, "")
+    .replace(/^import .* from "\.\/(?:settings-dom|sharing-protocol|error-text|debug-log)\.js";\s*/gmu, "")
     .replace(/^import .* from "\.\/recommended-install-client\.js";\s*/gmu, "")
     .replace(/import "\.\/reader-options\.js";\s*/u, "")
     .replace(/import "\.\/visual-novel\.js";\s*/u, "")

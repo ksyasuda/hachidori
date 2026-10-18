@@ -189,9 +189,10 @@ see [benchmark/README.md](../benchmark/README.md).
 | `custom-button-settings`, `custom-buttons-renderer`, `external-link-host` | Link templates and Anki Template selection, button editing, the overlay host request/result boundary, live editing without replacing cards or drafts. |
 | `custom-dictionary` | The personal dictionary's source and ZIP contract: parsing, comments, ordered duplicates, malformed-line reports, CRLF append, escape round trips, a byte-deterministic multi-bank ZIP (imported through the real WASM engine by the smoke suite). |
 | `custom-javascript` | Custom JavaScript sits beneath Custom CSS with one warning and persists as a Design option. |
-| `debug-info`, `debug-log` | The debug report's contents without reader content; the log keeps the newest entries. |
+| `debug-info`, `debug-log` | The debug report's contents without reader content; the log's capture, redaction, named actions and shown errors, the IndexedDB ring's batches, repeat counts, entry and byte limits across writers, and a reloaded page's report. |
 | `definition-blur-frequency` | Frequency blur options and their inclusive boundaries. |
 | `dictionary-import`, `dictionary-import-errors` | Revision comparison, MDX loss-count notes, and mmap/writeback failures that cleanup cannot hide. |
+| `dictionary-import-attempts` | A Settings import's turn at the engine (#578): it waits while the engine starts or a change holds it, polling with backoff up to a 30-minute timeout, and Cancel ends the wait at once; a failed attempt is retried up to three times, never after the library changed and never for memory, storage or engine-start failures. |
 | `dictionary-index-storage` | The hash-index budget: smallest tables stay resident, stable ties, enabled packages counted once, 65 MiB with **Use less ram by default** and 32 MiB in Low memory mode. |
 | `dictionary-name-drafts`, `dictionary-update-schedule` | Name autosave and external renames; per-dictionary schedules and due times. |
 | `engine-recycler`, `memory-settings`, `low-memory-option` | [Low memory mode](../docs/memory.md): the recycle scheduler, the Advanced → Memory readout and per-row *In memory*, and the options' normalisation. |
@@ -252,8 +253,9 @@ pinned/latest package commands and the schema-only boundary.
 - **`threaded-bridge-smoke.mjs`** imports the real offscreen bridge with
   controlled worker and fallback endpoints (through Node 22.15's
   `module.registerHooks`): the 128-request admission bound, responsive status,
-  mutation exclusion, exactly-once replies after failures, and reads during an
-  import's installing phase. It boots no fake native engine and leaves the
+  mutation exclusion with blocked changes waiting in arrival order (#578),
+  exactly-once replies after failures, and reads during an import's installing
+  phase. It boots no fake native engine and leaves the
   production bridge source alone; actual WASM/IDBFS behaviour stays covered by
   `extension-smoke.mjs` and `chrome-fallback.mjs`.
 - **`submodule-identity.mjs`** checks that `.gitmodules`' tracking branch matches
@@ -264,7 +266,10 @@ pinned/latest package commands and the schema-only boundary.
   `test/legacy/` (`.hoshidicts_3` and `_4` directories written by the engine at
   hoshidicts `1ec66fe`), `test/mdict/` (copies of Hoshidicts' MDict fixtures,
   committed because the smoke suites run without the submodule) and
-  `test/data/` are fixture data.
+  `test/data/` are fixture data. `test/data/backups/` holds the backups the
+  0.1.1 and 0.3.0 releases exported from a fresh profile with the fixture, a
+  personal entry, a group, a weekly schedule, five changed settings and a
+  lookup count (and on 0.3.0 a word marked as known).
 
 ### `extension-smoke.mjs`
 
@@ -287,7 +292,7 @@ wasm module or the fixtures are missing.
 | `lookup-stats.mjs`, `audio.mjs` | Lookup statistics and the audio relay in the worker. |
 | `custom-dictionary.mjs` | The personal dictionary's storage ownership, its engine transaction through real WASM, and its Settings section. |
 | `recommended.mjs` | The five trusted recommendations, the shared dictionary-group module, and the Settings installer. |
-| `settings.mjs`, `library.mjs` | Settings navigation, reader controls and autosave; library management, groups, removal, batch and MDX imports. |
+| `settings.mjs`, `library.mjs` | Settings navigation, reader controls and autosave; library management, groups, removal, batch imports that wait for a busy engine, retry and cancel, and MDX imports. |
 | `startup.mjs`, `design.mjs`, `source-highlight.mjs` | The startup page (welcome, installer runs, recovery, practice, visual novel scenes), the Design preview, source highlighting. |
 | `content.mjs`, `content-harness.mjs`, `content-*.mjs` | The real `content.js`, with `content-dictionaries.js` and `content-scan.js`, in jsdom pages: stale kanji replies; popup visibility, fullscreen hosts, failures and option revisions; lookup counts and blur; scanning and selections; activation, scan delays and keybinds; nested popups and media; Notes. |
 | `engine.mjs` → `engine-replacement.mjs` → `engine-updates.mjs` → `engine-library.mjs` → `engine-lookup.mjs` → `renderer.mjs` → `engine-restart.mjs` → `engine-storage.mjs` | One scenario on one engine: boot and relay, storage ownership and `hd_import`, atomic replacement, trusted recommended imports and managed updates, library state (migration, CAS ownership, titles, reloads), every read path and error path, the renderer against the engine's replies, `hd_remove`, the trained layout, a restart, then isolated imports, paged dictionaries and blob-backed IDBFS. |
@@ -343,7 +348,8 @@ the extension_pages CSP permits compiling the wasm in the offscreen document,
 that `chrome.offscreen` and `chrome.runtime.getContexts` behave as assumed, that
 OPFS survives a browser restart, and that a real `caretRangeFromPoint` hover
 produces a rendered popup. `test/run.mjs chrome-e2e` also runs
-`chrome-popup-scale.mjs` (fractional popup scale, real pointer hit testing).
+`chrome-popup-scale.mjs` (fractional popup scale, real pointer hit testing) and
+`chrome-bulk-import.mjs` (below).
 
 Its steps run in this order, in one profile:
 
@@ -366,6 +372,7 @@ Its steps run in this order, in one profile:
 | `updates.mjs` | Managed updates: scoped checks, Check now, Update all, the global and per-dictionary schedules, real alarms, a failed update, hovering through an update, alarm recreation after a worker restart. |
 | `restart.mjs` | Backups and atomic replacement in Chrome, then `SIGKILL` and a relaunch on the same profile: settings, counts, setup, the library, OPFS and lookups survive; removal. |
 | `memory.mjs`, `media.mjs`, `file-access.mjs` | Low memory mode, the RAM default, entry and hash storage; lookup bounds, deep structured content and dictionary media; saved-page setup with Chrome's file access. |
+| `debug-log.mjs` | The debug log: a failed import is in Get debug info after Settings reloads, with the actions before it, and **Copy error details** copies it; credentials, address queries and Japanese text never reach IndexedDB or the report; the ring holds 5,000 entries within 2 MiB; a service-worker failure survives `SIGKILL` and a relaunch. |
 
 #### The profile
 
@@ -442,6 +449,13 @@ disables a command-line extension when it reloads).
 
 These run separately:
 
+- **`chrome-bulk-import.mjs`** (run by `test/run.mjs chrome-e2e`, #578)
+  imports a batch of 50 archives from Settings on a fresh profile, five of them
+  100,000-row frequency lists, while a second Settings page sends imports at
+  once, reloads the library, runs generation cleanup and looks words up. Every
+  row must be imported with none refused, every concurrent import and change
+  must succeed, lookups must keep answering (none refused while only imports
+  run), and each dictionary must be in storage once and complete in OPFS.
 - **`chrome-fallback.mjs`** loads a manifest without cross-origin isolation, so
   pthreads are unavailable: import, custom source and restart through the
   single-thread IDBFS bundle, with OPFS left empty and a first-run run whose

@@ -156,7 +156,9 @@ the service worker and both engine runtimes run the same code.
   saved theme before the first paint, ahead of the `settings.js` module;
   `library-settings.js` (Dictionaries → Dictionaries: the rows, their order,
   selection and bulk actions, the revision-checked commit queue and removal),
-  `import-settings.js` (Add dictionaries and the recommended installer),
+  `import-settings.js` (Add dictionaries and the recommended installer, with
+  `dictionary-import-attempts.js` deciding when an import waits for the engine
+  and when it is retried),
   `update-settings.js` (Updates), `custom-dictionary-settings.js` (Personal
   dictionary), `lookup-stats-settings.js` (Reading's lookup counts and
   definition blur) and `option-settings.js` (the other option controls and
@@ -167,8 +169,10 @@ the service worker and both engine runtimes run the same code.
   the Advanced → Memory readout and each Dictionaries row's *In memory* line;
   `debug-info.js` the Advanced → Troubleshooting *Get debug info* JSON report,
   with credentials redacted and reader content reduced to counts, and
-  `debug-log.js` the recent warnings, errors and failed replies each
-  extension context keeps for it;
+  `debug-log.js` the debug log every extension context writes to one
+  IndexedDB ring: redacted warnings, errors and failed requests, the errors a
+  page shows (with *Copy error details* beside them) and the page actions
+  before them;
   `activation-settings.js` the Reading → Activation key or button picker and
   its *Press to set* recorder;
   `keybind-settings.js`, `custom-button-settings.js` and `external-links.js`

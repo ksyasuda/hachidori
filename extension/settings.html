@@ -242,6 +242,7 @@
                   multiple
                 />
               </label>
+              <button class="ghost" id="import-cancel" type="button" hidden>Cancel import</button>
               <output
                 class="import-state"
                 id="import-state"
@@ -322,7 +323,7 @@
                   id="update-all"
                   disabled
                 >
-                  Install updates
+                  Update all
                 </button>
               </div>
             </div>
@@ -337,7 +338,23 @@
             <button type="button" class="ghost" id="update-schedule-retry">Retry my schedule</button>
             <button type="button" class="ghost" id="update-schedule-discard">Use current schedule</button>
           </div>
+          <div class="lookup-group">
+            <h2>Dictionary updates</h2>
+            <p class="field-hint" id="update-list-summary">Check now to find available updates.</p>
+            <ul class="update-dictionary-list" id="update-dictionary-list" aria-label="Available dictionary updates and failures"></ul>
+          </div>
         </section>
+
+        <template id="update-dictionary-template">
+          <li class="setting-row">
+            <div class="setting-text">
+              <p class="field-label update-dictionary-title"></p>
+              <p class="field-hint update-dictionary-revisions"></p>
+              <p class="dict-update-status"></p>
+            </div>
+            <button type="button" class="ghost update-dictionary-action"></button>
+          </li>
+        </template>
 
         <section
           class="card"
@@ -1418,7 +1435,7 @@
           <fieldset class="lookup-group" id="debug-info-settings">
             <legend data-search-keywords="debug diagnostics bug report troubleshooting support logs version">Troubleshooting</legend>
             <div class="setting-row">
-              <p class="field-hint" id="debug-info-help">Downloads a JSON file to attach to a bug report: the Hachidori version and install, browser and system, engine status, memory use and recent warnings and errors, installed dictionaries, Anki and sharing status, every setting, and what Hachidori stores in this browser. Your AnkiConnect API key is removed, and your personal dictionary entries, lookup history and Anki notes are left out.</p>
+              <p class="field-hint" id="debug-info-help">Downloads a JSON file to attach to a bug report: the Hachidori version and install, browser and system, engine status and memory use, installed dictionaries, Anki and sharing status, every setting, what Hachidori stores in this browser, and its debug log. The log keeps warnings, errors and failed requests from this and earlier sessions, the errors Hachidori showed you and, by name only, the buttons and settings you used before them. Your AnkiConnect API key and other credentials are removed, Japanese text in the log is replaced with [ja], and your personal dictionary entries, lookup history and Anki notes are left out.</p>
               <div class="options-actions">
                 <button type="button" class="ghost" id="debug-info-download" aria-describedby="debug-info-help">Get debug info</button>
                 <output class="custom-dictionary-status" id="debug-info-status" aria-live="polite"></output>

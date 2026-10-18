@@ -193,6 +193,7 @@ const PLANNED = [
   "Anki {audio} in a non-first field uploads the selected pronunciation after the note is added",
   "Anki readiness uses an enabled accessible Arrow Clockwise before Add and View resolve",
   "clicking the Anki spinner adds a duplicate before its pending preflight resolves",
+  "a keyboard Add keeps the popup open and returns focus to its action, and a mouse click does not",
   "Anki reader controls stay absent until configured and keep ruby context without its reading through one confirmed Add and View",
   "a mined screenshot is the reading page without Hachidori's overlays and its upload cannot fail the note",
   "Anki screenshot mining works after history.pushState and history.replaceState change the reading page URL",
@@ -411,6 +412,11 @@ const PLANNED = [
   "Meikyo-compatible gaiji use natural inline geometry and dictionary CSS hooks without overflow",
   "monochrome dictionary images paint in the palette text colour in the card and its preview",
   "dictionary CSS hides a converter head tail through a Japanese-keyed data attribute",
+  "Copy error details copies the shown error with the failures and actions before it",
+  "a Settings button press that fails is in Get debug info after Settings reloads, with the actions before it",
+  "the debug log keeps credentials, sign-ins, address queries and Japanese text out of IndexedDB and the report",
+  "the debug log ring keeps its newest entries within 5,000 entries and 2 MiB",
+  "errors from before a browser crash are in the next session's Get debug info",
 ];
 
 const results = [];
