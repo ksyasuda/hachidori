@@ -162,7 +162,7 @@ see [benchmark/README.md](../benchmark/README.md).
 | file | what it proves |
 | --- | --- |
 | `activation-settings` | Reading → Activation key or button: No key first, mouse buttons above keys; **Press to set** records middle/Back/Forward without their native actions, records keys by name, refuses primary/secondary buttons and unlisted keys, ignores repeats, cancels on Escape. |
-| `advanced-settings` | Advanced keeps dictionary experiments; Word highlighting's section, rail link, picker option and search results stay hidden until its experimental switch is on, and turning it off stops the marks in the same save. |
+| `advanced-settings` | Advanced keeps dictionary experiments; Word highlighting is always available in Reading and search, starts off and keeps its presentation when disabled; Smaller Anki cards is an optional Anki control. |
 | `anki-addon` | The pinned GitHub add-on URL, binary preservation, HTTP and network errors. |
 | `anki-audio`, `anki-offscreen-audio` | First decodable pronunciation exported without playback, exact TTS voice capture, linked TTS planned without host capture. |
 | `anki-client-media` | Linked screenshot and browser-speech WAV bytes are allowlisted against the request; stale and malformed media are refused. |
@@ -477,6 +477,13 @@ These run separately:
   word-highlight lines on light and dark pages; `test/tmp/ci/theme-contrast.png`
   is its filmstrip. Chrome emulation does not replace a check on a real Windows
   contrast theme.
+- **`chrome-netflix-subtitle-drag.mjs`**, included in `test:chrome`, exercises real
+  left-button drags on native subtitle text in a synthetic Netflix page. It
+  checks both axes, player-click suppression, caret lookup at the moved text,
+  replacement layers, viewport bounds, switching off/on, and page reload. It
+  also plays a real canvas-backed video through the production page command
+  listener without Netflix's private API, checking hover/lookup pause and resume.
+  It writes `test/tmp/ci/netflix-subtitle-drag.png`; no Netflix service is contacted.
 - **`chrome-netflix-mining.mjs`**, outside the default runs (`xvfb-run -a`;
   headless Chrome records tab audio as silence), mines a fixture page served at
   a Netflix watch address into a fake AnkiConnect. Request interception serves
