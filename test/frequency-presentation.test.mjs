@@ -158,7 +158,7 @@ test("harmonic averages use concise typed labels and keep each dictionary's tag 
   const defaults = f.options.normaliseOptions({});
   const result = { ...RESULT, term: { ...RESULT.term, frequencies: [
     { dictionary: "RankDict", frequencies: [{ value: 142, displayValue: "142" }] },
-    { dictionary: "CountDict", frequencies: [{ value: 12400, displayValue: "12,400" }] },
+    { dictionary: "CountDict", frequencies: [{ value: 12400, displayValue: "12400" }] },
   ] } };
   const options = {
     ...defaults,
@@ -183,6 +183,32 @@ test("harmonic averages use concise typed labels and keep each dictionary's tag 
   assert.equal(capsule.querySelector(".gsm-hoshidicts-primary-frequencies").hidden, false);
 });
 
+// The Discord report: Jiten declares "rank-based", CC100 declares no mode, and
+// the popup showed two averages instead of Yomitan's one.
+test("a dictionary without a declared mode joins the rank average, so Jiten and CC100 give one value", t => {
+  const f = fixture(t);
+  const result = { ...RESULT, term: { ...RESULT.term, frequencies: [
+    { dictionary: "Jiten", frequencies: [{ value: 15700, displayValue: "15700" }] },
+    { dictionary: "CC100", frequencies: [{ value: 26700, displayValue: "26700" }] },
+  ] } };
+  const presentation = mode => [{ title: "Jiten", frequencyMode: "rank-based" }, { title: "CC100", frequencyMode: mode }];
+  const harmonic = Math.floor(2 / (1 / 15700 + 1 / 26700));
+  for (const mode of [undefined, null, "rank-based"]) {
+    const capsule = f.render({ ...f.options.normaliseOptions({}), averageFrequency: true, compactFrequencyNumbers: true,
+      dictionaryPresentation: presentation(mode) }, result);
+    const averages = [...capsule.querySelectorAll("[data-frequency-average]")];
+    assert.deepEqual(averages.map(tag => [tag.dataset.frequencyAverage, tag.textContent]),
+      [["rank-based", "Avg rank19.8k"]], String(mode));
+    assert.equal(averages[0].querySelector("[data-frequency]").dataset.frequency, String(harmonic));
+  }
+  // A declared occurrence list still gets its own count average.
+  const capsule = f.render({ ...f.options.normaliseOptions({}), averageFrequency: true,
+    dictionaryPresentation: presentation("occurrence-based") }, result);
+  assert.deepEqual([...capsule.querySelectorAll("[data-frequency-average]")]
+    .map(tag => [tag.dataset.frequencyAverage, tag.textContent]),
+  [["rank-based", "Avg rank15700"], ["occurrence-based", "Avg count26700"]]);
+});
+
 test("tags keep dictionary order, so each first value is the one averaged, as in Yomitan", t => {
   const f = fixture(t);
   const rows = (dictionary, ...values) => ({ dictionary, frequencies: values.map(displayValue =>
@@ -202,6 +228,70 @@ test("tags keep dictionary order, so each first value is the one averaged, as in
   // 読む: Jiten 26-09-30 and JPDB v2.2 Kana store the plain rank first; Yomitan's Average is 372.
   assert.deepEqual(render([rows("Jiten", "462", "24459㋕"), rows("JPDBv2㋕", "312", "19896㋕")]),
     ["Avg rank372", ["462 · 24459㋕", "312 · 19896㋕"]]);
+});
+
+// Yomitan's getFrequencyNumbers and getFrequencyHarmonic (anki-note-data-creator.js
+// :178-225 at yomidevs/yomitan@d3c54c1), the numbers these averages must match.
+test("averages read each dictionary's first value as Yomitan does, over one, two or three dictionaries", t => {
+  const f = fixture(t);
+  const average = (frequencies, presentation = frequencies.map(({ dictionary }) => ({ title: dictionary }))) => {
+    const capsule = f.render({ ...f.options.normaliseOptions({}), averageFrequency: true,
+      dictionaryPresentation: presentation }, { ...RESULT, term: { ...RESULT.term, frequencies } });
+    return [...capsule.querySelectorAll("[data-frequency-average]")].map(tag => tag.textContent);
+  };
+  const group = (dictionary, ...frequencies) => ({ dictionary, frequencies });
+  const jiten = group("Jiten", { value: 462, displayValue: "462" }, { value: 24459, displayValue: "24459㋕" });
+  const jpdb = group("JPDB", { value: 312, displayValue: "312, 19896㋕" });
+  const bccwj = group("BCCWJ", { value: 292, displayValue: "292" });
+  assert.deepEqual(average([jiten]), ["Avg rank462"]);
+  assert.deepEqual(average([jiten, jpdb]), [`Avg rank${Math.floor(2 / (1 / 462 + 1 / 312))}`]);
+  assert.deepEqual(average([jiten, jpdb, bccwj]), [`Avg rank${Math.floor(3 / (1 / 462 + 1 / 312 + 1 / 292))}`]);
+  // A display value's leading digits are the number, as Yomitan reads them;
+  // the value is used only when they are not a positive number.
+  assert.deepEqual(average([group("Text", { value: 0, displayValue: "999 (rare)" })]), ["Avg rank999"]);
+  assert.deepEqual(average([group("Text", { value: 5, displayValue: "unranked" })]), ["Avg rank5"]);
+  // Only a dictionary's first value counts: one whose first value is unusable
+  // adds nothing, even with a usable second value.
+  assert.deepEqual(average([group("Unranked", { value: 0, displayValue: "-" }, { value: 70, displayValue: "70" }),
+    group("Ranked", { value: 30, displayValue: "30" })]), ["Avg rank30"]);
+  assert.deepEqual(average([group("Unranked", { value: 0, displayValue: "-" })]), []);
+});
+
+// A mode that is neither of Yomitan's (its index schema refuses "rank") counts
+// as no mode: the list joins Avg rank, as it joins the card's
+// {frequency-harmonic-rank}, and its value does not vanish with averages on.
+test("a dictionary declaring neither of Yomitan's modes averages as a list without a mode, as on the card", t => {
+  const f = fixture(t);
+  const result = { ...RESULT, term: { ...RESULT.term, frequencies: [
+    { dictionary: "Jiten", frequencies: [{ value: 15700, displayValue: "15700" }] },
+    { dictionary: "Odd", frequencies: [{ value: 800, displayValue: "800" }] },
+  ] } };
+  const capsule = f.render({ ...f.options.normaliseOptions({}), averageFrequency: true, dictionaryPresentation:
+    [{ title: "Jiten", frequencyMode: "rank-based" }, { title: "Odd", frequencyMode: "rank" }] }, result);
+  assert.deepEqual([...capsule.querySelectorAll("[data-frequency-average]")].map(tag => tag.textContent),
+    [`Avg rank${Math.floor(2 / (1 / 15700 + 1 / 800))}`]);
+});
+
+test("averages can keep each dictionary's tag shown after them, live", t => {
+  const f = fixture(t);
+  const result = { ...RESULT, term: { ...RESULT.term, frequencies: [
+    { dictionary: "Jiten", frequencies: [{ value: 15700, displayValue: "15700" }] },
+    { dictionary: "CC100", frequencies: [{ value: 26700, displayValue: "26700" }] },
+  ] } };
+  const options = { ...f.options.normaliseOptions({}), averageFrequency: true, compactFrequencyNumbers: true,
+    dictionaryPresentation: [{ title: "Jiten", frequencyMode: "rank-based" }, { title: "CC100" }] };
+  const capsule = f.render(options, result);
+  const card = f.popup.querySelector(".gsm-hoshidicts-glossary-card");
+  const shown = () => [...capsule.querySelectorAll(".gsm-hoshidicts-tag-frequency")]
+    .filter(tag => !tag.hidden).map(tag => tag.textContent);
+  assert.deepEqual(shown(), ["Avg rank19.8k"]);
+  f.view.updateDictionaryPresentation({ ...options, showFrequencyTagsWithAverage: true });
+  assert.deepEqual(shown(), ["Avg rank19.8k", "15.7k", "26.7k"]);
+  f.view.updateDictionaryPresentation({ ...options, showFrequencyTagsWithAverage: true, averageFrequency: false });
+  assert.deepEqual(shown(), ["15.7k", "26.7k"], "without averages the switch changes nothing");
+  f.view.updateDictionaryPresentation(options);
+  assert.deepEqual(shown(), ["Avg rank19.8k"]);
+  assert.equal(f.popup.querySelector(".gsm-hoshidicts-glossary-card"), card);
 });
 
 test("every supplied frequency dictionary keeps its tag in the first and later entries, in any order (#505)", t => {
@@ -351,6 +441,29 @@ test("frequency values stay as each dictionary shows them unless abbreviation is
   assert.equal(f.popup.querySelector(".gsm-hoshidicts-glossary-card"), card);
   assert.equal(f.popup.querySelector("form"), form);
   assert.equal(form.elements.definition.value, "keep my draft");
+});
+
+// JPDB v2.2 Kana Display Only writes the word's rank and its kana form's rank in
+// one display value, e.g. 読む's {value: 312, displayValue: "312, 19896㋕"}: the
+// value is the word's rank, and the ㋕ belongs to the second number only.
+test("a display value with the kana rank after the word's own is not a kana frequency", t => {
+  const f = fixture(t);
+  const defaults = f.options.normaliseOptions({});
+  const result = { ...RESULT, term: { ...RESULT.term, frequencies: [
+    { dictionary: "JPDBv2㋕", frequencies: [{ value: 312, displayValue: "312, 19896㋕" }] },
+    { dictionary: "Jiten", frequencies: [{ value: 459, displayValue: "459" }, { value: 25754, displayValue: "25754㋕" }] },
+  ] } };
+  const capsule = f.render(defaults, result);
+  const values = () => [...capsule.querySelectorAll(".gsm-hoshidicts-frequency-value")]
+    .map(node => [node.textContent, node.title]);
+  assert.deepEqual(values(), [["312, 19896㋕", "312 (312, 19896㋕)"], ["459", "459"],
+    ["25754㋕", "Kana frequency: 25754"]]);
+  // Abbreviating without names shows each value's own number, so the word's
+  // 312 no longer takes the second number's ㋕.
+  f.view.updateDictionaryPresentation({ ...defaults, compactFrequencyNumbers: true });
+  assert.deepEqual(values().map(([text]) => text), ["312", "459", "25.8k㋕"]);
+  f.view.updateDictionaryPresentation({ ...defaults, compactFrequencyNumbers: true, showFrequencyDictionaryNames: true });
+  assert.deepEqual(values().map(([text]) => text), ["312, 19896㋕", "459", "25.8k㋕"]);
 });
 
 test("abbreviated frequency numbers pick the unit after rounding", t => {

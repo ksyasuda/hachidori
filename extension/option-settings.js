@@ -11,8 +11,8 @@ import { inferFrequencyDirection } from "./frequency-direction.js";
 import { applyPageTheme } from "./settings-dom.js";
 import {
   activationLabel, activeSection, adoptOptions, APPEARANCE_CHOICES, clampOption, customButtonController,
-  DEFAULT_OPTIONS, DEFINITION_LOOKUP_MODES, DESIGN_OPTION_KEYS, element, FREQUENCY_ORDERS, hasCapability,
-  METADATA_FIELDS, normaliseKanjiSelection, NUMBER_FIELDS, numberFormat, OPTION_SECTIONS, options,
+  DEFAULT_OPTIONS, DEFINITION_LOOKUP_MODES, DESIGN_OPTION_KEYS, element, FREQUENCY_ORDERS, frequencyModeOrder,
+  hasCapability, METADATA_FIELDS, normaliseKanjiSelection, NUMBER_FIELDS, numberFormat, OPTION_SECTIONS, options,
   OPTIONS_SAVE_DELAY_MS, optionsRevision, POPUP_RENDERER_IDS, POPUP_THEME_GROUPS,
   renderCurrentOptions, renderExperimentalSettings, renderLowMemoryMode, savedOptions, send, setSectionStatus,
   syncNavigationStatus, themeStore, updateAnkiSettings, updateAudioSettings, updateDesignPreview,
@@ -81,7 +81,7 @@ function normaliseKanjiClickOption() {
   } else if (kanjiSelection) {
     const selected = dictionaries.find((entry) => entry.title === kanjiSelection.title);
     const requestedKind = kanjiSelection.kind || (selected && hasCapability(selected, "kanji") ? "kanji" : "term");
-    if (!selected || selected.enabled === false || !hasCapability(selected, requestedKind)) {
+    if (!selected || !hasCapability(selected, requestedKind)) {
       options.kanjiClickDictionary = "";
       changed = true;
     } else if (kanjiSelection.kind === "") {
@@ -100,7 +100,8 @@ function renderFrequencyChoices() {
 
   const automatic = document.createElement("option");
   automatic.value = "";
-  automatic.textContent = "Any — automatic across all dictionaries";
+  // No sort dictionary: lookups keep your dictionary order, as Yomitan does without one (#575).
+  automatic.textContent = "None — dictionary order";
   select.appendChild(automatic);
 
   const enabled = dictionaries.filter(isAvailableFrequencyDictionary);
@@ -199,6 +200,9 @@ function renderMetadataControls() {
     furiganaStyle.disabled = !options.showPitchAccentFurigana;
     furiganaStyle.value = options.pitchAccentFuriganaStyle;
   }
+  // Each dictionary's tags beside the averages only means something with averages on.
+  const averageTags = element("opt-average-frequency-tags");
+  if (averageTags !== document.activeElement) averageTags.disabled = !options.averageFrequency;
 }
 
 function renderPopupImageSources() {
@@ -233,12 +237,13 @@ function renderFrequencyOrder() {
   }
   element("opt-frequency-auto").disabled = !selected;
   let hint;
-  if (options.frequencyOrder === "auto") hint = "Automatic compares all enabled frequency dictionaries in their listed order.";
+  const remembered = selected ? " Your dictionary choice is remembered." : "";
+  if (options.frequencyOrder === "auto") hint = `Automatic sorts by your dictionary order, as Yomitan does without a sort dictionary.${remembered}`;
   else if (options.frequencyOrder === "disabled") hint = "Frequency sorting is off. Your dictionary choice is remembered.";
   else if (!selected) hint = "Choose an available frequency dictionary to use this direction.";
-  else if (selected.frequencyMode === "rank-based") hint = "Rank-based: Auto puts the lowest numbers first.";
-  else if (selected.frequencyMode === "occurrence-based") hint = "Occurrence-based: Auto puts the highest numbers first.";
-  else hint = "No mode declared: Auto compares common and less-common Japanese words; inconclusive results use highest numbers first.";
+  else if (selected.frequencyMode === "rank-based") hint = "Rank-based: Auto direction puts the lowest numbers first.";
+  else if (selected.frequencyMode === "occurrence-based") hint = "Occurrence-based: Auto direction puts the highest numbers first.";
+  else hint = "No mode declared: Auto direction compares common and less-common Japanese words; inconclusive results read it as ranks, lowest numbers first.";
   const hintElement = element("frequency-order-hint");
   if (hintElement.textContent !== hint) hintElement.textContent = hint;
 }
@@ -267,7 +272,7 @@ async function applyFrequencyDirection() {
         });
         if (!reply.ok) throw new Error(reply.error || "The frequency lookup failed.");
         return reply;
-      }) ?? "descending";
+      }) ?? frequencyModeOrder(dictionary.frequencyMode);
     } catch (error) {
       if (!owns()) return;
       setOptionsStatus(`Could not infer frequency direction: ${describeErrorOrJson(error)}`);

@@ -1114,17 +1114,32 @@ packages recover it from their committed generation's index without a new schema
 or WebAssembly build.
 
 Selecting one enabled frequency dictionary saves its title and inferred direction
-in one existing options patch: `rank-based` selects ascending; `occurrence-based`
-or an undeclared mode selects descending. The explicit **Auto direction** button
+in one existing options patch: `rank-based` selects ascending and
+`occurrence-based` descending. For a dictionary that declares neither,
+`frequency-direction.js` compares common and less-common Japanese words through
+the engine, as Yomitan's `SortFrequencyDictionaryController` does; an
+inconclusive sample reads it as ranks and selects ascending. Wherever
+Hachidori has to give a missing `frequencyMode` one meaning (that fallback,
+blur's Automatic order and the popup's averages), it reads a rank list, as
+Yomitan's rank aggregates count it (`anki-note-data-creator.js:184` at
+yomidevs/yomitan@d3c54c1): CC100, BCCWJ and most other Japanese lists are ranks
+that predate the field. The Yomitan API reports the mode as `null`, and the Anki
+aggregate markers keep Yomitan's filter, which counts such a list for the rank
+and the occurrence markers alike. The original Innocent Corpus is the common
+exception: it counts occurrences without declaring it, so, as in Yomitan, its
+values average with the ranks, and its blur needs Descending chosen by hand. The
+direction sample still sorts it descending. The explicit **Auto direction** button
 reapplies that mapping. Manual directions remain unchanged during rendering,
 metadata updates and restart. These are numeric directions, not universally
 "common first" or "rare first" labels.
 
-**Any** selects the existing native automatic mode, comparing enabled frequency
-dictionaries in manifest order with numerically ascending values per dictionary.
-It does not reinterpret mixed occurrence/rank metadata. **Disabled** bypasses
-frequency ranking. Selecting Automatic or Disabled in the order control remembers
-the inactive selected dictionary; choosing Any explicitly clears that selection.
+**None** (no sort dictionary, an empty `frequencyDictionary`) leaves frequency
+out of lookup ranking: results keep the dictionary order, as Yomitan's do without
+a sort frequency dictionary (`translator.js:123-128` and `:2205-2211` at
+yomidevs/yomitan@d3c54c1, hoshidicts#43 for #575). The order control's
+**Automatic** does the same, and **Disabled** bypasses frequency ranking.
+Selecting Automatic or Disabled in the order control remembers
+the inactive selected dictionary; choosing None explicitly clears that selection.
 Only an explicit dictionary selection or Auto action derives a numeric direction.
 
 An unavailable choice remains visible until authoritative options change, with
@@ -1191,18 +1206,37 @@ dictionary order. Their wrapped rows grow with the collection. Visible
 frequency tags still count against the budget for the pitch badges after
 them.
 
-Averages retain GSM PR #549's floored harmonic mean, with two corrections for
-the standalone contract: arithmetic uses the native positive numeric value, not
-its display label, and rank, occurrence and unspecified dictionaries aggregate
-separately. Each dictionary contributes its first usable value once. Tags list
+Averages are Yomitan's: the floored harmonic mean of each dictionary's first
+value (`getFrequencyNumbers` and `getFrequencyHarmonic`,
+`ext/js/data/anki-note-data-creator.js:178-225` at yomidevs/yomitan@d3c54c1,
+which its popup's Average tag shows, `dictionary-data-util.js:107-125`). A
+value's number is the leading digits of its display value, else the value
+itself, when positive, so `312, 19896㋕` is 312; as in Yomitan, a display value
+written with thousands separators reads only its digits before the first
+comma. Only a dictionary's first value counts: one whose first value has no
+positive number adds nothing. `HDGlossary.frequencyMean` holds the rule, and the
+Anki `{frequency-harmonic-*}` and `{frequency-average-*}` markers use it too.
+`Avg rank` takes the dictionaries Yomitan's rank filter takes
+(`HDGlossary.frequencyModeMatches`: all but those declaring `occurrence-based`;
+a mode that is neither of Yomitan's two, which its index schema refuses, counts
+as none), so a card's FreqSort field is the popup's `Avg rank`. Declared occurrence counts
+aggregate separately from ranks, since a harmonic mean of ranks and counts is
+neither; Yomitan's popup Average mixes them. `Avg count` takes only declared
+occurrence lists, while the `{frequency-*-occurrence}` markers keep Yomitan's
+filter and so also count lists without a mode. A dictionary without a
+`frequencyMode` averages with the ranks, as Yomitan's rank average counts it,
+so Jiten (`rank-based`) and CC100 (no mode) give one `Avg rank`. An undeclared
+list of counts, such as the original Innocent Corpus, averages with the ranks
+too, as Yomitan's popup Average averages it. Tags list
 a dictionary's values in its own order, as Yomitan does, without moving `㋕`
-values forward, so a positive first value is the first one shown and the one
-averaged. Type labels
-remain visible as concise `Avg rank`, `Avg count`, or `Avg frequency` text even
+values forward, so the first value shown is the one averaged. Type labels
+remain visible as concise `Avg rank` or `Avg count` text even
 with source names hidden, and each aggregate carries `data-frequency-average`
-(`rank-based`, `occurrence-based` or `unspecified`). As in Yomitan, every tag
+(`rank-based` or `occurrence-based`). As in Yomitan, every tag
 that averages-off shows stays in the DOM after the aggregates, unchanged apart
-from the `hidden` attribute. Hidden tags take no layout or metadata display
+from the `hidden` attribute, unless **Show each dictionary's frequencies with
+the averages** (`showFrequencyTagsWithAverage`, off by default, so averages
+alone are Yomitan's) keeps them shown there. Hidden tags take no layout or metadata display
 budget, stay out of the accessibility tree and still follow alias renames.
 Custom CSS can reveal them with
 `.gsm-hoshidicts-tag-frequency[hidden] { display: inline-flex; }`; a result with
@@ -1268,8 +1302,8 @@ Native kanji entries remain outside term blur.
 The pure `definitionBlurFrequencyEvidence` helper is shared by the reader and
 Design preview. It accepts only positive finite native `frequency.value`
 numbers from the selected enabled dictionary; rendered labels are never parsed.
-Automatic order maps `rank-based` to ascending and occurrence-based or
-undeclared metadata to descending. Ascending compares the minimum value at or
+Automatic order maps `occurrence-based` to descending and `rank-based` or
+undeclared metadata to ascending. Ascending compares the minimum value at or
 below the threshold; descending compares the maximum value at or above it.
 Missing, disabled, unavailable and nonnumeric sources fail open.
 
@@ -2164,9 +2198,11 @@ dictionary path instead of reopening term and metadata dictionaries per click.
 The engine resolves that path from its own loaded set, so a disabled, missing or
 unloaded package answers nothing without a storage round trip per request.
 Frequency and pitch metadata still come from every loaded metadata dictionary.
-A missing, disabled or empty selected source falls back to native kanji. For an
-enabled native source with no matching entry, the already returned automatic
-entries supply that fallback without another request. A terminal native miss
+A disabled selected source keeps its saved title and capability, while lookups
+fall back to native kanji until it is enabled again. Removing the source or its
+selected capability clears the choice. A missing or empty selected source also
+falls back to native kanji. For an enabled native source with no matching entry,
+the already returned automatic entries supply that fallback without another request. A terminal native miss
 retires that popup level; a protected same-view Note refresh retains its draft.
 Obsolete replies cannot dismiss or replace a newer view.
 
@@ -2457,14 +2493,14 @@ Fit/Actual transforms the outer stage, whose size follows the configured popup
 with room for the sample sentence; resizing does not rebuild the sample.
 
 `reader-options.js` owns AUTO plus the audited 42-palette grouped catalogue (18
-dark, 23 light, one high-contrast), strict option validation, and the 32 Design
+dark, 23 light, one high-contrast), strict option validation, and the 33 Design
 reset keys. Fresh installs use AUTO and follow the live browser colour scheme;
 sparse upgrade profiles and explicit Hachidori choices keep the Hachidori
 palette. Other defaults are 560 × 420 px, 85% background opacity,
 one column, Automatic toolbar placement, summary off with three snippets and automatic sources, pitch
 contour/pitch badges/pitch dictionary names/pitch text and position/source highlighting on, the Contour
 furigana pitch style, and frequency
-names/abbreviation/averages, the pitch graph, pitch accent colours and grammar tags off. Reset writes those keys through the existing sparse revision CAS;
+names/abbreviation/averages, each dictionary's tags beside the averages, the pitch graph, pitch accent colours and grammar tags off. Reset writes those keys through the existing sparse revision CAS;
 Reading preferences, dictionaries, groups, and update policy are untouched.
 The default renderer's density comes from `--hd-*` custom properties declared on
 `.gsm-hoshidicts-popup` in `render/reader.css` (spacing steps, header, content

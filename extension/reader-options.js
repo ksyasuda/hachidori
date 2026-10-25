@@ -171,6 +171,9 @@
     // inline glyphs (em-sized or at most 32px square), "all" previews every image.
     imageHoverPreview: "large",
     averageFrequency: false,
+    // With averages on, Yomitan hides each dictionary's frequency tag; this
+    // keeps them shown after the averages instead.
+    showFrequencyTagsWithAverage: false,
     showFrequencyDictionaryNames: false,
     compactFrequencyNumbers: false,
     showPitchAccentFurigana: true,
@@ -258,7 +261,8 @@
   const DESIGN_OPTION_KEYS = [
     "popupTheme", "popupToolbarPosition", "customPopupCss", "customPopupJavascript", "customLinks", "customButtons", "popupWidthPx", "popupHeightPx", "popupScalePercent", "popupOpacityPercent", "sourceHighlightEnabled", "popupColumns",
     "glossaryLayoutMode", "showCompactDefinitionSummary", "compactDefinitionSummaryCount", "compactDefinitionSummaryDictionary",
-    "kanjiClickDictionary", "popupImageSource", "imageHoverPreview", "averageFrequency", "showFrequencyDictionaryNames",
+    "kanjiClickDictionary", "popupImageSource", "imageHoverPreview", "averageFrequency", "showFrequencyTagsWithAverage",
+    "showFrequencyDictionaryNames",
     "compactFrequencyNumbers", "showPitchAccentFurigana", "pitchAccentFuriganaDictionary", "pitchAccentFuriganaStyle",
     "showPitchAccentBadge", "showPitchAccentDictionaryNames", "showPitchAccentText", "showPitchAccentPosition", "showPitchAccentGraph",
     "showPitchAccentColors", "hidePopupGrammarTags",
@@ -591,9 +595,18 @@
   }
 
   // An empty blur dictionary means "Same as sorting": the Reading → Frequency
-  // sorting dictionary, which may itself be Automatic (no single dictionary).
+  // sorting dictionary, which may itself be None (no sort dictionary).
   function definitionBlurFrequencyDictionary(options) {
     return options.definitionBlurFrequencyDictionary || options.frequencyDictionary;
+  }
+
+  // The direction a dictionary's own mode implies: only a declared
+  // "occurrence-based" list counts up. A dictionary without frequencyMode is
+  // read as ranks, as Yomitan's rank aggregates read it
+  // (yomidevs/yomitan@d3c54c1 ext/js/data/anki-note-data-creator.js:184):
+  // CC100, BCCWJ and most other Japanese lists are ranks that predate the field.
+  function frequencyModeOrder(frequencyMode) {
+    return frequencyMode === "occurrence-based" ? "descending" : "ascending";
   }
 
   // Shared by the reader and the Design preview. Native numeric frequency
@@ -613,7 +626,7 @@
       .filter(value => typeof value === "number" && Number.isFinite(value) && value > 0);
     if (values.length === 0) return unavailable;
     const order = options.definitionBlurFrequencyOrder === "auto"
-      ? (source.frequencyMode === "rank-based" ? "ascending" : "descending")
+      ? frequencyModeOrder(source.frequencyMode)
       : options.definitionBlurFrequencyOrder;
     const value = order === "ascending" ? Math.min(...values) : Math.max(...values);
     return {
@@ -690,8 +703,8 @@
 
   const KANJI_SELECTION_KINDS = new Set(["term", "kanji"]);
 
-  // Groups keep their stable IDs through renames and membership edits; removed
-  // groups and removed or disabled dictionaries reset the clicked-kanji choice.
+  // Keep a disabled source selected so re-enabling it restores the same route.
+  // Removed groups, dictionaries or capabilities reset the clicked-kanji choice.
   function normaliseKanjiClickSelection(value, dictionaries, groups) {
     const selection = typeof value === "string" ? { title: value, kind: "" } : value;
     if (selection?.kind === "tabGroup") {
@@ -703,7 +716,7 @@
     if (!KANJI_SELECTION_KINDS.has(kind)) {
       kind = selected && hasCapability(selected, "kanji") ? "kanji" : "term";
     }
-    if (!selected || selected.enabled === false || !hasCapability(selected, kind)) return "";
+    if (!selected || !hasCapability(selected, kind)) return "";
     return KANJI_SELECTION_KINDS.has(selection.kind) ? value : { title: selection.title, kind };
   }
 
@@ -891,7 +904,7 @@
     activationLabel, clampOption, normaliseActivationKey, normaliseKanjiSelection, normaliseOptions,
     normaliseAnkiConnectUrl, normaliseAnki,
     normaliseCustomButtons, normaliseExperimental, ankiTemplateConfig,
-    definitionBlurFrequencyDictionary, definitionBlurFrequencyEvidence, definitionBlurQualifies,
+    definitionBlurFrequencyDictionary, definitionBlurFrequencyEvidence, definitionBlurQualifies, frequencyModeOrder,
     DEFINITION_BLUR_DIRECTIONS, DEFINITION_BLUR_REVEALS, DEFINITION_BLUR_FREQUENCY_ORDERS, IMAGE_HOVER_PREVIEWS,
     GLOSSARY_LAYOUT_MODES, PITCH_ACCENT_FURIGANA_STYLES, WORD_HIGHLIGHT_STYLES,
     projectStoredOptions, projectContentOptions, validateOptionsPatch, normaliseDictionarySelections,

@@ -363,12 +363,18 @@ async function settingsFrequencyStage() {
     const occurrence = await edit("dictionary", "Occurrence");
     const occurrenceHint = hint.textContent.startsWith("Occurrence-based:");
     await edit("dictionary", "Unknown mode");
+    // No sample word has a value, so inference is inconclusive: a rank list.
     const unknown = storedOptions.frequencyOrder;
+    const unknownHint = hint.textContent.endsWith("inconclusive results read it as ranks, lowest numbers first.");
     const any = await edit("dictionary", "");
-    const explicit = passive && manualKept && occurrenceHint && autoOrder === "ascending"
+    // Since #575 no sort dictionary means dictionary order, as in Yomitan.
+    const noneLabels = field("dictionary").options[0].textContent === "None — dictionary order"
+      && field("order").querySelector('option[value="auto"]').textContent === "Automatic — dictionary order"
+      && hint.textContent === "Automatic sorts by your dictionary order, as Yomitan does without a sort dictionary.";
+    const explicit = passive && manualKept && occurrenceHint && autoOrder === "ascending" && noneLabels
       && rank.frequencyDictionary === "Rank" && rank.frequencyOrder === "ascending"
       && occurrence.frequencyDictionary === "Occurrence" && occurrence.frequencyOrder === "descending"
-      && unknown === "descending" && any.frequencyDictionary === "" && any.frequencyOrder === "auto";
+      && unknown === "ascending" && unknownHint && any.frequencyDictionary === "" && any.frequencyOrder === "auto";
 
     sampledTerms.length = 0;
     sampling = "ascending";
@@ -542,6 +548,8 @@ async function settingsFrequencyStage() {
       ["opt-frequency-names", "showFrequencyDictionaryNames", false],
       ["opt-frequency-compact", "compactFrequencyNumbers", false],
       ["opt-average-frequency", "averageFrequency", false],
+      // Enabled once the averages above are on.
+      ["opt-average-frequency-tags", "showFrequencyTagsWithAverage", false],
       ["opt-pitch-badge", "showPitchAccentBadge", true],
       ["opt-pitch-names", "showPitchAccentDictionaryNames", true],
       ["opt-pitch-text", "showPitchAccentText", true],
@@ -553,7 +561,8 @@ async function settingsFrequencyStage() {
     ];
     const pitch = window.document.getElementById("opt-pitch-dictionary");
     let metadata = Boolean(pitch) && metadataFields.every(([id, , checked]) =>
-      window.document.getElementById(id)?.checked === checked);
+      window.document.getElementById(id)?.checked === checked)
+      && window.document.getElementById("opt-average-frequency-tags").disabled;
     const metadataDetails = [];
     if (metadata) {
       for (const [id, key, checked] of metadataFields) {
@@ -601,15 +610,18 @@ async function settingsFrequencyStage() {
       await editControl(frequencyBlur, true);
       metadataDetails.push(JSON.stringify(writes.at(-1).options) === JSON.stringify({ definitionBlurFrequencyEnabled: true })
         && !blurControl("definition-blur-frequency-controls").hidden && !frequencyDictionary.disabled
-        // Same as sorting follows this page's sort dictionary, which declares no mode.
+        // Same as sorting follows this page's sort dictionary, which declares no
+        // mode, so it reads as ranks: lowest values qualify.
         && frequencyDictionary.value === "" && frequencyDictionary.options[0].textContent === "Same as sorting (Unknown mode)"
-        && blurControl("definition-blur-frequency-help").textContent.includes("Using undeclared metadata")
+        && blurControl("definition-blur-frequency-help").textContent
+          === "Using ranks (no mode declared): values at or below the threshold qualify. If this list counts occurrences instead, choose Descending."
         && !blurControl("definition-blur-any-help").hidden);
       await editControl(frequencyDictionary, "Occurrence");
       metadataDetails.push(JSON.stringify(writes.at(-1).options)
         === JSON.stringify({ definitionBlurFrequencyDictionary: "Occurrence" })
-        && blurControl("definition-blur-frequency-help").textContent.includes("occurrence-based metadata")
-        && blurControl("definition-blur-frequency-help").textContent.includes("at or above"));
+        // A declared mode gets no "counts occurrences instead" note.
+        && blurControl("definition-blur-frequency-help").textContent
+          === "Using occurrence-based metadata: values at or above the threshold qualify.");
       const beforeUnavailable = writes.length;
       emitDictionaries({ enabled: false, displayName: "Dormant occurrence" }, "Occurrence");
       metadataDetails.push(frequencyDictionary.value === "Occurrence"
@@ -669,9 +681,17 @@ async function settingsFrequencyStage() {
       metadataDetails.push(JSON.stringify(writes.at(-1).options)
         === JSON.stringify({ definitionBlurFrequencyOrder: "ascending" })
         && blurControl("definition-blur-frequency-help").textContent.includes("at or below"));
+      // With no sort dictionary, Same as sorting has no dictionary to read.
+      emitOptions({ frequencyDictionary: "", definitionBlurFrequencyDictionary: "" });
+      metadataDetails.push(blurControl("definition-blur-frequency-help").textContent
+        === "Sorting uses no frequency dictionary, so choose one here. Missing frequency data leaves this condition unqualified.");
+      emitOptions({ frequencyDictionary: "Unknown mode", definitionBlurFrequencyDictionary: "Occurrence" });
       await editControl(focusedFrequencyThreshold, "0");
       metadataDetails.push(focusedFrequencyThreshold.value === "1"
-        && JSON.stringify(writes.at(-1).options) === JSON.stringify({ definitionBlurFrequencyThreshold: 1 }));
+        && JSON.stringify(writes.at(-1).options) === JSON.stringify({ definitionBlurFrequencyThreshold: 1 })
+        // Nor does a manual order.
+        && blurControl("definition-blur-frequency-help").textContent
+          === "Using your manual order: values at or below the threshold qualify.");
       await editControl(countBlur, true);
       metadataDetails.push(!blurControl("opt-blur-direction").disabled && !blurControl("opt-blur-delay").disabled);
       await editControl(blurControl("opt-blur-direction"), "below");
