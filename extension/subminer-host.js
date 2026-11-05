@@ -26,6 +26,11 @@
       host?.setAttribute("data-subminer-yomitan-popup-host", "true");
       host?.setAttribute("data-subminer-yomitan-popup-visible", String(visible));
     },
+    // Attention also covers a plain press, and the popup's closed shadow root
+    // hides its panes from the page, so publish whether one is on screen.
+    markPopupOpen(host, open) {
+      host?.setAttribute("data-subminer-hachidori-popup-open", String(open));
+    },
     lookup() { emit("subminer-yomitan-lookup"); },
     popup(popup) {
       popup.addEventListener("mouseenter", () => emit("yomitan-popup-mouse-enter"));

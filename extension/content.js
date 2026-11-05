@@ -557,7 +557,9 @@
   // the window the same way, or the host would stop reporting it mid-hold.
   // Child popups that wait for it are in a popup, which holds the claim already.
   function syncHostAttention() {
-    const wanted = Boolean(rootLevel.popup && !rootLevel.popup.hidden) || selectionDragActive
+    const popupOpen = Boolean(rootLevel.popup && !rootLevel.popup.hidden);
+    globalThis.SubMinerHachidori?.markPopupOpen(host, popupOpen);
+    const wanted = popupOpen || selectionDragActive
       || hostAttentionHold > 0 || pendingCandidateLookup?.candidate?.exactSelection === true
       || (activationPressed && options.lookupMode !== "hover" && activationButton() !== null);
     if (wanted === hostAttentionPublished) return;
