@@ -175,7 +175,21 @@ async function designPreviewStage() {
     update();
     await settle();
     blur &&= blurState() === "blurred";
-    options = { ...options, definitionBlurFrequencyEnabled: false };
+    // On click only (#598): hover leaves the sample blurred; its card is the
+    // button and the list it reveals is inert until then.
+    options = { ...options, definitionBlurReveal: "click" };
+    update();
+    await settle();
+    const revealButton = query(".gsm-hoshidicts-glossary-card");
+    blur &&= blurState() === "blurred" && revealButton.getAttribute("role") === "button"
+      && revealButton.getAttribute("aria-label") === "Reveal definitions" && revealButton.tabIndex === 0
+      && query(".gsm-hoshidicts-definitions").hasAttribute("inert");
+    query(".gsm-hoshidicts-definitions").dispatchEvent(new window.MouseEvent("mouseover", { bubbles: true }));
+    blur &&= blurState() === "blurred";
+    revealButton.click();
+    blur &&= blurState() === "revealed" && !revealButton.hasAttribute("role") && !revealButton.hasAttribute("tabindex")
+      && !query(".gsm-hoshidicts-definitions").hasAttribute("inert");
+    options = { ...options, definitionBlurFrequencyEnabled: false, definitionBlurReveal: "hover" };
     update();
     await settle();
     blur &&= blurState() === "revealed";
@@ -240,7 +254,7 @@ async function designPreviewStage() {
     update();
     kanjiSource &&= JSON.stringify([...popup.querySelectorAll('[role="tab"]')].map(tab => tab.textContent))
       === JSON.stringify(["All", "Second", "Unrelated renamed dictionary"])
-      && JSON.stringify([...popup.querySelectorAll(".gsm-hoshidicts-glossary-card-title")].map(title => title.title))
+      && JSON.stringify([...popup.querySelectorAll(".gsm-hoshidicts-dictionary-tag")].map(tag => tag.title))
         === JSON.stringify(["Second", "First"])
       && popup.textContent.includes("ショク · ジキ") && popup.textContent.includes("sample single-kanji entry")
       && query("form") === kanjiNote;

@@ -235,6 +235,124 @@ Its `deep-nesting-*` scans hover 深層, whose gloss sits under 40 nested
 elements, alternating with the flat entries (`deep-nesting-flat-*`); compact
 summaries are on, so those timings include the summary walkers.
 
+## Large popups in every theme with a second profile
+
+`theme-languages.mjs` measures the large-popup case of
+[docs/languages.md](../docs/languages.md) section 19: 32 results, each with its
+Jitendex entry and two short monolingual entries, in every theme on a
+`lang="ja"` page. It compares a before checkout with an after checkout in the
+single-profile shape and with a second profile (a marked Japanese language,
+whose labelling pass runs). A sample follows content.js: `show()` resets the
+scroll, the theme renders, and the first placement reads the word's rectangle,
+which lays out the document. `first` ends at a forced layout after that;
+`complete` ends when the popup has not changed for three frames, so it also
+covers Default's deferred fills. The conditions alternate in rotating order on
+one browser, with 3 warmups and `HACHIDORI_BENCH_SAMPLES` (15) measurements
+each; `HACHIDORI_BENCH_THEMES` picks themes. Run it once with the host's fonts
+and once with `FONTCONFIG_FILE` naming a configuration that has the themes'
+named fonts.
+
+```sh
+node benchmark/theme-languages-sample.mjs path/to/hoshidicts-cli \
+  "path/to/Jitendex.org [2026-10-03]" /tmp/jitendex-32.json
+node benchmark/theme-languages.mjs /tmp/theme-languages /path/to/before /path/to/after /tmp/jitendex-32.json
+```
+
+The timings exclude lookup, messaging, images and paint; the hover harness
+measures input to frame.
+
+## Engine start and profile switch with other languages
+
+`engine-start.mjs` closes Chrome and starts it again on the retained profile,
+then times the launch to the first correct `hd_lookup` from an empty extension
+page, for several checkouts in rotating order (docs/languages.md 19). A
+variant is `name=checkout[:codes]`: `--archive` is imported into the Japanese
+profile and a profile is added for each listed language (`hd_profile_add`),
+whose pack `reconcile` loads at every start; `en+` also imports
+`--language-archive en=…` into that profile. The extension runs as a copy whose
+`engine-service.js` records in the engine worker when it started, created the
+WebAssembly module, reconciled (the packs' load inside it) and published (the
+warm-up lookup inside it), and how long its first engine calls took; `hd_memory`
+returns the record as `bench`. The built-in Japanese pack loads in the call
+that first builds the engine (`hdw_reset`), or in the first `hdw_language_load`
+when another pack loads first. A start whose first lookup gets no correct reply
+within 30 s is recorded as failed and the run goes on.
+
+```sh
+node benchmark/engine-start.mjs --archive /path/to/jitendex.zip --output /tmp/engine-start.json \
+  --variant before=/path/to/base --variant after=. --variant after-en-ar=.:en,ar \
+  --variant three=.:en+,ar+ --language-archive en=/path/to/kty-en-en.zip \
+  --language-archive ar=/path/to/kty-ar-en.zip --sessions 3 --restarts 8
+```
+
+The launch-to-lookup time includes Chrome's start; the worker's record does
+not. Low memory mode's recycle and a memory option change start a worker the
+same way, without the browser launch.
+
+`profile-switch.mjs` imports a Japanese and an English dictionary into their
+own profiles, then switches between them from `toolbar.html` and hovers a word
+of the new language with `hover-popup-probe.js` in the content script. Each
+switch records the click (toolbar clock), when the reading page's content
+script saw `languageSelection` change, input to the first and complete
+popup, the `hd_lookup` round trip and the theme's synchronous render time of
+the first hover, and of `--hovers` more in the same profile. Every hover starts with the popup hidden (Escape), so
+the first hover after a switch compares with the others on equal terms. The
+click-to-popup time also holds the harness's own wait for the change and its
+pointer move; the hover-popup harness's settings apply.
+
+```sh
+HACHIDORI_BENCH_REPO=. node benchmark/profile-switch.mjs /tmp/profile-switch.json \
+  --archive ja=/path/to/jitendex.zip --archive en=/path/to/kty-en-en.zip \
+  [--words en=house,running] --sessions 3 --switches 20 --hovers 3
+```
+
+`node-lookup.mjs` times another language's `hdw_lookup` in Node with
+`HACHIDORI_LOOKUP_LANGUAGE`: it loads that pack, takes a dictionary archive
+(imported in MEMFS) or an imported directory, and looks up every word of a file
+of sentences the way a hover on it would: from the word's first character
+through content.js's scan window, extended to the end of the last word.
+
+```sh
+HACHIDORI_LOOKUP_LANGUAGE=en node benchmark/node-lookup.mjs /path/to/kty-en-en.zip sentences-en.txt /tmp/en.json
+```
+
+## Entry moves on Alt+ArrowDown/ArrowUp (#597)
+
+`entry-keybind.mjs` times Go to next and previous entry in the real extension:
+keys sent through CDP's Input domain to a hover popup of a real dictionary's
+results, and the popup's scroll pane read from the page every animation frame.
+
+```sh
+git archive origin/main extension | tar -x -C /tmp/main
+HACHIDORI_KEYBIND_ARCHIVE=/path/to/jitendex-yomitan.zip \
+  node benchmark/entry-keybind.mjs /tmp/entry-keybind main=/tmp/main/extension branch=extension
+```
+
+Each `name=path` is an extension directory; every round
+(`HACHIDORI_KEYBIND_ROUNDS`, 5) gives each a fresh profile, alternating their
+order. The archive is imported and the word (`HACHIDORI_KEYBIND_WORD`, きかん)
+hovered, and once every result has rendered, with Alt held:
+
+- single presses: ArrowDown tapped ten entries down, then ArrowUp back to the
+  first, 200 ms apart;
+- held: ArrowDown from the first entry, then ArrowUp from ten entries down,
+  each held for 1.5 s as an operating system repeats it: a 500 ms delay, then a
+  keydown with `repeat` every 33 ms.
+
+A keydown's latency runs from its timestamp to the end of the main thread's
+work for the first frame after its handlers, when that frame shows the pane at
+another entry. It is split into the wait for the main thread, the handlers, the
+wait for the frame and its rendering; Event Timing's duration to the next paint,
+which Chrome reports from 16 ms, is kept beside it. Single presses must land on
+each entry's header. A held key reports its keydowns, how many were handled
+(`prevented`) and how many moved the pane. The keys carry `isSystemKey`, as Alt
+combinations do on Windows and Linux. macOS does not mark Option+ArrowDown, and
+Blink pages an unhandled one down, so a last hold of ArrowDown from the first
+entry goes without it and records how far the page scrolled (`heldMacOS`).
+`raw.json` keeps every keydown and `summary.json` pools the rounds.
+Presentation after the main thread's frame, a physical keyboard's own repeat
+timing and other renderers are outside it.
+
 ## Content-script injection per frame
 
 `content-injection.mjs` measures what the manifest's content scripts cost every
@@ -593,11 +711,24 @@ lookup texts, one per line, is looked up `--passes` times (default 2),
 recording each pass's distribution, an FNV-1a hash of every reply's results
 (identical across variants when lookups are unchanged), the page cache and the
 heap after the last. RSS needs Linux `/proc` and reads 0 elsewhere. Peak import
-RSS is not sampled; the standard runner above does that.
+RSS is not sampled; the standard runner above does that. Beside the summed
+process-tree RSS, each row keeps the extension renderers' own RSS, PSS and USS
+(`extensionAfterImport`, `restart.extension`; the offscreen document with its
+engine worker lives in one of them) and the engine's live allocated bytes
+(`hdw_memory_stats`), which, unlike the heap, show what loading needs without
+the heap's growth steps.
+
+`--profile-archive en=/path/to/kty-en-en.zip` measures a library with another
+language (docs/languages.md 19): after the archives above, the sample adds an
+English profile (`hd_profile_add`, copying the Japanese settings) and imports
+that archive into it through Settings opened for the profile, so the heap and
+RSS hold every profile's dictionaries and the loaded packs. The lookups stay in
+the Japanese profile. Each row's `profileImports` has the import times.
 
 ```sh
 node benchmark/low-memory-mode.mjs --archive /path/to/jitendex.zip \
   [--archive /path/to/pixiv.zip ...] [--words hovers.txt --passes 5] \
+  [--profile-archive en=/path/to/kty-en-en.zip ...] \
   [--variants resident,auto,paged,low] \
   --samples 3 --output benchmark/results/low-memory-mode.json
 ```
@@ -698,6 +829,42 @@ The comparison output keeps per-run import timings, every measured per-query
 latency and semantic response hash, engine-specific production-path evidence,
 input identities before and after every cell, the exact schedule, validation
 verdict, summary, CSV, report, and a checksum manifest.
+
+## Hachidori vs Yomitan on JMdict
+
+`jmdict-lookup.mjs` compares Hachidori and Yomitan alone on one real
+dictionary, each on its shipped defaults (16-character scan, 32 results). It
+reuses the `hachidori.mjs` and `yomitan.mjs` adapters above without JL:
+
+```bash
+gh release download -R yomidevs/jmdict-yomitan -p JMdict_english.zip
+gh release download -R yomidevs/yomitan -p yomitan-chrome.zip
+node benchmark/jmdict-lookup.mjs --jmdict JMdict_english.zip \
+  --yomitan yomitan-chrome.zip --output /tmp/jmdict-lookup
+```
+
+The lookups imitate reading: one starts at each character of a few
+public-domain and everyday sentences, except at 、 and 。, and scans up to the
+next 16 characters, as a hover would; a scan that repeats an earlier one is
+dropped. Every sample imports the archive into a fresh profile through
+Settings, then times five passes after one excluded warmup pass. Defaults are
+one excluded warmup install and five measured installs per reader
+(`--warmups`, `--samples`, `--passes`). Each sample's lookups go through the
+lookup checks `compare.mjs` uses: 食べる and 食べたかった must find 食べる, 日本
+must find 日本 and the emoji nothing, and every pass must return the warmup
+pass's results.
+A failed attempt is recorded in `failures.jsonl`, keeps its profile for
+diagnosis and is repeated in a fresh profile, up to six attempts per cell each
+time the command runs. A successful attempt's profile is deleted once its row
+is in `raw.jsonl`. Rerunning the command resumes from `raw.jsonl`, numbering a
+cell's new attempts after those in `failures.jsonl`, and ends with
+`summary.json` and `summary.md`; `--summarize-only` rewrites them. Resuming
+compares nothing with `definition.json`, so resume only with the same
+checkout, archives, browser and options.
+`HACHIDORI_CHROME` and `HACHIDORI_PUPPETEER` choose the browser and Puppeteer
+as for the other suites. The
+[report](../docs/benchmarks/jmdict-lookup.md) uses the run kept in
+`results/jmdict-lookup/`.
 
 ## Custom real-corpus configuration
 
@@ -884,7 +1051,11 @@ across passes and browser samples; their `n` is not the independent process
 sample count shown for import/restoration. The report records load averages and
 Linux CPU, memory, and I/O pressure at both ends so noisy runs remain auditable.
 Process RSS/CPU sampling is every 50 ms, so a descendant that both starts and
-exits between samples can be missed. CPU is reported in Linux clock ticks and
+exits between samples can be missed. A sample reads `/proc/<pid>/stat` only for
+processes listed since the previous sample and reads RSS only for the tree's
+members, so on a host with many processes it stays well under the interval
+instead of stalling the harness's own event loop (and every timing it drives).
+CPU is reported in Linux clock ticks and
 `run-definition.json` records ticks per second.
 
 The hard lifecycle invariant is independent of speed:

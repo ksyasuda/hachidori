@@ -1,7 +1,31 @@
 # Architecture
 
 Hachidori uses a WebAssembly dictionary engine in a Chrome Manifest V3
-extension, with a service worker and offscreen document.
+extension, with a service worker and offscreen document. The Firefox build runs
+the same code in a background page that holds the offscreen document in a
+frame; [Firefox](firefox.md) describes what differs.
+
+The reader popup uses a closed shadow root, so neither page scripts nor
+extensions such as Dark Reader (or a site's own dark theme built on its
+library) can rewrite its palette, dictionary styles or Custom CSS. Saved
+**Design → Custom JavaScript** still reaches the popup through `host.shadowRoot`.
+The service worker registers `custom-javascript-bridge.js` ahead of that code
+in the same user-script world. When the reader builds its host it dispatches
+`hachidori-popup-root` on it, the bridge attaches the closed root from that
+world and returns it to those scripts alone, and the reader reads it back with
+`chrome.dom.openOrClosedShadowRoot` (Chrome) or `openOrClosedShadowRoot`
+(Firefox). Where user scripts do not run (Chrome's Allow User Scripts switch
+is off, Firefox has not granted them, in frames and on extension pages) the
+reader attaches the closed root itself. The host waits for the reader's first
+read of the stored options, so a lookup that starts before them still gets the
+right root. A script added or changed runs from the reading page's next load.
+If a lookup builds the popup before the page's user scripts have run, the
+reader attaches its own closed root, and saved scripts cannot reach that popup
+until the page loads again. The Design preview remains open inside its
+extension page. The [search page](#search-page) runs the same script in its
+sandboxed frame, in the reader's own world, where nothing but the extension
+can reach the popup, so the reader there attaches an open root while Custom
+JavaScript is saved.
 
 ## Runtime layout
 
@@ -9,7 +33,7 @@ extension, with a service worker and offscreen document.
 web page
   └─ content.js, with content-scan.js and content-dictionaries.js
        ├─ scans Japanese text near the pointer
-       ├─ renders the popup in a closed shadow root
+       ├─ renders the popup in an isolated shadow root
        └─ appends popup Note entries to the managed custom source
 
 settings.html / content.js
@@ -235,6 +259,23 @@ automatic backup or invalidate its protected dictionary roots.
 Linking clears the local automatic-backup alarm and suppresses snapshots of the
 host mirror while retaining the local index. Unlink restores the kept local
 state before reconciling local snapshots and scheduling again.
+
+With language profiles ([languages.md](languages.md) 17.2,
+[backup format](backup-format.md#version-4-languages)), `readBackupPayload`
+returns the installation's Japanese view (`extension/japanese-view.js`) as
+the six-key snapshot, beside `profiles` with the complete options and
+dictionary state and every other language's document, marks and lookup rows
+(`profileBackupPayload` in `backup-state.js`). Archives become version 4,
+automatic records keep the same three parts, and `hd_backup_auto_roots`
+returns the packages of both parts. `prepareBackupProfiles` decides what a
+restore keeps for this build's packs; the engine stages the archived
+generations, compiles other languages' personal packages from their documents
+into fresh generations (or, for an automatic record, validates the retained
+ones in place), strict-loads the union, and `restoredBackupSnapshot` builds
+the records the same transaction commits. `hd_backup_cas` checks them as a
+backup again, with every language's document revision and count generation,
+and writes them with each language's rows in one storage write. The engine
+loads the restored profiles' packs before it publishes.
 
 ## Managed update cycle
 
@@ -553,7 +594,8 @@ unchanged. Its sources and copyright declaration are recorded in
 dialogue surface that grows with its text at narrow widths.
 
 The practice view loads the reader once after proving the exercise can be
-answered. `startup.js` takes the complete dependency order from the manifest's
+answered. `reader-page.js`, which the search page shares, takes the complete
+dependency order from the manifest's
 `content_scripts` entry through `chrome.runtime.getManifest()`, skipping only
 `reader-options.js`, which the startup module already loaded. This includes
 new reader dependencies without maintaining
@@ -572,7 +614,9 @@ exact selection can be answered. All exercise lookups use ordinary
 runtime messages, the installed dictionaries, WASM, popup renderer and styles.
 No sample result is substituted. Among extension pages the reader permits only
 this extension’s `startup.html`, with either no fragment or the native skip
-link's `#setup-heading`. Query variants, unknown fragments, Settings and the
+link's `#setup-heading`, and the search page's `search-frame.html`
+([Search page](#search-page)).
+Query variants, unknown fragments, Settings and the
 static design preview remain excluded. The skip handler focuses the heading
 directly; a fragment created before it attaches still works after reload.
 
@@ -816,32 +860,34 @@ full browser restart without reloading the engine.
 `options.keybinds` copies yomitan-gsm's hotkey entries exactly: `action`,
 `argument`, `key` (a `KeyboardEvent.code`, `WheelUp`/`WheelDown` for a wheel
 step, or `null` for modifiers only), `modifiers`, `scopes` and `enabled`. Only
-actions that map onto an existing Hachidori control are offered. Close, entry
-and dictionary navigation, Back, Add note, View notes, Play audio, Play audio
-from source, Scan selected text, Scan text at selection and Toggle option are
-available, and Hachidori's own Toggle word highlights, in the page scope, which
+actions that map onto existing Hachidori behaviour are offered. Close, entry
+and dictionary navigation, Back and Forward, Add note, View notes, Play audio,
+Play audio from source, Scan selected text, Scan text at selection and Toggle
+option are available, and Hachidori's own Toggle word highlights, in the page scope, which
 shows or hides [word highlighting](#word-highlighting)'s marks in a frame, and
 Mark word as known and Ignore word, which [set the current entry's
 word](#mark-as-known-and-ignore) for those marks and have no default key. The
 defaults are Yomitan's keys for those actions: Escape,
 Alt+PageUp/PageDown (three entries), Alt+ArrowUp/ArrowDown, Alt+Home/End, Alt+B,
-Alt+E, Alt+P and Alt+V. Two rows follow them, Alt+WheelUp/WheelDown (one
+Alt+F, Alt+E, Alt+P and Alt+V. Two rows follow them, Alt+WheelUp/WheelDown (one
 entry): Yomitan's popup moves one entry per Alt+wheel event outside its
 hotkeys, so here that gesture is an ordinary binding.
 
 Several Yomitan actions are omitted because Hachidori has no matching feature:
 
-- forward history
 - profiles
-- the search page and its box
+- the search scope's Focus search box, which the [search page](#search-page)
+  does itself on Escape
 - card-format arguments
 - copying the host selection, which the in-page popup never needs
 - caret scanning inside editors
 
-The content script matches a fresh keydown's physical code and exact modifier
-set as Yomitan's `HotkeyHandler` does. The first enabled binding in scope that
-handles the key prevents its default. Unmodified or Shift-only character keys
-stay with a focused text field, and auto-repeat remains ignored.
+The content script matches a keydown's physical code and exact modifier set as
+Yomitan's `HotkeyHandler` does. The first enabled binding in scope that handles
+the key prevents its default. Unmodified or Shift-only character keys stay with
+a focused text field. Yomitan also takes every auto-repeat, so holding
+Alt+ArrowDown keeps moving between entries; here an auto-repeat runs only the
+entry and dictionary moves, and every other action still ignores it.
 
 A wheel step over a popup is matched the same way, with its vertical direction
 as the key, and acts on that popup rather than the deepest one, as Yomitan's
@@ -856,7 +902,12 @@ isolation, and Ctrl+wheel stays with the browser unless it is bound.
 
 Yomitan's popup scope means a popup that has focus. Hachidori's hover popup never
 takes focus, so here the popup scope means a popup is open or its lookup is
-pending. The page scope applies anywhere. Settings offers the scopes Yomitan's
+pending. The page scope applies anywhere. The search scope is the search
+page's own keys ([search history](search-history.md#keys)): Up and Down walk
+its box's history, and in its searched text the arrows move the cursor and
+Enter runs Add note, while Advanced → Search history is on. Its default rows
+are the plain arrows and Enter, and a keybind list saved before the scope
+existed gains them when read. Settings offers the scopes Yomitan's
 controller offers for each action. Toggle option adds the page scope, because no
 popup exists while lookups are off.
 
@@ -868,9 +919,15 @@ later entries through the existing Show more control. Entry navigation scrolls t
 target's own header just under the popup's header. Dictionary navigation moves
 from the most visible glossary card to the nearest card from another dictionary.
 Add note, View notes and Back click the current entry's existing buttons, so
-duplicate and disabled behavior is unchanged. Audio replays without
-the click toggle, or plays the first choice from the selected source. Toggle
-option writes one boolean through the revisioned options CAS.
+duplicate and disabled behavior is unchanged. Forward reopens the view the last
+Back left ([clicked-kanji navigation](#clicked-kanji-navigation-and-back)).
+Back without a Back control and Forward with nothing ahead leave the key to the
+page. Yomitan's popup takes Alt+B and Alt+F even then, because its history
+handlers return nothing, which its `HotkeyHandler` counts as handled. With the
+popup scope meaning an open popup, doing the same here would take Alt+F, which
+also opens Chrome's menu on Windows and Linux, whenever a popup shows. Audio
+replays without the click toggle, or plays the first choice from the selected
+source. Toggle option writes one boolean through the revisioned options CAS.
 
 The Default popup's header shows the result being read: the last result whose
 own header has scrolled above the definitions, or the first result (#488). In
@@ -899,10 +956,13 @@ Hachidori has:
 - Turn Japanese lookups on or off, suggested as Alt+Delete like Yomitan's
   Toggle text scanning.
 - Open Hachidori settings, unassigned.
+- Yomitan's three ways to open the [search page](#search-page): in a new tab,
+  suggested as Alt+Insert like Yomitan's, in the current tab and in a popup
+  window, both unassigned.
 - One unassigned command for each popup keybind action that needs no chosen
   argument: Close, Add to Anki, View in Anki, Play audio, the entry and
-  dictionary moves, Back, the two selection scans, Toggle word highlights,
-  Mark word as known and Ignore word.
+  dictionary moves, Back, Forward, the two selection scans, Toggle word
+  highlights, Mark word as known and Ignore word.
 
 The worker toggles `hoverEnabled` inside its storage queue with the same
 revisioned options write as the toolbar switch. A popup-action command goes to
@@ -923,6 +983,240 @@ and opens `chrome://extensions/shortcuts`.
 ![Browser shortcuts listed in Keybinds](assets/settings-browser-shortcuts.png)
 
 ![Keybinds in Settings with Yomitan's default bindings](assets/settings-keybinds.png)
+
+## Search page
+
+`search.html` is Yomitan's search page and popup window (#610): somewhere to
+look up a word met outside a web page, such as on an Anki card. Type or paste it
+into the box and press Enter or the Search button; Shift+Enter starts a new
+line. It follows yomidevs/yomitan@d3c54c1 `ext/search.html` and
+`ext/js/display/search-display-controller.js`.
+
+**Opening it.** Yomitan's three browser shortcuts open it in a new tab
+(suggested as Alt+Insert, as in Yomitan), in the current tab or in a popup
+window. **Search**, beside **Settings** in the toolbar button's menu, opens it as
+the first does. **Settings → Reading → Search page → Show Search in the toolbar
+menu** (`showToolbarSearchButton`) hides that button; it is on by default
+because the issue's owner asked for it there. As Yomitan's backend does
+(`_onCommandOpenSearchPage`, `_onCommandOpenSearchPageCurrentTab` and
+`_getOrCreateSearchPopup`), a search page that is already open comes to the
+front instead of a second one opening: the new-tab and current-tab ways take
+any open search page, the popup window only one in a popup window.
+`search-window.js` holds this for the worker's shortcuts and the menu, and
+finds the open pages with `runtime.getContexts` because tabs hide extension
+URLs. The popup window is 600 × 640 by default, larger than Yomitan's
+400 × 250, so that Design's default popup fits in it. **Settings → Reading →
+Search page → Popup window width** and **Popup window height**
+(`searchWindowWidthPx`, `searchWindowHeightPx`, #656) set its size, as
+Yomitan's Popup window → Size does (`popupWindow.width` and `height`), from
+200 to 16,384 pixels. Chrome fits a larger window to the screen. Firefox does
+not: it opens a window asked to be larger than 16,384 pixels at 16,384, and one
+asked to be 2^31 − 1 pixels wide at its 95-pixel minimum.
+
+**Appearance.** The page follows the popup theme as Settings does:
+`settings-theme.js` applies the saved theme before the first paint and
+`applyPageTheme` follows later changes. Under a bundled renderer (Nazeka,
+Plain, JL, Bee or Crystal) the page keeps Default's palette, as Settings does.
+
+**Results.** The page loads the reader into itself with `reader-page.js`, as
+the startup page does, and the reader docks its root popup over the page's
+results area before its first lookup, with its host inside that area (the
+page's Results landmark). A search shows the box's text above the results, as
+Yomitan shows its query, and looks it up from its first character, as a hover
+there would, after any brackets, punctuation, spaces or wave dash (〜 or ～) it
+opens with: a pasted line such as 「食べたかった」 looks up 食べたかった, and
+～ている looks up ている rather than the grammar dictionary's ～ている
+pointer. Its other words can then be looked up like any page text. Mining
+takes the sentence around the word from that text, cut at its terminators as
+on a page, where Yomitan's search page takes the whole query. A word typed
+alone is its own sentence, as in Yomitan, so a new note gets the word there,
+while updating an existing note from it leaves the note's sentence and
+screenshot fields as they are (#655; see [Anki submission](#anki-submission)). The docked popup is the reader's own, with its renderer,
+tabs, Anki and pronunciation controls, Notes and child popups. It fills the
+results area, follows its size and has no resize grip. A search ignores
+**Japanese text only** and the lookup switch, since the reader asked for it;
+looking up the page's text by hover still follows both. A search that finds
+nothing says **No definition found.** in the results area, with the pencil
+while the personal dictionary is on, and one that fails says **The lookup
+failed.** with **Try again**.
+
+**Clicking words.** **Settings → Reading → Search page → Look up words with a
+click** (`searchClickLookup`, #656) is off by default, as Yomitan's **Search
+terms when clicking text from the results list** (`scanning.enablePopupSearch`,
+yomidevs/yomitan@ac1d839 `ext/data/schemas/options-schema.json`) is. While it
+is on, a primary click on a word of the query above the results shows that
+word's results in the results area, as a click in Yomitan's query parser does
+(`ext/js/display/query-parser.js`, `searchOnClick`), and a click on a word in
+the results opens it in a child popup, as **Child popups → Click a word** does
+elsewhere; Yomitan replaces its results with the clicked word's instead, with
+its history to go back. Without the option those words wait for the
+activation key, as page text does, and with it the key still works. The click
+looks the word up as the key would: from the clicked character, with
+**Japanese text only**, also while lookups are off, as a search is. A press
+that travels 3 pixels or more, or that leaves a selection, is a copy and looks
+nothing up; links, buttons and disclosures in the results keep their own click;
+a Note being written or saved keeps the result; and a click on the word
+already shown looks nothing up again. A **Toggle option** keybind can switch it.
+
+**Dismissal.** The docked result is the page's content rather than a popup over
+a word, so what would close a popup closes only the child popups opened from
+it: a click outside, the pointer leaving, the hide delays, a changed selection
+or a click into a frame. Escape first closes a Note form, a menu or a child
+popup, as everywhere, and then goes on to the page, which focuses and selects
+the box, as Yomitan's search-scope Focus search box hotkey does on Escape. As
+on Yomitan's search page, a character typed while focus is outside a text field
+or control goes into the box, Ctrl+U clears the box, and text pasted outside a
+text field is searched. The popup's own controls and Note form keep their keys,
+Ctrl+U included, and pastes: its shadow root is closed, so the page treats
+focus anywhere in the reader's host as the popup's.
+
+**Staying current.** A lookup sent for the docked result finishes even when
+the pointer moves on. A dictionary change or a lookup option change looks the
+docked result up again with the current options, as Yomitan's search page
+searches again when its options change (`Display.searchLast`). It stays the
+same request, so its lookup count does not go up; a Note being written, or
+being saved, holds the refresh until it is done. The worker sends the search page's pronunciation
+progress and takes its mining screenshots as it does the startup page's
+(`readerPageSender`): an extension page's messages may come without its tab,
+and tabs hide its URL.
+
+**Clipboard monitor.** The **Clipboard monitor** switch at the top of the page
+is Yomitan's search page clipboard monitor (#639; yomidevs/yomitan@ac1d839
+`ext/js/comm/clipboard-monitor.js`, `clipboard-reader.js` and
+`ext/js/display/search-display-controller.js`). It is off by default. While it
+is on, `search-clipboard.js` reads the clipboard every 250 ms, and text copied
+in any tab or program goes into the box and is searched as a paste is, once for
+each new text, trimmed. A longer copy is searched from its first 1,000
+characters, Yomitan's default maximum clipboard search length: echoing a
+100,000-character query held the page for about 30 seconds in Chrome 152. The
+offscreen document sends only those characters, counted from the end of the
+copy's leading spaces: it and the worker carry every lookup, and sending a
+1,000,000-character copy through them four times a second held lookups for up to
+270 ms. A paste is still searched whole. What was on the clipboard when the
+monitor started is not searched, nor is text without a Japanese character (the
+reader's `isLookupWorthy`, the characters of its Japanese text only gate;
+Yomitan's `isTextLookupWorthy` also counts CJK punctuation and fullwidth Latin
+letters and digits). Text copied or cut on the page itself is not searched
+either: the monitor starts over from it, as Yomitan's `_onCopy` ignores the
+search page's own copies. A Note being written or saved in the result holds the
+monitor off (`holdsNote`), so copying a meaning from another tab cannot discard
+the draft; that text is not searched. The switch is the optional `clipboardRead`
+permission itself: turning it on asks the browser for it, turning it off gives
+it back (Chrome then grants it again without asking; Firefox asks each time),
+and every open search page follows a change through `permissions.onAdded` and
+`onRemoved`, so it needs no stored option. Only the search page reads the
+clipboard: it sends `hd_clipboard_read` to the worker, which accepts it from
+that page alone and relays it to the offscreen document, never to a linked
+browser's host, and the offscreen document answers only the worker. The switch
+and the monitor are `search.html`'s, over the header of its frame (see Custom
+JavaScript below): Firefox asks for a permission only from the document whose
+control the user clicked. As Yomitan's
+`ClipboardReader` does, Chrome pastes into a text area there, which needs
+neither focus nor a prompt once the permission is granted; the text comes from
+the paste event, which is cancelled, because laying out 300,000 pasted
+characters took 16 to 34 seconds where the event takes 5 ms. Firefox, whose
+paste command sometimes fails, uses `navigator.clipboard.readText()` in the
+background page's engine frame.
+
+![The search page with its Clipboard monitor on, showing 読む, copied in another tab](assets/search-clipboard-monitor.png)
+
+**Anki Template switch.** Where Yomitan's search page has its profile switch,
+before the Clipboard monitor (yomidevs/yomitan@ac1d839 `ext/search.html`,
+`#profile-select`, and `search-display-controller.js` `_updateProfileSelect`),
+the page has an **Anki Template** menu (#656). It lists the Templates and
+chooses the one the built-in Anki button uses, which is the first: choosing one
+does what **Settings → Anki → Set built-in** does, moving it first and keeping
+the others' order. What follows the first Template follows the choice too: the
+duplicate index, and the Anki statuses that word highlighting and definition
+blur read; the Relay API lists its card formats in the new order; custom Anki
+buttons keep their own Templates. As Yomitan's profile switch, it shows only
+with more than one Template, has no visible label, and names itself in its
+accessible name and in the heading of its list. The list is sorted by name
+rather than in Settings' order, so it stays put as a choice moves its Template
+first and the arrow keys can walk it. The switch is `search.html`'s, as the
+Clipboard monitor's is: the frame may write only the reader's own option. It
+writes the choice with the stored record's revision and writes it again after a
+conflict, and while one choice is saved, it saves only the last one made
+meanwhile. A choice made with the mouse or a tap hands focus back to the frame,
+as a click on the Clipboard monitor switch does; the arrow keys change the
+choice and keep focus. Yomitan's profile switch chooses a whole profile;
+Hachidori has no profiles until the multi-language work adds them (#640), which
+leaves profile switching to it.
+
+**Custom JavaScript.** **Design → Custom JavaScript** runs on the search page
+as it does on web pages (#644). Chrome and Firefox run no user script in an
+extension page: `userScripts.register` refuses a `chrome-extension:` match
+pattern, `userScripts.execute` and `scripting.executeScript` cannot access the
+page, and an extension page's policy forbids running a string as code. So
+`search.html` holds the page itself, `search-frame.html`, in a sandboxed frame
+(`manifest.json` → `sandbox`), whose policy allows `eval` and still refuses
+inline script. Once the reader is ready, the frame runs the script the worker
+registered for web pages (`custom-javascript.js`), so the script runs only
+where it runs on web pages: once Chrome's **Allow User Scripts** or Firefox's
+`userScripts` permission is on. It shares the frame's document with the
+reader and reaches the docked result through `host.shadowRoot`, as on a web
+page; unlike a user script in its own world, it also shares the reader's
+JavaScript globals. There is no `custom-javascript-bridge.js` in the frame:
+nothing but the extension reaches its pages, so while Custom JavaScript is
+saved the reader in `search-frame.html` attaches an open root itself.
+
+A sandboxed frame has no extension APIs, so `search-shell.js` in `search.html`
+answers for it over one `MessagePort`: `search-bridge.js` makes the channel and
+offers its port to the extension's origin, which the frame's location keeps, so
+only `search.html` can take it. Whatever the frame is served, the script can
+use too, where on a web page it has no extension messaging at all, so the frame
+gets what the reader needs and no more: the requests a content script's reader
+sends, and of option writes only the reader's own, one **Toggle option**
+keybind's boolean; the stored keys the reader reads, with the AnkiConnect key,
+which the reader never uses, left out of the options; and the events sent to
+the reader. The frame's debug log goes to the extension's store, measured and
+redacted again by `search.html`, and may update only the records the frame
+wrote. The Clipboard monitor's switch and its reads stay in `search.html`,
+which lays the switch, and the Anki Template switch beside it, over the end of
+the frame's header, where the frame keeps both controls' room invisibly, and
+shows them with the frame's themed page. Only text with a Japanese character,
+the reader's own `isLookupWorthy` test, goes on to the frame, which searches it
+and tells `search.html` when its reader is ready and when text is copied there.
+The monitor hands the user's script no other text. In Chrome, while Hachidori
+holds `clipboardRead`, a user script can still read the clipboard itself, on
+the search page as on any web page; in Firefox it cannot. A mouse click or a
+tap on the switch, if the switch does not have focus, hands focus back to the
+frame once the click is done (a tap focuses the switch after its `pointerup`),
+where the reader's keybinds and activation key work. A focused switch keeps
+focus: after Space, and after a screen reader's or voice control's click,
+which Chrome sends as pointer events once it has focused the switch. There
+Escape and Ctrl+U still reach the box, and the reader's keybinds wait for
+focus to return to the page.
+Firefox has sandboxed pages from 154; in Firefox 153 the frame is an ordinary
+extension page, with its own API, where the script does not run and the
+channel carries only the debug log and the Clipboard monitor.
+
+**History.** While Settings → Advanced → Search history is on (it is off until
+switched on), the page keeps each line it searches, typed, pasted or read by
+the Clipboard monitor, in the IndexedDB database `hachidori-search-history`,
+which `search.html` serves to its frame and Settings counts, limits and clears
+(`search-history.js`), and its keys act. Up and Down in the box walk the lines
+as a shell's do. The searched text takes focus after a search; there the arrow
+keys move Rubi's cursor by word and row (`search-lines.js`, a port of Rubi's
+`core/text_rows.c`), each word looked up, and past the top row on to earlier
+lines between their neighbours' dimmed rows, and Enter adds the word to Anki.
+User scripts reach the lines through `HDSearchHistory`. The lines are in no
+backup. [Search history](search-history.md) has the details.
+
+Not ported: Yomitan's background clipboard monitor, which opens the search
+page when text is copied; its clipboard search mode (Update query only) and
+the setting for the maximum clipboard search length; profiles, and so the
+profile switch (#640);
+automatic kana conversion; the query parser's word
+segmentation and readings; going back and forward between searches in the
+browser's history; the popup window's position and state settings;
+Shift-, Ctrl- and middle-clicks on the menu's Search; and focusing the results
+after a search, which lets PageDown scroll them. Here focus goes to the
+searched text, whose arrow keys move its cursor, so a typed character still
+goes into the box; Alt+ArrowUp and Alt+ArrowDown move between the result's
+entries and Tab reaches its controls.
+
+![The search page with a real result, the toolbar menu and the popup window](assets/search-page.png)
 
 ## Page scanning and exact selections
 
@@ -968,6 +1262,17 @@ element must contain that text node, so padded tiles and unrelated elements
 covering text cannot trigger distant lookups. This applies equally to horizontal
 and vertical text; exact selections and the reader's boxed-glyph drag keep their
 own selection rules.
+
+Netflix lays its player's controls over the subtitles, where the hit test finds
+the controls instead of the line. On `www.netflix.com`, where the hit test finds
+no glyph under the pointer, as over a transparent control or a panel's
+background, the reader looks for one in the lines' own text (each
+`.player-timedtext .player-timedtext-text-container`), bisecting each text
+node's client rects as the Google Docs path does, and scans from that glyph. As
+anywhere, the glyph must contain the pointer within two CSS pixels. The
+player's own text, a menu over a line included, is hit-tested first as on any
+other page. A line is found the same way when Netflix's subtitle layer takes no
+pointer events.
 
 An `<input>` of type `text` or `search` (Chrome reports a missing or unknown
 type as `text`) or a `<textarea>` keeps its value in user-agent shadow DOM that
@@ -1151,10 +1456,69 @@ before the change event completes.
 
 ![Frequency direction controls in Settings](assets/frequency-direction-settings.png)
 
+## Words that only frequency or pitch dictionaries have
+
+Settings → Reading → Results → **Show words that only frequency or pitch
+dictionaries have** (`showMetadataOnlyResults`, off by default, #620) adds
+`metadataOnlyTerms: true` to every hover, selection, dictionary-link and
+search-page lookup.
+hoshidicts' `LookupOptions::metadata_only_terms` then turns the frequency and
+pitch rows keyed by the scanned text into a result without glossaries, one per
+reading the rows name, unless a result with definitions is that word with that
+reading and so shows those rows already. Yomitan has no such option: its
+results come from term banks alone, and it attaches frequencies and pitches to
+them afterwards, a row that names a reading only to a headword with that
+reading (`_getDeinflections` and `_addTermMeta` in
+`ext/js/language/translator.js` at yomidevs/yomitan@d3c54c1).
+
+- A row has no part of speech, so, like a term-bank entry without one, it
+  answers only deinflections that need none. Those are the text as written,
+  after preprocessing, and the few dialect rules that carry no part of speech,
+  such as kansai-ben -うたら for -ったら. A row for ググる is not found for
+  ググった.
+- Such a result comes after the results with definitions that match as much of
+  the text and before those that match less, so it comes first only where it
+  matches more of the text than all of them, or where a dictionary link asks
+  for its reading (`primaryReading`). A reading that no dictionary gives
+  a defined word is such a result too (#658): JMnedict lists 田中 without a
+  reading, so a hover on 田中 shows JMnedict's entries for 田中 and then 田中
+  read だなか and たなか with Jiten's frequencies. The results with definitions
+  keep their order, so `maxResults` can only cut the last of them.
+- `hd_lookup_dictionary` (clicked-kanji term routes) never returns these
+  results. Word highlighting's `hd_segment`, the Anki sentence-furigana split,
+  the relay API and the startup practice probe do not ask for them, because a
+  frequency list's kana fragments would otherwise win splits (はまだ over は
+  and まだ).
+- The popup shows the headword, reading, frequency tags and pitch accents with no
+  definition card. A dictionary tab shows only results with that dictionary's
+  cards, so these results appear under All. Nazeka draws them too.
+- JL and Bee's Theme lay results out dictionary by dictionary, Plain shows only
+  definitions, and Crystal hides a result that has no dictionary section, so
+  these words would leave them an empty popup. With them a lookup does not send
+  `metadataOnlyTerms` (`DEFINITION_ONLY_RENDERERS` in `content.js`'s
+  `termPayload`) and behaves as with the option off, notice and pencil
+  included. A popup, or the search page, that shows results when the theme
+  changes keeps them until the next lookup.
+- Definition blur decides on the first result. A request whose first result has
+  no definitions is never blurred, so its autoplay is not held.
+- Lookup statistics and the Anki maturity check also take the first result, so
+  with the option on a word without definitions is counted when it comes
+  first, fragments such as はまだ included.
+
+The option stays off by default. In the five recommended dictionaries as of
+2026-10-31, 18,235 of Jiten's 454,276 expressions are in no term dictionary.
+Hovering each of the first 40,000 characters of 吾輩は猫である gives a
+frequency-only first result 1,387 times (3.47%), and most of those are kana
+fragments such as はまだ and こで. #626 tracks the default. Over the same
+hovers, the readings of #658 change no first result and add 16,656 entries
+after the defined words to 12,436 hovers (31%): 8,416 other readings of a
+defined word, often a name reading of a single kanji (出 read いざき), 5,383
+kana rows without a reading (てい) and 2,855 katakana readings (人 read ヒト).
+
 ## Popup metadata controls
 
 Design has independent controls for frequency source names, number
-abbreviation and averages, pitch contour and its preferred dictionary, pitch
+abbreviation and averages, the headword's pitch and its preferred dictionary, pitch
 badges and their dictionary names, and grammar tags. Frequency metadata defaults
 to Yomitan's values without dictionary names: each dictionary's own display
 value, such as `51,499` or `142位`, otherwise the plain number, and averages as
@@ -1170,7 +1534,7 @@ header or claiming a separate chrome row. The lower chrome row is reserved for
 dictionary tabs and is omitted when no tabs exist. Grammar tags default to
 hidden; opting in places them in the same result metadata group. Explicit saved
 display choices are preserved.
-Contour, pitch badges and pitch dictionary names remain on, and averages remain
+The headword's pitch, pitch badges and pitch dictionary names remain on, and averages remain
 off. IPA transcriptions and definition tags remain visible independently. Pitch
 badges are Yomitan's pronunciation markup (#364): one `li.pronunciation-group` per
 pitch dictionary starts with its `pronunciation-dictionary` tag, followed by each
@@ -1182,15 +1546,31 @@ Yomitan's defaults (text and position on, graph off); a hidden notation is not
 built. A string pattern such as `"LHL"`, which hoshidicts delivers beside a
 placeholder position of 0, is read with Yomitan's `isMoraPitchHigh` and
 `getDownstepPositions`, so it shows `[2]` like the integer form, in the badges,
-the furigana contour and the Anki pitch markers alike. `reading [n]` stays in
-every accent's tooltip and accessibility label. **Furigana pitch style** picks
-the headword's notation. Contour, the default, draws a line over high morae,
-under low ones and a stroke at each rise and drop in the pitch colour. Overline
-builds the reading's morae once with the badges' `createPronunciationText` and
-shares them out to the furigana segments, so the headword shows the badges'
-line over high morae and downstep hook in the text colour, with the same levels;
-nasal and devoice marks, `[n]` and the graph stay in the badges. The style is
-disabled while the furigana pitch is off. Turning dictionary names off
+the headword's pitch and the Anki pitch markers alike. `reading [n]` stays in
+every accent's tooltip and accessibility label. **Show pitch on the reading**
+draws the headword's pitch on its reading, not in its furigana (#606), which
+stays what it is with the pitch off: the reading follows the headword where
+Yomitan's *Term furigana and reading* display puts it (`.headword-reading-outer`
+in `ext/css/display.css` at yomidevs/yomitan@d3c54c1), at three quarters of the
+headword's size, a quarter of the headword's size after it (Yomitan's 0.5em of
+its 14 px text beside a 2em headword), in the furigana's colour. 好き嫌い reads
+好(す)き嫌(きら)い, then すき＼きらい. A headword without kanji spelt in its
+reading's kana (てくてく, or テレビ read てれび) has no furigana and carries the
+pitch on its own kana, as JL marks one. A headword in kanji whose reading is
+itself has no reading to show, as in Yomitan (`data-reading-is-same`), and no
+kana to carry a pitch. **Reading pitch style** picks the notation. Contour, the
+default, draws a line over high morae, under low ones and a stroke at each rise
+and drop in the pitch colour. Overline builds the morae with the badges'
+`createPronunciationText`, so the headword's pitch shows the badges' line over
+high morae and downstep hook in the text colour, with the same levels; nasal and
+devoice marks, `[n]` and the graph stay in the badges. The style is disabled
+while the reading's pitch is off. The reading is not selectable, like the
+furigana, so selecting or copying a headword gives the word, and a double-click
+on a kana headword selects it whole, as with the pitch off. Definition blur
+blurs the reading with the furigana, and a kana headword's pitch lines wait for
+the reveal. Under forced
+colours the contour keeps its lines on their own sides, in the system text
+colour, rather than boxing each mora in. Turning dictionary names off
 removes the tags. IPA shows transcriptions without source-name labels. Tooltips and
 accessibility labels retain source attribution, and visible pitch names and
 labels follow dictionary aliases in place. Unfilled tags, pitch names, pitch
@@ -1202,9 +1582,13 @@ remains available; this is lazy presentation, not a source or data limit.
 Frequency tags never count against that budget for themselves (#505): every
 frequency dictionary a result carries keeps its tag in the first and every
 later entry, however many are installed and wherever they sit in the
-dictionary order. Their wrapped rows grow with the collection. Visible
-frequency tags still count against the budget for the pitch badges after
-them.
+dictionary order. Their wrapped rows grow with the collection. Pitch badges
+take no budget either (#607): every entry, first or later, shows every accent
+of every pitch dictionary the engine returned for it, as Yomitan's
+`createTermEntry` appends every pronunciation group
+(`ext/js/display/display-generator.js:82-137` at yomidevs/yomitan@d3c54c1). So
+非常, a later entry of a 非常に lookup, shows the pitch dictionaries it shows
+when looked up on its own, however many frequency tags precede them.
 
 Averages are Yomitan's: the floored harmonic mean of each dictionary's first
 value (`getFrequencyNumbers` and `getFrequencyHarmonic`,
@@ -1236,8 +1620,8 @@ with source names hidden, and each aggregate carries `data-frequency-average`
 that averages-off shows stays in the DOM after the aggregates, unchanged apart
 from the `hidden` attribute, unless **Show each dictionary's frequencies with
 the averages** (`showFrequencyTagsWithAverage`, off by default, so averages
-alone are Yomitan's) keeps them shown there. Hidden tags take no layout or metadata display
-budget, stay out of the accessibility tree and still follow alias renames.
+alone are Yomitan's) keeps them shown there. Hidden tags take no layout,
+stay out of the accessibility tree and still follow alias renames.
 Custom CSS can reveal them with
 `.gsm-hoshidicts-tag-frequency[hidden] { display: inline-flex; }`; a result with
 no value to average also hides its frequency group or row, which such a
@@ -1248,7 +1632,7 @@ sorting or lookup results.
 The preferred pitch source is a soft canonical-title preference: unavailable or
 disabled sources fall back to another usable pitch source. A committed rename
 follows the stable package ID, and actual removal clears the selection in the
-same background options/state write. Turning contour off remembers the source.
+same background options/state write. Turning the reading's pitch off remembers the source.
 
 **Show pitch accent colours** (#458, off by default as in jp-mining-note)
 colours by accent group: 平板 heiban blue, 頭高 atamadaka red, 中高 nakadaka
@@ -1256,13 +1640,34 @@ orange, 尾高 odaka green and 起伏 kifuku purple. `HDGlossary.pitchAccentCate
 ports Yomitan's `getPitchCategory` with `isNonNounVerbOrAdjective`, and
 `{pitch-accent-categories}` uses the same helper, so the popup and the card
 agree: a downstep on a `v1`, `v5`, `vk`, `vs`, `vz` or `adj-i` term that is not
-also `vs` and `n` is kifuku, and a pattern counts its first downstep. The
+also `vs` and `n` is kifuku, and a pattern counts its first downstep. Unlike
+Yomitan, a class counts only when the term's expression ends as that class's
+dictionary form does: a verb class in an u-row kana and `adj-i` in い, each in
+hiragana or katakana, and `vs` or `vz` in する, 為る, ずる or a kanji followed by
+す or ず. Some dictionaries give nouns and na-adjectives one of these classes
+(講談社 日本語大辞典 tags 自由 `adj-i`, 精選版 日本国語大辞典 tags suru nouns
+such as 料理 `vs`), and those keep the group their downstep gives (#608).
+Classical i-adjectives ending in し (遅し) do not count, because 講談社 also tags
+nouns such as 遠回し `adj-i`. A pattern that rises again after its first
+downstep is not one accent phrase and has no group (#596). Usually it is
+several: 二十四時間 に＼じゅう・よじ＼かん is HLLLHLL, an atamadaka phrase and a
+nakadaka one, but so is 十人十色 じゅ＼うにん・と＼いろ, whose phrases are both
+atamadaka, so the pattern tells neither where a phrase starts nor what it is.
+Yomitan's H/L strings also allow non-standard pitches, which no group
+describes either. Such a pattern's badge, and a headword whose reading shows
+it, keep the colours they have with the switch off, and
+`{pitch-accent-categories}` leaves it out; Yomitan gives it its first
+downstep's group. A pattern whose next phrase starts high after a high mora
+(十字を切る [0・1], LHHHHL) looks like one phrase and keeps its downstep's
+group. A downstep number is one phrase's accent, and Yomitan's schema reads a
+list of them as different accents, so each keeps its group, even where a
+dictionary lists a word's phrases that way (Kanjium's 二十四時間 [1, 2]). The
 headword's `.gsm-hoshidicts-expression` carries `data-pitch-category` from the
-pitch its furigana uses (the pitch accent dictionary first, then the first pitch
-that fits the reading), whether or not the contour is drawn, and each badge's
+pitch its reading shows (the pitch accent dictionary first, then the first pitch
+that fits the reading), whether or not it is drawn, and each badge's
 `li.pronunciation` carries its own. The switch only sets
 `data-hoshidicts-pitch-colors` on the popup host: CSS then colours the headword,
-its kanji links and furigana lines (the contour, or the Overline style's line
+its kanji links and pitch lines (the contour, or the Overline style's line
 and hook), and each badge's overline, hook and graph.
 The reading kana, badge text and dictionary tag keep their colours. A headword
 waits for blurred definitions to be revealed, a focused kanji in a coloured
@@ -1424,8 +1829,18 @@ frequency leaves enabled count or Anki evidence pending; otherwise the request
 fails open immediately. The first count snapshot controls that visit's blur;
 later statistics rows cannot reverse it. The first audio result stays held
 while definitions are pending or blurred, and the reveal, whether from the
-decision, hover, the deadline or disabling blur, releases it once. A manual
-play while blurred spends it.
+decision, hover, a click, Enter or Space, the deadline or disabling blur,
+releases it once. A manual play while blurred spends it.
+`HDPopup.createDefinitionReveal` owns the reveal gestures for the reader and
+the Design preview. **On click only** (`definitionBlurReveal: "click"`, #598)
+ignores hover and has no deadline. A click on blurred definitions is captured,
+so it only reveals, and the reader does not scan their words. Their child
+elements are `inert` until then. Each `.gsm-hoshidicts-definitions` element (Default's card,
+since a list cannot be a button) is a labelled button in the Tab order, and a
+revealed one keeps the focus it has; the compact summary is a click target only.
+Renderers whose blur filters that element itself draw its focus ring on the
+entry or popup, which the filter does not blur (see the theme contract in
+[Popup themes](themes/README.md#version-2-view-contract)).
 Navigating away cancels only the live timer; Back and persisted `pageshow`
 re-arm its remaining time. Revealed requests never reblur. Anki option changes
 invalidate pending and completed maturity evidence through an options epoch,
@@ -1441,7 +1856,7 @@ or explicit order and its threshold while retaining an unavailable saved
 selection. A paused notice links to the count recording toggle when recording
 is disabled. Any active condition shows the common reveal controls. The Design
 preview passes fixed count, maturity and native frequency samples through the
-same helpers, hover and timer without making lookups or Anki requests.
+same helpers, reveal gestures and timer without making lookups or Anki requests.
 
 ## Word highlighting
 
@@ -1634,32 +2049,77 @@ generation and gives every `hd_lookup` and `hd_lookup_dictionary` glossary a
 its part before `:`, one the bank lacks is category `default`, a repeated name
 is listed once, and the list is sorted by `order`, then name. `definitionTags`
 stays as the engine wrote it. The renderer draws `glossary.tags` with
-`data-category` and the notes as `title`, `reader.css` colours `expression`,
-`partOfSpeech`, `popular`, `frequent` and `archaism` with palette roles, and
-the Anki `{glossary}` label and `{tags}` and the API's `definitions[].tags` read
-the same array. A reply without `tags`, from an older sharing host, is drawn
-from `definitionTags` as category `default`. A dictionary imported before the
-tags were stored has none until it is imported again, and looks as before.
+`data-category` and the notes as `title`, and the Anki `{glossary}` label and
+`{tags}` and the API's `definitions[].tags` read the same array. A reply without
+`tags`, from an older sharing host, is drawn from `definitionTags` as category
+`default`. A dictionary imported before the tags were stored has none until it is
+imported again, and looks as before.
+
+Definition tags look as Yomitan draws them (#604): each is Yomitan's `.tag`, a
+bold label 11/14 the size of the text beside it, filled with Yomitan's colour for
+its category (`display.css` at yomidevs/yomitan@d3c54c1). As in Yomitan's
+`createTermEntry`, a definition's tags end with its dictionary's tag, category
+`dictionary`, labelled with the dictionary's display name and titled with its
+canonical title. A card holds one dictionary, so only its first definition has
+that tag, as with Yomitan's **Compact tags**, and the card has no title line.
+`reader.css` takes Yomitan's light colours in a light palette and its dark ones in
+a dark palette through `light-dark()`, whatever the palette's own colours; the
+grammar row and kanji tags keep their palette's pairs. Yomitan's white or
+`#f1f1f1` label is below 4.5:1 on some of its colours (1.95:1 on its light
+`expression` orange), so each of those is darkened, keeping its hue, only as far
+as 4.5:1 needs. The High contrast palette darkens Yomitan's dark colours as far
+as a white label needs for 7:1, as its text has. Custom CSS can set the
+`--tag-*-background-color` variables on `.gsm-hoshidicts-popup`, for example to
+Yomitan's own values; High contrast keeps its own unless the rule also names
+`:host([data-hoshidicts-theme="high-contrast"]) .gsm-hoshidicts-popup`.
+Forced colours draw each tag's outline.
 
 Headword furigana follow Yomitan's `distributeFurigana`: the kana in a
 headword anchor its reading and each run of other characters takes the share
 between them. Where the kana leave more than one split, `segmentFurigana`, like
 Yomitan, puts the reading over the whole word: 好き嫌い could be 好(す)き嫌(きら)い
-or 好(すき)き嫌(ら)い. For such a headword the engine service gives the
-`hd_lookup` and `hd_lookup_dictionary` result a `term.furigana` split when
-exactly one split reads by its kanji's KANJIDIC readings (#459). A kanji reads
-as an on'yomi, or as a kun'yomi's stem, stem and okurigana, or masu-stem (す.く:
-す, すく, すき), each also with rendaku and with a final つ, ち, く, き or り as
-っ; 々 reads as the kanji before it, and a digit or letter never reads. Every
-other reply is unchanged. `extension/vendor/kanjidic/kanji-readings.json` holds
-the readings; the worker imports it as a JSON module on its first such headword
-and derives each kanji's forms when it is first needed.
-`scripts/kanji-readings.mjs` regenerates the table from the KANJIDIC archive
+or 好(すき)き嫌(ら)い. The engine service gives an `hd_lookup` or
+`hd_lookup_dictionary` result a `term.furigana` split from its kanji's KANJIDIC
+readings (`kanjiFurigana`) where that differs from the local split. Where the
+kana leave more than one split, it is the one split that reads (#459). Then
+each run of two or more kanji is read one kanji at a time when exactly one split
+of its share reads (#605):
+二十四時間 is 二(に)十(じゅう)四(よ)時(じ)間(かん), where Yomitan puts にじゅうよじかん
+over the run. A run that no split reads by KANJIDIC, such as jukujikun (今日
+きょう), 日本 にほん (KANJIDIC has no に for 日) or a run with a digit (２人 ふたり),
+is read again with Jitendex's kanwa data (below); a run that two splits read
+keeps one ruby. A
+kanji reads as an on'yomi, or as a kun'yomi's stem, stem and okurigana,
+masu-stem (す.く: す, すく, すき), or stem with the start of its okurigana where a
+word leaves the rest unwritten (う.える: うえ in 植木 うえき), each also with
+rendaku (a voiced ち or つ also as じ or ず: 世界中 せかいじゅう) and with a final つ,
+ち, く, き or り as っ; 々 reads as the kanji before it, and a digit or letter never
+reads by KANJIDIC. The second reading (#641) adds kanwa's character readings
+that KANJIDIC lacks, among them numerals and letters (２ ふた, so ２人 is
+２(ふた)人(り)), and its compound readings. A compound reads either one part per
+character, as 日本 に|ほん, which splits 日本 and 日本語 にほんご, or as a whole, as
+今日 きょう, which keeps one ruby inside its run: 今日中 きょうじゅう is
+今日(きょう)中(じゅう). Where several splits read, those that read the most
+characters by compounds count, as Jitendex reads a known compound before its
+characters, so 河原者 かわらもの is 河原(かわら)者(もの) although 河 か and 原 わら
+also read it; two that read as many keep one ruby, as does a run that kanwa
+cannot read either (景色 けしき). A run that KANJIDIC reads keeps that split, so
+印度 インド stays 印(イン)度(ド) though kanwa reads it as a whole, and 日本 にっぽん
+stays 日(にっ)本(ぽん). Every other reply is unchanged. `extension/vendor/kanjidic/kanji-readings.json`
+and `extension/vendor/kanwa/kanwa-readings.json` hold the readings; the engine
+service imports them as JSON modules and indexes kanwa's compounds as it
+starts, off the first lookup's reply, and derives each kanji's forms when it is
+first needed.
+`scripts/kanji-readings.mjs` regenerates the KANJIDIC table from the archive
 pinned in `source.json` beside it; point that pin at a newer jmdict-yomitan
-release to update it. The popup headword (plain ruby and pitch columns),
+release to update it. `scripts/kanwa-readings.mjs` regenerates the kanwa table
+from the jitendex-data commit pinned in its `source.json`, against the shipped
+KANJIDIC table, so it runs again after that table changes. The popup headword's ruby,
 `{furigana}`/`{furigana-plain}` and the API's scanning parser read the split
 through `termFurigana`, which falls back to the local split when a term carries
 none, as from an older sharing host, or one that does not spell its expression.
+An inflected match's stem and the other words of `{sentence-furigana}` keep the
+local split.
 
 Each node-limit rejection reports its exact attempted value and configured
 limit. Structural paths remain exact for ordinary content and elide the middle
@@ -2176,9 +2636,16 @@ closes the preview; keyboard-induced popup scrolling repositions a still-visible
 focused owner.
 There is no document-wide observer, polling or per-image observer.
 
-Keyboard focus inside the popup cancels hover dismissal, while genuine focus
-departure rearms it. Focusout waits for removal/focus transfer to settle so
-replacing a focused Note form cannot schedule dismissal of its refreshed result.
+Keyboard focus (`:focus-visible`) and editing inside the popup protect its view
+from page hover and dismissal, and keep a focused child when the pointer
+returns to its parent. Focus left on a mouse-clicked button, including Audio
+after playback, does none of these. Page selection changes are different: while
+anything in the popup has focus, a change is the popup's own. Pressing a link
+in the popup moves the selection into it, which Chrome reports at the host's
+place in the page, and the link's focus keeps a selection lookup's popup open
+for the click. Genuine focus departure rearms hover dismissal. Focusout waits
+for removal/focus transfer to settle so replacing a focused Note form cannot
+schedule dismissal of its refreshed result.
 A control that disables itself while it works, such as an Anki action or the
 lookup failure's Retry, loses focus without the reader leaving, so its
 focusout schedules no dismissal either.
@@ -2244,6 +2711,17 @@ reading position. The existing highlight, toolbar positioning,
 exact clicked-kanji focus target and previous Back chain remain intact.
 Moving the toolbar to the other edge after a viewport resize preserves deliberate
 tab or Note focus, including the existing draft selection.
+
+Back also leaves the kanji request it closes ahead of the term request it
+restores, as Yomitan's `DisplayHistory` keeps the entry Back leaves as the next
+one (#609). Navigate forward in history (Alt+F by default, as in Yomitan)
+reopens that request as its click did: it asks the engine again and shows the
+view from its top with Back focused. It is the same request, so its tab and
+definition blur decision carry over and its lookup is not counted again. Back
+from it returns to the term view as Forward left it, scroll and expansion
+included. A new kanji click is what Forward reopens after the next Back. A new
+lookup has nothing ahead, and neither does a no-result notice or a failure that
+a replayed term request leaves in place of its view.
 
 This intentionally extends the pinned GSM PR #549 restoration: its saved term
 view does not retain expansion/scroll, and uses the current kanji tab. Issue #9
@@ -2395,9 +2873,10 @@ operations before an offscreen-startup retry can dispatch them. Popup requests
 use the enabled persisted sources, not caller-provided URLs. Offscreen lazily
 imports the player; audio never acquires the dictionary mutation lock.
 
-The offscreen document declares DOM_SCRAPING and AUDIO_PLAYBACK together. Chrome
-keeps it while its dictionary-engine purpose remains active, including after
-audio's 30-second idle window. URL playback fetches without credentials.
+The offscreen document declares DOM_SCRAPING, AUDIO_PLAYBACK and CLIPBOARD
+(the search page's clipboard monitor) together. Chrome keeps it while its
+dictionary-engine purpose remains active, including after audio's 30-second
+idle window. URL playback fetches without credentials.
 Candidate fallback includes actual decoding/playback failures. Speech waits for
 Chrome's asynchronously loaded voice list within the existing playback deadline.
 Automatic Japanese uses an available Google Japanese voice, then a Japanese
@@ -2498,8 +2977,8 @@ reset keys. Fresh installs use AUTO and follow the live browser colour scheme;
 sparse upgrade profiles and explicit Hachidori choices keep the Hachidori
 palette. Other defaults are 560 × 420 px, 85% background opacity,
 one column, Automatic toolbar placement, summary off with three snippets and automatic sources, pitch
-contour/pitch badges/pitch dictionary names/pitch text and position/source highlighting on, the Contour
-furigana pitch style, and frequency
+reading pitch/pitch badges/pitch dictionary names/pitch text and position/source highlighting on, the Contour
+reading pitch style, and frequency
 names/abbreviation/averages, each dictionary's tags beside the averages, the pitch graph, pitch accent colours and grammar tags off. Reset writes those keys through the existing sparse revision CAS;
 Reading preferences, dictionaries, groups, and update policy are untouched.
 The default renderer's density comes from `--hd-*` custom properties declared on
@@ -2694,10 +3173,15 @@ Otherwise it resolves to Add or the green View in Anki book action.
 An action disables itself while it saves or opens Anki. Pressed from the
 keyboard, it keeps the popup open and gets focus back once it is enabled
 again, unless focus has moved elsewhere, so Enter can then open the note it
-added. A mouse press takes no focus back, because focus inside the popup
-holds page hover.
+added. A mouse press takes no focus back.
 Missing Template IDs remain visible as disabled errors and send no Anki
-request.
+request. A Template whose only problem is that it names no deck, as a new
+language profile's Templates do, has the readiness `emptyDeck`: its button
+stays visible and enabled with the title "Choose an available deck.", and a
+press asks the worker (`hd_open_settings`) to open Settings → Anki in the
+sender's window, at `settings.html?profile=<id>#anki` for the profile the popup
+acted in. An overlay, whose host opens Settings itself, keeps today's
+button.
 The content controller preflights each Template's rendered candidates in one
 batch per binding pass (the popup renders its first result before the rest, so
 those usually arrive in a second batch), applies each reply only to a control
@@ -2748,7 +3232,22 @@ Fixed background handlers own a separate Anki mutation queue. Submission freshly
 validates configuration, fields, dictionary generation and duplicate identity;
 it never holds the dictionary storage queue. Native Anki duplicate search selects
 same-model overwrite targets inside the configured deck scope. The six field
-overwrite modes use authoritative field spellings. The initial write sends only
+overwrite modes use authoritative field spellings. A lookup whose sentence is
+only the word it matched, such as a word typed alone on the search page, has no
+sentence to give a note it updates, so it adds no sentence and none of the
+media that would pair with one, as Senren's scene switching pairs each sentence
+with its picture and line audio. Fields whose template uses `{sentence}`,
+`{sentence-furigana}`, `{sentence-furigana-plain}`, `{cloze-prefix}`,
+`{cloze-body}` or `{cloze-suffix}`, and fields made only of `{screenshot}`,
+`{gif}` or `{sentence-audio}`, keep the note's value whatever their mode, in the
+update and in its pronunciation enrichment; an empty one stays empty. Other
+fields follow their modes, and a new note still takes the word for its sentence.
+A line that is one word on a page, such as 「はい」, and a selection that is a
+whole line count as word-only too. A Netflix cue does not: its own audio and
+GIF go with it. A linked browser records no line, and its host does not see the
+cue, so there a one-word cue is word-only. Any text around the word, even a lone 。, is a sentence. Yomitan's
+search page also takes the typed word for the sentence, and its Append adds that
+word to the note's sentences on every update (#655). The initial write sends only
 changed fields; preserved values are omitted instead of written back from the
 earlier snapshot, including fields restored to that value by a failed media
 upload. Pronunciation enrichment compares its complete desired values
@@ -2802,7 +3301,10 @@ the outer Yomitan-compatible glossary structure are kept. The
 `small.yomitan-glossary-details` Rules/Deinflection footer of the uncompacted
 fields is not written, as Yomitan's `{glossary}` has none;
 `{part-of-speech}` and `{conjugation}` carry that information (#399). Plain
-glossary markers and the relay's `ankiFields` API are unchanged.
+glossary markers are unchanged. The relay's `ankiFields` API follows the option
+too, read on every request, so a card another app fills through it matches a
+mined one (#659). Like mining, it sends only the dictionary images its fields
+reference.
 
 First-field audio is resolved before the
 duplicate check without playback or uploads. Inside the authoritative write
@@ -3368,7 +3870,8 @@ network listener is on, the addresses found from the routes to Tailscale's
 resolver and the default route, or the bind error), `client-open` (with the
 peer address), `client-close` and `client-text`; from the host it takes
 `send`, `broadcast`, `close` and `network`. Its rules: a handshake's `Origin`
-must start with `chrome-extension://`, `/host` is accepted from loopback peers
+must start with `chrome-extension://` or, for Firefox, `moz-extension://` (relay 0.0.6
+and later), `/host` is accepted from loopback peers
 only, a client is refused (503) while no host is connected, and turning the
 network off closes the clients that came over it. There is no token. A linked
 browser speaks JSON text frames: `hello` (answered with the host's version,
@@ -3467,6 +3970,27 @@ welcome view probes this computer once and, when a shared Hachidori answers,
 offers to use it; that link then advances setup to `complete`. See
 [sharing](sharing.md) for use.
 
+A host whose records have language profiles ([languages.md](languages.md)
+17.3-17.6, decision record [0009](decisions/0009-older-linked-browsers.md))
+speaks to each connection according to that connection.
+`createSharingHost` keeps a per-connection record (requests running, whether
+it must reconnect, change frames held during its opt-in) and takes its
+decisions from `languages` hooks, which `background-sharing.js` supplies
+(`HOST_LANGUAGE_HOOKS`) and which return at once for a single-profile host, so
+its hello, replies and one `broadcast` stay byte for byte today's. With
+profiles the hello adds `language-profiles-v1` and carries the Japanese view;
+`hd_language_profiles_opt_in` is answered in one storage-queue turn against
+every language the shared records hold (`sharing-languages.js`); change
+frames go to each connection with `send`, projected for connections that did
+not opt in, as are the replies listed in section 17.3 item 4. A commit that
+changes a connection's projection marks it closing: it gets no more change
+frames, its record-carrying requests are refused, and the relay `close` goes
+out once its running requests have answered. `sharing-client.js` opts in
+before storing anything when the hello has the capability and the build has
+a registry, discards change frames until the reply, and reports the outcome in
+its status; the link's probe opts in the same way, so a new link stores the
+opt-in reply's snapshot.
+
 Overlay clients keep Anki discovery, mining and the duplicate index local while
 linked; the host supplies dictionary data. For ordinary linked browsers,
 linked Anki mining keeps `hd_anki_screenshot`/discard local to the reading
@@ -3495,6 +4019,7 @@ uncertain write leaves it for inspection and an explicit retry.
 | Capture tab/document routing identities | service worker; recovered by validating the surviving offscreen host and reader | transient memory only |
 | Watched DOM nodes/ranges, cue/DOM observers, and collector epochs | linked content script | transient memory only |
 | Debug log: redacted warnings, errors, failed requests and fetches, shown errors and named page actions, newest 5,000 entries within 2 MiB | each extension context appends its own entries (`debug-log.js`); Get debug info reads them | IndexedDB database `hachidori-debug-log` (`events` records, `meta` totals); each context also keeps its newest 200 in memory |
+| Search history: each line the search page searched, with its time, source and window, newest `searchHistoryLimit` | `search.html` for its frame, and Settings for the count, a lowered limit and Clear history (`search-history.js`); a `BroadcastChannel` tells the other pages | IndexedDB database `hachidori-search-history` (`lines` records); not in backups ([search history](search-history.md#where-the-lines-are-kept)) |
 
 The debug log is the one store every context writes directly: each context's
 entries from one task go in one transaction that also updates the ring's
@@ -3579,6 +4104,7 @@ and in-flight dictionary commits when leaving Settings.
 | `hd_status` | Report readiness, loading state, registered-kind count (`dictionaryCount` and `registeredKindCount`), unique `packageCount`, generation, storage backend, threading mode, and whether the worker is the low-memory one (`lowMemory`) and its entry storage policy (`dictionaryEntryStorage`) and whether every package's entries are read from disk (`pagedDictionaries`), requested hash policy (`dictionaryIndexStorage`), the normal-mode RAM default (`useLessRamByDefault`), actual policy (`hashIndexStorage`) and resident hash budget; while the offscreen bridge runs an import, `updating: { id, phase, fallback }` names the replaced package and phase |
 | `hd_memory` | Report WASM capacity (`heapBytes`), live/free allocator bytes, combined cache (`pageCacheBytes`) with `entries`/`indexes` activity, requested/actual hash policy, `useLessRamByDefault` and budget, package/kind counts, and each package's hash, other-resident and resident-entry bytes plus actual hash residency; see [memory.md](memory.md) |
 | `hd_memory_total` | Answered by the offscreen document itself, outside the engine queue: `performance.measureUserAgentSpecificMemory()` over the document and its workers, with the engine heap (`heapBytes`, from `hd_memory`) counted once rather than once per engine thread; `bytes` is `null` where the API is unavailable; see [memory.md](memory.md) |
+| `hd_clipboard_read` | The search page's clipboard monitor (#639): from that page only, the worker relays it to the offscreen document, which returns the clipboard's text, at most its first 1,000 characters after any leading spaces; never forwarded to a linked browser's host |
 | `hd_engine_config` | Read `options.lowMemoryMode`, `options.dictionaryEntryStorage`, `options.dictionaryIndexStorage` and `options.useLessRamByDefault` for the offscreen document (its sender only) before it creates the engine worker; the service worker pushes the same message to the document when a stored option changes |
 | `hd_reload` | Reload enabled dictionaries from persisted metadata |
 | `hd_remove` | Stage a package's files, commit its removal, then delete the staged copy |

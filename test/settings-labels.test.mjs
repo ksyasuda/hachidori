@@ -59,6 +59,7 @@ const TOGGLE_CONTROLS = {
   personalDictionaryEnabled: "opt-personal-dictionary",
   showNoResultNotice: "opt-no-result-notice",
   hidePopupOnCursorExit: "opt-hide-on-cursor-exit",
+  showMetadataOnlyResults: "opt-metadata-only-results",
   audioAutoplay: "opt-audio-autoplay",
   sourceHighlightEnabled: "opt-source-highlight",
   showPopupAudioButton: "opt-popup-audio-button",
@@ -80,6 +81,7 @@ const TOGGLE_CONTROLS = {
   showPitchAccentColors: "opt-pitch-colors",
   // Stored inverted: the checkbox is on while the tags are shown.
   hidePopupGrammarTags: "opt-grammar-tags",
+  searchClickLookup: "opt-search-click-lookup",
 };
 
 test("every keybind toggle is labelled with its Settings control's wording and polarity", () => {

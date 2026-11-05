@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Hachidori",
   "short_name": "Hachidori",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Study Japanese vocabulary: look up words on any page and build Anki cards, optionally capturing on-screen context.",
   "minimum_chrome_version": "128",
   "icons": {
@@ -21,6 +21,9 @@
     "unlimitedStorage",
     "userScripts"
   ],
+  "optional_permissions": [
+    "clipboardRead"
+  ],
   "host_permissions": [
     "<all_urls>"
   ],
@@ -34,6 +37,18 @@
     },
     "openSettingsPage": {
       "description": "Open Hachidori settings"
+    },
+    "openSearchPage": {
+      "suggested_key": {
+        "default": "Alt+Insert"
+      },
+      "description": "Open the search page in a new tab"
+    },
+    "openSearchPageCurrentTab": {
+      "description": "Open the search page in the current tab"
+    },
+    "openPopupWindow": {
+      "description": "Open the search page in a popup window"
     },
     "close": {
       "description": "Close the popup"
@@ -68,6 +83,9 @@
     "historyBackward": {
       "description": "Go back in the popup's history"
     },
+    "historyForward": {
+      "description": "Go forward in the popup's history"
+    },
     "scanSelectedText": {
       "description": "Look up the selected text"
     },
@@ -82,6 +100,9 @@
     },
     "ignoreWord": {
       "description": "Ignore the current popup entry's word"
+    },
+    "switchLanguage": {
+      "description": "Switch to the next language"
     }
   },
   "action": {
@@ -100,6 +121,7 @@
       "run_at": "document_idle",
       "all_frames": true,
       "js": [
+        "vendor/languages/registry-reader.js",
         "reader-options.js",
         "dictionary-group-state.js",
         "lookup-stats-identity.js",
@@ -111,6 +133,7 @@
         "render/glossary.js",
         "render/popup.js",
         "subminer-host.js",
+        "language-text.js",
         "theme-host.js",
         "word-status-overrides.js",
         "word-highlights.js",
@@ -124,7 +147,13 @@
     }
   ],
   "content_security_policy": {
-    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'",
+    "sandbox": "sandbox allow-scripts allow-forms allow-popups allow-modals; script-src 'self' 'unsafe-eval'; child-src 'self'"
+  },
+  "sandbox": {
+    "pages": [
+      "search-frame.html"
+    ]
   },
   "cross_origin_embedder_policy": {
     "value": "require-corp"

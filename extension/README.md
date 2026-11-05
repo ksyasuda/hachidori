@@ -8,7 +8,9 @@ modules and classic scripts, the dictionary engine is committed WebAssembly
 under `vendor/`, and everything runs inside the browser. To run it in Chrome
 from a checkout, open `chrome://extensions`, turn on **Developer mode**, choose
 **Load unpacked** and select this folder. `scripts/package-store.py` zips this
-same folder, with the licence files, for the Chrome Web Store.
+same folder, with the licence files, for the Chrome Web Store. The Firefox
+build is this folder too, with the manifest `scripts/firefox_manifest.py`
+derives from this one; [docs/firefox.md](../docs/firefox.md) explains it.
 
 [The architecture guide](../docs/architecture.md) explains how the pieces
 work together and lists every runtime message and stored key. This page says
@@ -43,11 +45,13 @@ validated URL in the system browser.
 | File | Runs as | Role |
 | --- | --- | --- |
 | `background.js`, with the `background-*.js` modules it imports | the service worker | Routes every runtime message and owns everything in `chrome.storage.local`: dictionary metadata, options, the personal dictionary, update schedules, lookup counts, the words marked as known or ignored, automatic-backup metadata, first-run and sharing state. It also owns the alarms, the Anki gateway and the sharing host and client. It holds no engine state, so Chrome may stop it whenever it is idle. `background.js` registers the listeners and runs the start-up; `background-core.js` holds the targets, storage keys, offscreen relay, storage queue and dictionary-state rules, `background-requests.js` the requests the worker answers itself, recommended installs, linked browsers' requests and the Anki gateway, and `background-anki.js`, `background-backup.js`, `background-updates.js`, `background-sharing.js` and `background-netflix.js` those features. |
-| `content.js`, with the classic scripts listed under `content_scripts` | every frame of a web page | Scans the Japanese text near the pointer and renders a popup in that frame, bounded by its viewport. `content-scan.js` holds how it reads page text (the caret, scans, sentences, selections and word-highlight runs) and `content-dictionaries.js` how it reads the stored dictionary list and a kanji group's replies; both load just before `content.js` and publish on `globalThis.HDContent`. The popup uses a shadow root through `theme-host.js` and the selected renderer (`render/popup.js` for Default), with Anki and pronunciation controls (`anki-content.js`, `audio-content.js`). `content.css` is the only style the page itself receives: the source highlight and the word highlights. |
-| `offscreen.html`, `offscreen.js` | Chrome’s offscreen document | Owns the dictionary engine. `engine-worker.js` runs the pthread build with direct OPFS once `opfs-capability-worker.js` has proved the browser can, and imports each archive in a short-lived second instance, `import-worker.js`, so lookups keep working; `engine-worker-idbfs.js` runs the pthread build on IDBFS when the browser has shared memory but no OPFS access handles (Electron), and `engine-worker-local.js` the single-thread build on IDBFS when there is no shared memory, all through `engine-worker-runtime.js`; `engine-service.js` runs in the document only where workers are unavailable. `engine-recycler.js` decides when Low memory mode replaces the worker, and `dictionary-index-storage.js` which hash indexes stay in memory ([docs/memory.md](../docs/memory.md)). Pronunciation, Anki and the first-run installer load here on demand. |
+| `content.js`, with the classic scripts listed under `content_scripts` | every frame of a web page, and the startup and search pages, which load it themselves | Scans the Japanese text near the pointer and renders a popup in that frame, bounded by its viewport. `content-scan.js` holds how it reads page text (the caret, scans, sentences, selections and word-highlight runs) and `content-dictionaries.js` how it reads the stored dictionary list and a kanji group's replies; both load just before `content.js` and publish on `globalThis.HDContent`. The popup uses a shadow root through `theme-host.js` and the selected renderer (`render/popup.js` for Default), with Anki and pronunciation controls (`anki-content.js`, `audio-content.js`). `content.css` is the only style the page itself receives: the source highlight and the word highlights. |
+| `background.html`, `event-page.js` | Firefox's background page (Firefox build only) | Firefox has no extension service workers or offscreen documents. `background.html` runs `background.js` and holds `offscreen.html` in a frame; `event-page.js` keeps the page past Firefox's 30-second idle limit. The Chrome ZIP leaves both out. |
+| `offscreen.html`, `offscreen.js` | Chrome’s offscreen document, or the frame in Firefox's background page | Owns the dictionary engine. `engine-worker.js` runs the pthread build with direct OPFS once `opfs-capability-worker.js` has proved the browser can, and imports each archive in a short-lived second instance, `import-worker.js`, so lookups keep working; `engine-worker-idbfs.js` runs the pthread build on IDBFS when the browser has shared memory but no OPFS access handles (Electron), and `engine-worker-local.js` the single-thread build on IDBFS when there is no shared memory, all through `engine-worker-runtime.js`; `engine-service.js` runs in the document only where workers are unavailable. `engine-recycler.js` decides when Low memory mode replaces the worker, and `dictionary-index-storage.js` which hash indexes stay in memory ([docs/memory.md](../docs/memory.md)). Pronunciation, Anki and the first-run installer load here on demand. It also reads the clipboard for the search page's Clipboard monitor. |
 | `settings.html`, `settings.js` | the options page | Dictionaries, groups, updates, the personal dictionary, Reading, Design, pronunciation, Anki, keybinds, backup and sharing, and global search. `settings.js` navigates the sections, constructs their controllers and starts the page; the larger sections have their own `*-settings.js` controller or module (see **Pages** below); `design-preview.html` is the live preview inside Design. |
 | `startup.html`, `startup.js` | a tab opened once after install | First-run setup: recommended dictionaries, Anki detection, a practice lookup, and the offer to use a Hachidori that another browser on this computer already shares. Overlay mode skips it. |
-| `toolbar.html`, `toolbar.js` | the toolbar button's popup | Turns lookups on and off, shows the sharing state and opens Settings. |
+| `search.html`, `search-shell.js`, `search-frame.html`, `search-bridge.js`, `search.js` | a tab or popup window | The search page (#610): looks up a word typed or pasted into its box through the reader it loads into itself (`reader-page.js`, which the startup page shares), with the results docked under the box. The page itself is `search-frame.html`, which `search.html` holds as a sandboxed frame so that Custom JavaScript runs there too (#644); `search-shell.js` answers the reader's requests for it, and `search-bridge.js` is the frame's end. Its Clipboard monitor (`search-clipboard.js`, #639), whose switch `search.html` lays over the frame's header, searches Japanese text copied anywhere, which the offscreen document reads for it. Beside it, `search.html`'s Anki Template switch (#656) chooses the Template the built-in Anki button uses; `search-templates.js` lists the Templates there and in the frame's invisible copy. It keeps each line it searches in an IndexedDB history that `search.html` opens for the frame (`search-history.js`): Up and Down in the box walk it, and the searched text has Rubi's word and row cursor (`search-lines.js`), with earlier lines past its top row ([search history](../docs/search-history.md)). `search-window.js` opens it for the browser shortcuts and the toolbar's Search, bringing an open one forward, and opens the popup window at the size Settings sets. |
+| `toolbar.html`, `toolbar.js` | the toolbar button's popup | Turns lookups on and off, shows the sharing state and opens Settings and the search page. |
 
 `overlay-mode.js`, its `browser-api.js` dependency, `render/reader.css` and
 `icons.css` and bundled `vendor/themes/` assets are the files web pages may fetch
@@ -68,7 +72,11 @@ that interprets a missing mode does. Sampling runs only for these Settings actio
 and a newer choice cancels its result. Explicit ascending/descending choices stay fixed.
 
 - **Dictionaries and stored state.** `reader-options.js` is the one stored
-  options view every context reads. `dictionary-group-state.js` and
+  options view every context reads, and the profile layer of
+  [Languages and profiles](../docs/languages.md) (projections, the one
+  options writer, capability masking); `profile-state.js` converts records
+  between the single-profile shape and records with profiles and builds the
+  Japanese view, for the service worker and the engine. `dictionary-group-state.js` and
   `dictionary-groups.js` hold the group rules and their Settings controls,
   `dictionary-name-drafts.js` the autosaved names, `dictionary-progress.js`
   the import progress. `managed-dictionary-source.js` and
@@ -113,12 +121,19 @@ and a newer choice cancels its result. Explicit ascending/descending choices sta
   offscreen document (`audio-offscreen.js`); `speech.js` wraps the browser's
   text-to-speech.
 - **Backup.** `backup-archive.js` is the manual ZIP format, `backup-state.js`
-  the shared snapshot rules, `backup-automatic.js` the two-record daily
+  the shared snapshot rules (with version 4's `profiles`, docs/languages.md
+  17.2), `backup-automatic.js` the two-record daily
   retention, cadence and age rules, `backup-downloads.js` the pending downloads,
   and `backup-settings.js` the manual and automatic restore controls.
+  `japanese-view.js` builds the Japanese view of records with profiles
+  (17.1), which backups, older linked browsers and the relay's dictionary
+  download read; `language-names.js` names languages in their messages, also
+  ones this build has no pack for.
 - **Sharing.** `sharing-protocol.js` is the wire contract both sides import;
   `sharing-host.js` and `sharing-client.js` are the two roles in the service
-  worker; `sharing-settings.js` is the Settings section. `linked-import.js`
+  worker; `sharing-languages.js` holds what a host with language profiles
+  sends each linked browser (17.3-17.6); `sharing-settings.js` is the Settings
+  section. `linked-import.js`
   sends a dictionary archive to a host in chunks and, on the host, holds the
   upload until it imports it ([docs/sharing.md](../docs/sharing.md#imports-from-linked-browsers)). `anki-addon.js` pins
   and downloads the compatible `.ankiaddon` release from
@@ -162,8 +177,9 @@ and a newer choice cancels its result. Explicit ascending/descending choices sta
   write the worker's `wordStatusOverrides` through `hd_word_status_override`;
   `word-status-overrides.js` is that record's shape for every context.
 - **Pages.** `settings-search.js` and `settings-dom.js` serve Settings;
-  `settings-theme.js` is the classic script in its `<head>` that applies the
-  saved theme before the first paint, ahead of the `settings.js` module;
+  `settings-theme.js` is the classic script in the `<head>` of Settings and
+  the search page that applies the saved theme before the first paint, ahead
+  of the page's module;
   `library-settings.js` (Dictionaries → Dictionaries: the rows, their order,
   selection and bulk actions, the revision-checked commit queue and removal),
   `import-settings.js` (Add dictionaries and the recommended installer, with
@@ -175,14 +191,18 @@ and a newer choice cancels its result. Explicit ascending/descending choices sta
   their autosave) are the page's own modules: they import from `settings.js`
   and from each other, and assign a binding only in the module that declares
   it; `experimental-settings.js` renders the Advanced → Experimental features
-  switches from the registry in `reader-options.js`; `memory-settings.js`
+  switches from the registry in `reader-options.js`; `profile-settings.js`
+  the Language menu, **Use for lookups** and the Manage languages
+  dialog, and `language-settings.js` the settings a language pack defines
+  (docs/languages.md 5.3, 7.5, 16.3-16.5); `memory-settings.js`
   the Advanced → Memory readout and each Dictionaries row's *In memory* line;
   `debug-info.js` the Advanced → Troubleshooting *Get debug info* JSON report,
   with credentials redacted and reader content reduced to counts, and
   `debug-log.js` the debug log every extension context writes to one
   IndexedDB ring: redacted warnings, errors and failed requests, the errors a
   page shows (with *Copy error details* beside them) and the page actions
-  before them;
+  before them, whose IndexedDB request and transaction promises the search
+  history (`search-history.js`) shares;
   `activation-settings.js` the Reading → Activation key or button picker and
   its *Press to set* recorder;
   `keybind-settings.js`, `custom-button-settings.js` and `external-links.js`
@@ -193,14 +213,22 @@ and a newer choice cancels its result. Explicit ascending/descending choices sta
   the Design preview from the images in `assets/` (see
   `assets/ATTRIBUTION.md`); `design-preview.js` renders the preview from
   `sample-meal.svg` and local sample data.
-- **Theme Store.** `theme-store.js` renders the Design carousel and
+- **Theme Store.** `theme-store.js` renders the Design carousel,
   shows only the Design settings the selected theme declares in
-  `vendor/themes/index.json`.
-  `theme-host.js` selects Default or a bundled Nazeka, Plain or JL view before constructing
+  `vendor/themes/index.json` and lists its colour variants under Colours.
+  `theme-host.js` selects Default or a bundled Nazeka, Plain, JL, Bee or Crystal view before constructing
   content and applies only its CSS. See the [renderer contract](../docs/themes/README.md).
+  `language-text.js` applies a language pack's display transforms to the text
+  a popup shows (docs/languages.md 10.4).
 - **Renderer.** `render/` is the Default popup renderer ported from GameSentenceMiner,
   which adapts Hoshi Reader and Yomitan; `render/ATTRIBUTION.md` records what
   came from where.
+- **Custom JavaScript.** `custom-javascript.js` registers Design → Custom
+  JavaScript as a user script, with `custom-javascript-bridge.js` ahead of it in
+  the same world: the bridge attaches the popup's closed root when the reader
+  asks and returns it to the saved code through `host.shadowRoot`
+  ([architecture](../docs/architecture.md)). The search page runs the same
+  code in its sandboxed frame, where the reader gives the popup an open root.
 - **Overlay mode.** `overlay-mode.js` is the one switch a host such as the
   GameSentenceMiner overlay flips in its copy. It also defines the shared
   host-capability policy used by Settings, the toolbar, the reader and the
@@ -210,6 +238,9 @@ and a newer choice cancels its result. Explicit ascending/descending choices sta
   `vendor/hoshidicts-threaded-idbfs.{mjs,wasm}` and
   `vendor/hoshidicts.{mjs,wasm}` are the three builds of the hoshidicts engine
   from `wasm/build.sh`, and `vendor/zip.js` the pinned zip.js runtime.
+  `vendor/languages/` is the language packs of `third_party/hoshidicts` with
+  `registry.js` and `registry-reader.js`, written by
+  `scripts/sync-languages.mjs` after each submodule bump.
   `vendor/gifenc.js` is the pinned gifenc runtime (the experimental Netflix
   mining GIF encoder), its source and checksum in `scripts/store-sources.json`.
   `vendor/yomitan/structured-content-style.js` is Yomitan's
@@ -217,7 +248,11 @@ and a newer choice cancels its result. Explicit ascending/descending choices sta
   in `vendor/yomitan/source.json`. `vendor/kanjidic/kanji-readings.json` is
   KANJIDIC2's kanji readings for the furigana split (CC BY-SA 4.0), which
   `scripts/kanji-readings.mjs` regenerates from the archive pinned in
-  `vendor/kanjidic/source.json`. They are
+  `vendor/kanjidic/source.json`. `vendor/kanwa/kanwa-readings.json` is the
+  character readings KANJIDIC2 lacks and the compound readings of Jitendex's
+  kanwa data, which the split falls back on (CC BY-SA 4.0);
+  `scripts/kanwa-readings.mjs` regenerates it from the jitendex-data commit
+  pinned in `vendor/kanwa/source.json`. They are
   committed build output: update them with their source change and otherwise
   leave them alone.
 - `icons/` holds the extension's icons.

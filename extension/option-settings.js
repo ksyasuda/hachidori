@@ -10,11 +10,13 @@ import { describeErrorOrJson } from "./error-text.js";
 import { inferFrequencyDirection } from "./frequency-direction.js";
 import { applyPageTheme } from "./settings-dom.js";
 import {
-  activationLabel, activeSection, adoptOptions, APPEARANCE_CHOICES, clampOption, customButtonController,
+  activationLabel, activeSection, adoptOptions, APPEARANCE_CHOICES, characterViewName, clampOption, customButtonController,
   DEFAULT_OPTIONS, DEFINITION_LOOKUP_MODES, DESIGN_OPTION_KEYS, element, FREQUENCY_ORDERS, frequencyModeOrder,
-  hasCapability, METADATA_FIELDS, normaliseKanjiSelection, NUMBER_FIELDS, numberFormat, OPTION_SECTIONS, options,
-  OPTIONS_SAVE_DELAY_MS, optionsRevision, POPUP_RENDERER_IDS, POPUP_THEME_GROUPS,
-  renderCurrentOptions, renderExperimentalSettings, renderLowMemoryMode, savedOptions, send, setSectionStatus,
+  hasCapability, languageName, METADATA_FIELDS, normaliseKanjiSelection, NUMBER_FIELDS, numberFormat, OPTION_SECTIONS,
+  options,
+  OPTIONS_SAVE_DELAY_MS, optionsRevision, POPUP_RENDERER_IDS, POPUP_THEME_GROUPS, profileFields,
+  renderCurrentOptions, renderExperimentalSettings, renderLanguageCapabilities, renderLowMemoryMode, renderPackSettings,
+  savedOptions, send, setSectionStatus,
   syncNavigationStatus, themeStore, updateAnkiSettings, updateAudioSettings, updateDesignPreview,
   updateKeybindSettings, WORD_HIGHLIGHT_SWITCHES, WORKER_TARGET,
 } from "./settings.js";
@@ -32,6 +34,58 @@ let optionsSaveFailed = false;
 let optionsEditRevision = null; // NOSONAR: shared with the other Settings modules
 let activationController;
 let frequencyDirectionRequest = 0;
+
+// Advanced → Search history (docs/search-history.md): how many lines it keeps,
+// Clear history, and its limit, applied here at once when the saved limit is
+// lowered (the search page applies it with its next line). Only the saved
+// limit prunes: a draft whose save is refused must not delete lines. The
+// history is this browser's IndexedDB, which Settings opens when Advanced first
+// shows.
+let searchHistory = null;
+let searchHistoryLimit = null;
+
+function openedSearchHistory() {
+  searchHistory ??= import("./search-history.js").then(({ openSearchHistory }) => {
+    const store = openSearchHistory({ indexedDB: window.indexedDB });
+    store.onChange(() => { void renderSearchHistory(); });
+    return store;
+  });
+  return searchHistory;
+}
+
+async function renderSearchHistory() {
+  if (activeSection !== "advanced") return;
+  const count = element("search-history-count");
+  const clear = element("search-history-clear");
+  try {
+    const store = await openedSearchHistory();
+    if (savedOptions.searchHistoryLimit !== searchHistoryLimit) {
+      searchHistoryLimit = savedOptions.searchHistoryLimit;
+      await store.prune(searchHistoryLimit);
+    }
+    const kept = await store.count();
+    const lines = kept === 1 ? "line" : "lines";
+    count.textContent = kept === 0 ? "No lines kept." : `${numberFormat.format(kept)} ${lines} kept.`;
+    clear.disabled = kept === 0;
+  } catch (error) {
+    count.textContent = `Could not read the search history: ${describeErrorOrJson(error)}`;
+    clear.disabled = true;
+  }
+}
+
+async function clearSearchHistory() {
+  if (!window.confirm("Clear the search history? Every line the search page kept is deleted.")) return;
+  element("search-history-clear").disabled = true;
+  setSectionStatus("search-history-status", "Clearing the search history…", "working");
+  try {
+    await (await openedSearchHistory()).clear();
+    setSectionStatus("search-history-status", "Search history cleared.", "ready", true);
+  } catch (error) {
+    setSectionStatus("search-history-status", `Could not clear the search history: ${describeErrorOrJson(error)}`, "error",
+      false, error);
+  }
+  await renderSearchHistory();
+}
 
 function selectionParts(value) {
   if (value && typeof value === "object") {
@@ -191,7 +245,7 @@ function renderMetadataControls() {
     element(field.id).checked = field.inverted ? !options[field.key] : options[field.key];
   }
   renderDefinitionBlurControls();
-  // The dictionary picks the furigana's pitch, which also gives the headword's colour.
+  // The dictionary picks the reading's pitch, which also gives the headword's colour.
   renderPreferredDictionary("opt-pitch-dictionary", options.pitchAccentFuriganaDictionary,
     "pitch", "Automatic — first available pitch", options.showPitchAccentFurigana || options.showPitchAccentColors);
   // Like the dictionary picker, a focused style keeps its draft until blur.
@@ -243,7 +297,7 @@ function renderFrequencyOrder() {
   else if (!selected) hint = "Choose an available frequency dictionary to use this direction.";
   else if (selected.frequencyMode === "rank-based") hint = "Rank-based: Auto direction puts the lowest numbers first.";
   else if (selected.frequencyMode === "occurrence-based") hint = "Occurrence-based: Auto direction puts the highest numbers first.";
-  else hint = "No mode declared: Auto direction compares common and less-common Japanese words; inconclusive results read it as ranks, lowest numbers first.";
+  else hint = `No mode declared: Auto direction compares common and less-common ${languageName()} words; inconclusive results read it as ranks, lowest numbers first.`;
   const hintElement = element("frequency-order-hint");
   if (hintElement.textContent !== hint) hintElement.textContent = hint;
 }
@@ -269,6 +323,7 @@ async function applyFrequencyDirection() {
         if (!owns()) throw new Error("The frequency dictionary choice changed.");
         const reply = await send("hd_lookup", {
           text, maxResults: 256, scanLength: [...text].length, options: { frequencyOrder: "disabled" },
+          ...profileFields(),
         });
         if (!reply.ok) throw new Error(reply.error || "The frequency lookup failed.");
         return reply;
@@ -348,7 +403,9 @@ function renderKanjiChoices() {
 
   const automatic = document.createElement("option");
   automatic.value = "";
-  automatic.textContent = "Automatic — use every kanji dictionary";
+  // A character view's dictionaries are named for its characters (docs/languages.md 7.4).
+  const characters = (characterViewName() ?? "Kanji").toLowerCase();
+  automatic.textContent = `Automatic — use every ${characters} dictionary`;
   select.appendChild(automatic);
 
   const enabled = dictionaries.filter((entry) => entry.enabled !== false);
@@ -359,10 +416,10 @@ function renderKanjiChoices() {
     enabled.filter((entry) => hasCapability(entry, "term")).map((entry) => entry.title),
   );
   const groups = [
-    { kind: "kanji", label: "Kanji dictionaries", titles: [...withKanji] },
+    { kind: "kanji", label: `${characters[0].toUpperCase()}${characters.slice(1)} dictionaries`, titles: [...withKanji] },
     {
       kind: "term",
-      label: "Term dictionaries — requires a matching single-kanji entry",
+      label: `Term dictionaries — requires a matching single-${characters} entry`,
       titles: [...withTerms],
     },
   ];
@@ -454,6 +511,7 @@ function renderScanDelayControls() {
 }
 
 function renderOptions() {
+  renderLanguageCapabilities();
   applyPageTheme(document, options);
   for (const field of NUMBER_FIELDS) {
     const input = element(field.id);
@@ -465,9 +523,14 @@ function renderOptions() {
   element("opt-japanese-only").checked = options.onlyScanJapaneseText;
   renderPersonalDictionaryControls();
   element("opt-no-result-notice").checked = options.showNoResultNotice;
+  element("opt-metadata-only-results").checked = options.showMetadataOnlyResults;
   renderCursorExitControls();
   element("opt-source-highlight").checked = options.sourceHighlightEnabled;
   element("opt-popup-audio-button").checked = options.showPopupAudioButton;
+  element("opt-toolbar-search").checked = options.showToolbarSearchButton;
+  element("opt-search-click-lookup").checked = options.searchClickLookup;
+  element("opt-search-history").checked = options.searchHistoryEnabled;
+  void renderSearchHistory();
   element("opt-audio-autoplay").checked = options.audioAutoplay;
   element("opt-smaller-anki-cards").checked = options.smallerAnkiCards;
   renderThemeChoices();
@@ -490,6 +553,7 @@ function renderOptions() {
   renderWordHighlightControls();
   renderExperimentalSettings();
   renderLowMemoryMode();
+  void renderPackSettings();
   updateDesignPreview();
   updateAudioSettings();
   updateAnkiSettings();
@@ -527,6 +591,19 @@ function attachOptionHandlers() {
     options.showPopupAudioButton = event.target.checked;
     writeOptions();
   });
+  element("opt-toolbar-search").addEventListener("change", (event) => {
+    options.showToolbarSearchButton = event.target.checked;
+    writeOptions();
+  });
+  element("opt-search-click-lookup").addEventListener("change", (event) => {
+    options.searchClickLookup = event.target.checked;
+    writeOptions();
+  });
+  element("opt-search-history").addEventListener("change", (event) => {
+    options.searchHistoryEnabled = event.target.checked;
+    writeOptions();
+  });
+  element("search-history-clear").addEventListener("click", () => { void clearSearchHistory(); });
   element("reset-design").addEventListener("click", () => {
     for (const key of DESIGN_OPTION_KEYS) options[key] = DEFAULT_OPTIONS[key];
     customButtonController?.reset();
@@ -590,6 +667,10 @@ function attachOptionHandlers() {
   });
   element("opt-no-result-notice").addEventListener("change", (event) => {
     options.showNoResultNotice = event.target.checked;
+    writeOptions();
+  });
+  element("opt-metadata-only-results").addEventListener("change", (event) => {
+    options.showMetadataOnlyResults = event.target.checked;
     writeOptions();
   });
   element("opt-hide-on-cursor-exit").addEventListener("change", (event) => {
@@ -783,14 +864,20 @@ async function flushOptions() {
   }
   let finishSave;
   optionsSaveCompletion = new Promise(resolve => { finishSave = resolve; });
-  const sent = { patch: pendingOptions, baseRevision: pendingOptionsRevision };
+  // Edits belong to the profile they were made for, which this page edits
+  // until they are saved (docs/languages.md 5.3).
+  const sent = { patch: pendingOptions, baseRevision: pendingOptionsRevision, fields: profileFields() };
   savingOptions = sent;
   pendingOptions = {};
   setOptionsStatus("Saving…");
   try {
+    // A pack's own settings travel beside the option keys (section 7.5).
+    const { packSettings, ...optionPatch } = sent.patch;
     const reply = await send("hd_options_write", {
       baseRevision: sent.baseRevision,
-      options: sent.patch,
+      options: optionPatch,
+      ...sent.fields,
+      ...(packSettings === undefined ? {} : { packSettings }),
     }, WORKER_TARGET);
     if (reply.options) adoptOptions(reply.options);
     if (!reply.ok) {
@@ -804,8 +891,10 @@ async function flushOptions() {
     }
     setOptionsStatus(Object.keys(pendingOptions).length > 0 ? "Unsaved changes…" : "Saved.", true);
   } catch (error) {
-    pendingOptions = { ...sent.patch, ...pendingOptions };
-    optionsSaveFailed = true;
+    // A patch for a profile this page no longer edits (another page removed
+    // it, and the page moved on) was discarded with that profile's drafts.
+    if (sent.fields.profileId === profileFields().profileId) pendingOptions = { ...sent.patch, ...pendingOptions };
+    optionsSaveFailed = Object.keys(pendingOptions).length > 0;
     // A reply can be lost after storage commits. Read the current revision for
     // explicit retry; do not silently overwrite it or drop the retained draft.
     try {
@@ -824,20 +913,37 @@ async function flushOptions() {
   }
 }
 
-async function flushOptionsUntilIdle() {
+// Saves every pending edit. False while a refused save waits for Save my
+// changes or Use saved settings.
+async function settlePendingOptions() {
   window.clearTimeout(optionsTimer);
   optionsTimer = null;
   for (;;) {
-    if (optionsSaveFailed) {
-      throw new Error("Save the pending settings before checking AnkiConnect.");
-    }
-    if (savingOptions === null && Object.keys(pendingOptions).length === 0) return;
+    if (optionsSaveFailed) return false;
+    if (savingOptions === null && Object.keys(pendingOptions).length === 0) return true;
     await flushOptions(); // NOSONAR: each pass saves what the previous save left queued
   }
 }
 
+async function flushOptionsUntilIdle() {
+  if (!await settlePendingOptions()) {
+    throw new Error("Save the pending settings before checking AnkiConnect.");
+  }
+}
+
+// The edited profile was removed elsewhere: its unsaved edits cannot be
+// saved anywhere (docs/languages.md 5.3).
+function discardPendingOptions() {
+  window.clearTimeout(optionsTimer);
+  optionsTimer = null;
+  pendingOptions = {};
+  optionsEditRevision = null;
+  optionsSaveFailed = false;
+}
+
 export {
-  attachOptionHandlers, flushOptionsUntilIdle, isAvailableFrequencyDictionary, normaliseKanjiClickOption,
-  optionsEditRevision, pendingOptions, renderOptions, renderThemeChoices, renderWordHighlightControls,
-  savingOptions, selectedFrequencyDictionary, setOptionsStatus, writeOptions
+  attachOptionHandlers, discardPendingOptions, flushOptionsUntilIdle, isAvailableFrequencyDictionary,
+  normaliseKanjiClickOption, optionsEditRevision, pendingOptions, renderOptions, renderSearchHistory,
+  renderThemeChoices, renderWordHighlightControls, savingOptions, selectedFrequencyDictionary, setOptionsStatus,
+  settlePendingOptions, writeOptions
 };

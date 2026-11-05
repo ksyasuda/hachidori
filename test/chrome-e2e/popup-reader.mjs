@@ -10,8 +10,10 @@
 // element.shadowRoot from an injected script, and that property is null for a
 // root attached with mode "closed". CDP's DOM domain can -- DOM.getDocument with
 // pierce:true reports the closed root and its subtree -- so every read of the
-// popup goes through a session instead of a selector.
-async function popupReader(page, depth = 0) {
+// popup goes through a session instead of a selector. `documentUrl` names the
+// frame document whose popup to read, as search.html's frame (#644);
+// otherwise it is the page's own.
+async function popupReader(page, depth = 0, documentUrl = null) {
   const cdp = await page.createCDPSession();
   await cdp.send("DOM.enable");
   await cdp.send("Runtime.enable");
@@ -21,18 +23,20 @@ async function popupReader(page, depth = 0) {
     // nodeIds live only until the next getDocument, so each operation re-walks.
     const { root } = await cdp.send("DOM.getDocument", { depth: -1, pierce: true });
     let nodeId = null;
-    const walk = node => {
+    const walk = (node, url) => {
       const attributes = node.attributes || [];
       for (let i = 0; i < attributes.length; i += 2) {
         if (attributes[i] === "class" && String(attributes[i + 1]).includes("gsm-hoshidicts-popup")
-            && attributes[attributes.indexOf("data-hoshidicts-depth") + 1] === String(depth)) {
+            && attributes[attributes.indexOf("data-hoshidicts-depth") + 1] === String(depth)
+            && (documentUrl === null || url === documentUrl)) {
           nodeId = node.nodeId;
         }
       }
-      for (const shadow of node.shadowRoots || []) walk(shadow);
-      for (const child of node.children || []) walk(child);
+      for (const shadow of node.shadowRoots || []) walk(shadow, url);
+      for (const child of node.children || []) walk(child, url);
+      if (documentUrl !== null && node.contentDocument) walk(node.contentDocument, node.contentDocument.documentURL);
     };
-    walk(root);
+    walk(root, root.documentURL);
     if (nodeId === null) return null;
     const { object } = await cdp.send("DOM.resolveNode", { nodeId });
     return object;
@@ -63,45 +67,46 @@ async function popupReader(page, depth = 0) {
         const noteFormRect = noteForm?.getBoundingClientRect();
         const noteActionsRect = noteActions?.getBoundingClientRect();
         // Each headword reading must be centred over the text it reads (た over
-        // 食, not over 食べ), and pitch contours must join into one line. Chrome
-        // reports a native <rt>'s whole column for its text, wherever ruby-align
-        // draws the glyphs, so plain ruby can only be checked through its style.
-        // Pitch ruby is laid out as flex boxes, whose text geometry is real.
+        // 食, not over 食べ). Chrome reports a native <rt>'s whole column for its
+        // text, wherever ruby-align draws the glyphs, so plain ruby can only be
+        // checked through its style. The pitch is not in the furigana (#606): it
+        // is drawn on the reading after the headword, as one row of morae that
+        // starts after the headword's text, on its line, clear of its furigana.
         const expression = this.querySelector(".gsm-hoshidicts-expression");
-        const pitchRubies = [...(expression?.querySelectorAll(".gsm-hoshidicts-pitch-ruby") ?? [])];
+        const pitchReadings = [...(expression?.querySelectorAll(".gsm-hoshidicts-pitch-reading") ?? [])];
         const textRects = node => {
           const range = this.ownerDocument.createRange();
           const walker = this.ownerDocument.createTreeWalker(node, NodeFilter.SHOW_TEXT);
           const rects = [];
           while (walker.nextNode()) {
+            if (walker.currentNode.parentElement.closest("rt, .gsm-hoshidicts-pitch-reading")) continue;
             range.selectNodeContents(walker.currentNode);
             rects.push(range.getBoundingClientRect());
           }
           return rects;
         };
-        const textCentre = node => {
-          const rects = textRects(node);
-          return (Math.min(...rects.map(rect => rect.left)) + Math.max(...rects.map(rect => rect.right))) / 2;
-        };
         const spread = values => values.length ? Math.max(...values) - Math.min(...values) : 0;
-        const pitchCentring = pitchRubies.map(ruby => Math.abs(
-          textCentre(ruby.querySelector("rt")) - textCentre(ruby.querySelector(".gsm-hoshidicts-pitch-base"))));
-        const contourRects = pitchRubies
-          .map(ruby => ruby.querySelector(".gsm-hoshidicts-pitch-contour").getBoundingClientRect());
-        const contourGaps = contourRects.slice(1)
-          .map((rect, index) => Math.abs(rect.left - contourRects[index].right));
-        // A kanji segment's base is taller than a kana one (its link has a
-        // dotted underline), yet every segment's contour and text must share
-        // one row. A rise or drop must also span the 2px lines it joins, or
-        // its outer corner is notched: its border image fills the mora's
-        // padding box and reaches out by its own borders, the lines' width.
+        const overlaps = (a, b) => a.left < b.right - 0.5 && b.left < a.right - 0.5
+          && a.top < b.bottom - 0.5 && b.top < a.bottom - 0.5;
+        const headwordText = expression ? textRects(expression) : [];
+        const readingRect = pitchReadings[0]?.getBoundingClientRect();
+        const readingBeside = pitchReadings.length === 1 && headwordText.length > 0
+          && readingRect.left >= Math.max(...headwordText.map(rect => rect.right)) - 0.5
+          && headwordText.every(rect => readingRect.top < rect.bottom && rect.top < readingRect.bottom)
+          && [...expression.querySelectorAll("rt")].every(rt => !overlaps(rt.getBoundingClientRect(), readingRect));
+        const contourRects = [...(expression?.querySelectorAll(".gsm-hoshidicts-pitch-contour > *") ?? [])]
+          .map(mora => mora.getBoundingClientRect());
+        // A rise or drop must span the 2px lines it joins, or its outer corner
+        // is notched: its border image fills the mora's padding box and
+        // reaches out by its own borders, the lines' width.
         const transitions = [...(expression?.querySelectorAll(".gsm-hoshidicts-pitch-mora[data-pitch-transition]") ?? [])];
         // The overline furigana style draws the pitch list's Yomitan text
         // instead: a line over each high mora and a hook where the pitch
-        // drops, both in the popup's text colour.
+        // drops, both in the popup's text colour. The headword draws them as
+        // each high mora's ::after.
         const overlines = [...(expression?.querySelectorAll('[data-pitch-style="overline"]'
-          + ' > .pronunciation-mora[data-pitch="high"] > .pronunciation-mora-line') ?? [])]
-          .map(line => view.getComputedStyle(line));
+          + ' > .pronunciation-mora[data-pitch="high"]') ?? [])]
+          .map(mora => view.getComputedStyle(mora, "::after"));
         return {
           hidden: this.hasAttribute("hidden"),
           height: this.getBoundingClientRect().height,
@@ -162,12 +167,10 @@ async function popupReader(page, depth = 0) {
           furiganaAlignment: {
             rubyAlign: expression ? view.getComputedStyle(expression).rubyAlign : null,
             rubies: expression?.querySelectorAll("ruby").length ?? 0,
-            pitchRubies: pitchRubies.length,
-            pitchCentring: Math.max(0, ...pitchCentring),
-            contourGap: Math.max(0, ...contourGaps),
+            readings: [...(expression?.querySelectorAll("rt") ?? [])].map(rt => rt.textContent),
+            pitchReadings: pitchReadings.length,
+            readingBeside,
             contourTopSpread: spread(contourRects.map(rect => rect.top)),
-            baseTextSpread: spread(pitchRubies.flatMap(ruby =>
-              textRects(ruby.querySelector(".gsm-hoshidicts-pitch-base")).map(rect => rect.top))),
             transitions: transitions.length,
             transitionsCoverLines: transitions.every(mora => {
               const stroke = view.getComputedStyle(mora, "::after");
@@ -218,15 +221,16 @@ async function popupReader(page, depth = 0) {
     }
   }
 
-  async function click(selector) {
+  // Clicks the selector's `index`th match in the popup, in document order.
+  async function click(selector, index = 0) {
     const object = await resolvePopupObject();
     if (object === null) return false;
     const { result } = await cdp.send("Runtime.callFunctionOn", {
       objectId: object.objectId,
       returnByValue: true,
-      arguments: [{ value: selector }],
-      functionDeclaration: `function (target) {
-        const element = this.querySelector(target);
+      arguments: [{ value: selector }, { value: index }],
+      functionDeclaration: `function (target, index) {
+        const element = this.querySelectorAll(target)[index];
         if (!element) return false;
         element.click();
         return true;
@@ -451,8 +455,9 @@ async function popupReader(page, depth = 0) {
     return result.value ?? null;
   }
 
-  // A dictionary card is a plain box, as in Yomitan: its title is a label, not
-  // a control, and its definitions are laid out without any activation.
+  // A dictionary card is a plain box, as in Yomitan: its dictionary's tag is a
+  // label, not a control, and its definitions are laid out without any
+  // activation. The tags of that row are measured as drawn.
   async function glossaryCard() {
     const object = await resolvePopupObject();
     if (object === null) return null;
@@ -462,23 +467,35 @@ async function popupReader(page, depth = 0) {
         const cards = [...this.querySelectorAll(".gsm-hoshidicts-glossary-card")];
         const card = cards[0];
         if (!card) return null;
-        const title = card.querySelector(":scope > .gsm-hoshidicts-glossary-card-title");
+        const tag = card.querySelector(".gsm-hoshidicts-dictionary-tag");
+        if (!tag) return { count: cards.length, tag: null };
         const view = this.ownerDocument.defaultView;
         await new Promise(resolve => view.requestAnimationFrame(() => view.requestAnimationFrame(resolve)));
-        const rect = title.getBoundingClientRect();
+        const rect = tag.getBoundingClientRect();
+        const row = tag.parentNode;
         const body = card.querySelector(".gsm-hoshidicts-definitions");
+        const rowSize = Number.parseFloat(view.getComputedStyle(row).fontSize);
         return {
           count: cards.length,
           tags: cards.map(other => other.tagName),
           inDisclosure: cards.some(other => other.closest("details") !== null),
-          label: title.textContent,
-          dictionary: title.title,
-          titleTag: title.tagName,
-          cursor: view.getComputedStyle(title).cursor,
-          marker: view.getComputedStyle(title, "::before").content,
+          titles: this.querySelectorAll(".gsm-hoshidicts-glossary-card-title").length,
+          label: tag.textContent,
+          dictionary: tag.title,
+          // Yomitan's place for it: after the first definition's own tags.
+          place: row.matches(".definition-tag-list") && row.parentNode === body.firstElementChild
+            && tag === row.lastElementChild,
+          scheme: view.getComputedStyle(card).colorScheme,
+          row: [...row.children].map(node => {
+            const style = view.getComputedStyle(node);
+            return { category: node.dataset.category, background: style.backgroundColor, color: style.color,
+              weight: style.fontWeight, size: Number.parseFloat(style.fontSize) / rowSize };
+          }),
+          cursor: view.getComputedStyle(tag).cursor,
+          marker: view.getComputedStyle(tag, "::before").content,
           cardHeight: card.getBoundingClientRect().height,
           bodyHeight: body.getBoundingClientRect().height,
-          titlePoint: { x: rect.x + 6, y: rect.y + rect.height / 2 },
+          tagPoint: { x: rect.x + 6, y: rect.y + rect.height / 2 },
         };
       }`,
     });
@@ -731,14 +748,25 @@ async function popupReader(page, depth = 0) {
           expression: entry.dataset.expression,
           aria: (index === 0 ? this.querySelector(".gsm-hoshidicts-primary-header") : entry)
             ?.querySelector(".gsm-hoshidicts-expression")?.getAttribute("aria-label"),
-          cards: [...entry.querySelectorAll(".gsm-hoshidicts-glossary-card")].map(card => ({
-            dictionary: card.querySelector(".gsm-hoshidicts-glossary-card-title").title,
-            label: card.querySelector(".gsm-hoshidicts-glossary-card-title").textContent,
-            bodies: [...card.querySelectorAll(".gsm-hoshidicts-glossary-content")].map(body => body.innerHTML),
-            // Each body's visible text: Yomitan's gloss separators are hidden.
-            text: [...card.querySelectorAll(".gsm-hoshidicts-glossary-content")].map(body =>
-              [...body.querySelectorAll(".gloss-content")].map(content => content.textContent).join("")),
-          })),
+          cards: [...entry.querySelectorAll(".gsm-hoshidicts-glossary-card")].map(card => {
+            // Releases before #612 label a card with a title, not a dictionary
+            // tag; chrome-backup-release.mjs reads such a release's popup.
+            const tag = card.querySelector(".gsm-hoshidicts-dictionary-tag, :scope > .gsm-hoshidicts-glossary-card-title");
+            return {
+              dictionary: tag.title,
+              label: tag.textContent,
+              bodies: [...card.querySelectorAll(".gsm-hoshidicts-glossary-content")].map(body => body.innerHTML),
+              // Each body's visible text: Yomitan's gloss separators are hidden.
+              text: [...card.querySelectorAll(".gsm-hoshidicts-glossary-content")].map(body =>
+                [...body.querySelectorAll(".gloss-content")].map(content => content.textContent).join("")),
+            };
+          }),
+          // The dictionaries of the entry's frequency tags and of the pitch
+          // accent groups it shows, in order.
+          frequencyDictionaries: [...entry.querySelectorAll(".gsm-hoshidicts-tag-frequency:not([data-frequency-average])")]
+            .map(tag => tag.dataset.dictionary),
+          pitchDictionaries: [...entry.querySelectorAll(".pronunciation-group")]
+            .filter(group => group.getClientRects().length > 0).map(group => group.dataset.dictionary),
         }));
         // Attribute insertion order is not DOM meaning. Compare the complete
         // ordered body DOM, retaining every node and attribute name/value.
@@ -812,8 +840,10 @@ async function popupReader(page, depth = 0) {
             hiddenFrequencyDictionaries: [...this.querySelectorAll(".gsm-hoshidicts-tag-frequency[hidden]")]
               .filter(tag => tag.getClientRects().length === 0).map(tag => tag.dataset.dictionary),
             pitch: this.querySelectorAll(".gsm-hoshidicts-tag-pitch").length,
-            ruby: [...this.querySelectorAll(".gsm-hoshidicts-pitch-reading")].map(node => node.dataset.pitchDictionary),
-            rubyStyles: [...this.querySelectorAll(".gsm-hoshidicts-pitch-contour")]
+            // The headword's pitch (#606: on the reading after it, or on a kana
+            // headword's own kana): its dictionary and its style.
+            headwordPitch: [...this.querySelectorAll(".gsm-hoshidicts-pitch-contour")].map(node => node.dataset.pitchDictionary),
+            headwordPitchStyles: [...this.querySelectorAll(".gsm-hoshidicts-pitch-contour")]
               .map(node => node.dataset.pitchStyle ?? "contour"),
             ipa: [...this.querySelectorAll(".gsm-hoshidicts-ipa-body")].map(node => node.textContent),
             ipaFits: [...this.querySelectorAll(".gsm-hoshidicts-ipa-body")].every(node => {
@@ -1003,14 +1033,12 @@ async function popupReader(page, depth = 0) {
     });
     return reply.result.value;
   }
-  async function ankiAccessibility(index = 0) {
+  // The accessibility node of the popup element `select` returns.
+  async function accessibility(select, argument) {
     const popup = await resolvePopupObject();
     if (!popup) return null;
     const { result, exceptionDetails } = await cdp.send("Runtime.callFunctionOn", {
-      objectId: popup.objectId, arguments: [{ value: index }],
-      functionDeclaration: function (buttonIndex) {
-        return this.querySelectorAll(".gsm-hoshidicts-mine-button")[buttonIndex] ?? null;
-      }.toString(),
+      objectId: popup.objectId, arguments: [{ value: argument }], functionDeclaration: select.toString(),
     });
     if (exceptionDetails) throw new Error(exceptionDetails.exception?.description || exceptionDetails.text);
     if (!result.objectId) return null;
@@ -1036,6 +1064,16 @@ async function popupReader(page, depth = 0) {
       await cdp.send("Runtime.releaseObject", { objectId: result.objectId });
     }
   }
+  const ankiAccessibility = (index = 0) => accessibility(function (buttonIndex) {
+    return this.querySelectorAll(".gsm-hoshidicts-mine-button")[buttonIndex] ?? null;
+  }, index);
+  // The first button that reveals definitions blurred until clicked (#598),
+  // given keyboard focus first when `focus` is set.
+  const definitionReveal = (focus = false) => accessibility(function (focus) {
+    const control = this.querySelector('[data-definition-reveal][role="button"]');
+    if (focus) control?.focus();
+    return control;
+  }, focus);
   async function lookupStatistics(action = "read") {
     const object = await resolvePopupObject();
     if (!object) return null;
@@ -1082,6 +1120,34 @@ async function popupReader(page, depth = 0) {
           definitionsPoint: rect && { x: rect.x + rect.width / 2, y: rect.y + Math.min(rect.height / 2, 12) },
           audioAttempted: Boolean(this.querySelector('.gsm-hoshidicts-audio-button[aria-busy]')),
           countText: this.querySelector(".gsm-hoshidicts-lookup-stats")?.textContent ?? "",
+          focusInside: this.contains(this.getRootNode().activeElement),
+        };
+      }.toString(),
+    });
+    return reply.result.value;
+  }
+  // Show pitch accent colours: the primary headword's and its badges' accent
+  // groups, and the colour the headword is drawn in. A custom property computes
+  // to its substituted value, so the headword's group variable reads as the
+  // group's own colour pair.
+  async function pitchGroups() {
+    const object = await resolvePopupObject();
+    if (!object) return null;
+    const reply = await cdp.send("Runtime.callFunctionOn", {
+      objectId: object.objectId, returnByValue: true,
+      functionDeclaration: function () {
+        const view = this.ownerDocument.defaultView;
+        const expression = this.querySelector(".gsm-hoshidicts-expression");
+        const style = expression && view.getComputedStyle(expression);
+        const group = expression?.dataset.pitchCategory ?? null;
+        return {
+          headword: group,
+          badges: [...this.querySelector(".gsm-hoshidicts-entry")?.querySelectorAll(".pronunciation") ?? []]
+            .map(badge => badge.dataset.pitchCategory ?? null),
+          colour: style?.color ?? null,
+          inGroupColour: group !== null && style.color !== view.getComputedStyle(this).color
+            && style.getPropertyValue("--hoshidicts-pitch-category").trim()
+              === style.getPropertyValue(`--hoshidicts-pitch-${group}`).trim(),
         };
       }.toString(),
     });
@@ -1103,8 +1169,8 @@ async function popupReader(page, depth = 0) {
   }
 
   return {
-    anki, ankiAccessibility, audio, click, compactSummaries, compactSummaryTextRect, definitionBlur, definitionLineEndPoint, definitionTextRect, dictionaryTabs, deinflection, externalLink, focusAnki, glossaryCard, imagePreview,
-    lookupStatistics, nested, rect, sourcePaint, retainedControls, selectGlossaryText, state, visible,
+    anki, ankiAccessibility, audio, click, compactSummaries, compactSummaryTextRect, definitionBlur, definitionLineEndPoint, definitionReveal, definitionTextRect, dictionaryTabs, deinflection, externalLink, focusAnki, glossaryCard, imagePreview,
+    lookupStatistics, nested, pitchGroups, rect, sourcePaint, retainedControls, selectGlossaryText, state, visible,
     waitForVisible, waitForHidden, wordStatus, writeNote,
   };
 }

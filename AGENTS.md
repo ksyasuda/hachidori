@@ -4,6 +4,7 @@ These instructions apply to the entire repository.
 
 ## Working agreement
 
+- Never edit `README.md` (the repository root README) unless the owner explicitly asks for that change. Leave it out of every other pull request, including docs updates and releases; describe user-visible changes in the CHANGELOG, release notes or `docs/` instead.
 - Deliver every repository change through a pull request from a dedicated branch. Never push changes directly to `main`. Do not stop at a local commit or branch: push it and open the pull request.
 - Keep each pull request to one coherent outcome that can be understood, tested, and reviewed independently.
 - Commit frequently in small, coherent units. Prefer a failing focused contract test followed promptly by its implementation commit when test-first work is practical.
@@ -29,7 +30,7 @@ These instructions apply to the entire repository.
 
 ## Issue #9 scope
 
-- The dictionary-only contract below limits dictionary-only tasks; it does not prohibit separately authorized E-series or L2-L5 work (L2 backup/restore, L3 per-dictionary update schedules, L4 lookup statistics and L5 definition blur). L3 intentionally extends D6's original global-only schedule. L1 profiles and L6 configurable/custom popup actions remain excluded, as does localization.
+- The dictionary-only contract below limits dictionary-only tasks; it does not prohibit separately authorized E-series or L2-L5 work (L2 backup/restore, L3 per-dictionary update schedules, L4 lookup statistics and L5 definition blur). L3 intentionally extends D6's original global-only schedule. L1 profiles are authorized as per-language profiles by the owner's multi-language request (2026-11-01); [docs/languages.md](docs/languages.md) is their contract. L6 configurable/custom popup actions remain excluded, as does localization of the user interface; text in other languages is in scope through language packs.
 
 ## Dictionary-only issue #9 contract
 
@@ -74,7 +75,8 @@ When implementing the dictionary-only scope from issue #9:
 - The reader adopts a row event or a reply for a term only when it is newer than that term's own payload, without rolling the global descriptor back; older generations stay rejected. Unrelated revisions never refresh visible terms.
 - Hachidori lookup counts use only local browser storage. The user requested removing the GSM Corpus Seen integration during the standalone Settings/startup refresh; retired corpus connection options are ignored and must not trigger network requests. Preserve source attribution and existing text-protocol compatibility.
 - Blur decisions live on the request, so tabs, Show more, Note refresh and Back keep them and a new request starts fresh. The view renders pending before the count and never re-blurs once revealed. One absolute deadline runs from first display; navigating away cancels only the live timer, Back and a persisted `pageshow` re-arm the remainder. The decision waits for the stored options when a lookup renders before the initial storage read.
-- Autoplay stays held while a request's definitions are pending or blurred, and every reveal (a non-qualifying decision, hover, the deadline, Back past it, or disabling blur) releases the held first result once. The first count still decides the blur for the whole visit. The audio controller keys held first results by owner, settles them only for the request being revealed, and keeps a retired hold's visit unspent; a manual play consumes every waiting result.
+- Autoplay stays held while a request's definitions are pending or blurred, and every reveal (a non-qualifying decision, hover, a click or Enter/Space on the blurred definitions, the deadline, Back past it, or disabling blur) releases the held first result once. The first count still decides the blur for the whole visit. The audio controller keys held first results by owner, settles them only for the request being revealed, and keeps a retired hold's visit unspent; a manual play consumes every waiting result.
+- **On click only** (`definitionBlurReveal: "click"`): hover and time never reveal, and the user's gestures reveal only through `HDPopup.createDefinitionReveal`. A click on blurred definitions does nothing else, the elements inside them stay inert and their words are not looked up until revealed. docs/themes/README.md describes what it does to renderer DOM.
 
 ## Experimental features
 
@@ -88,7 +90,7 @@ Settings → Advanced → Experimental features is the one place a feature that 
 
 ## Repository map
 
-- `extension/` contains the Chrome MV3 runtime, settings UI, content script, and popup renderer; `extension/README.md` maps its files.
+- `extension/` contains the MV3 runtime, settings UI, content script, and popup renderer for Chrome and Firefox; `extension/README.md` maps its files. `scripts/firefox_manifest.py` derives the Firefox manifest from `extension/manifest.json`; `docs/firefox.md` describes the Firefox build.
 - [hachidori-anki](https://github.com/bee-san/hachidori-anki) develops and releases the Hachidori Relay add-on for Anki. `extension/anki-addon.js` pins the release that Settings → Sharing downloads.
 - `wasm/bindings.cpp` is the JavaScript-facing boundary around the hoshidicts engine.
 - `third_party/hoshidicts` is a submodule and should move only as an intentional part of the change.
@@ -106,7 +108,8 @@ Run the narrowest existing checks that exercise the change:
 - Palette, theme, popup-styling or dictionary-image styling changes: also run `node test/chrome-theme-contrast.mjs` and attach its `test/tmp/ci/theme-contrast.png` filmstrip.
 - Relay source, packaging, socket and installed-Anki checks live in [hachidori-anki](https://github.com/bee-san/hachidori-anki). Run that repository's checks for relay changes.
 - Sharing protocol, host, client, Settings, startup-page or pinned add-on version changes: also run `node --test test/sharing-protocol.test.mjs test/sharing-settings.test.mjs test/anki-addon.test.mjs` and `node test/chrome-sharing.mjs`. The browser suite needs `python3`, a network address beyond loopback, and access to the pinned GitHub release; `HACHIDORI_ANKI_ADDON=/path/to/hachidori-relay.ankiaddon` supplies a local artifact for offline or coordinated changes.
-- Manifest, service worker, offscreen lifecycle, IndexedDB persistence, content-script, or visible popup changes: also run `node test/chrome-e2e.mjs`.
+- Manifest, service worker, offscreen lifecycle, IndexedDB persistence, content-script, or visible popup changes: also run `node test/chrome-e2e.mjs`, and `node test/run.mjs firefox-e2e` with `node test/run.mjs firefox-lint`.
+- Content scripts read their `HD*` namespaces and `chrome` through `globalThis`, never `window`: Firefox runs content scripts in a sandbox whose `window` is the page's.
 
 Do not claim a check that was not run. Report each command and its exact outcome in the pull request.
 

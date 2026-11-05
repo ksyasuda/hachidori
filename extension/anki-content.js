@@ -19,6 +19,7 @@
     unheard: "the line did not play through, so its audio was not recorded.",
     player: "Netflix's player controls were not found, so the line could not be replayed.",
     replay: "Netflix did not finish replaying the line.",
+    unsupported: "this browser does not let extensions record a tab.",
     linked: "this browser is linked to another Hachidori, so Netflix lines are not recorded.",
   };
   const netflixReason = reason => Object.hasOwn(NETFLIX_UNAVAILABLE, reason) ? NETFLIX_UNAVAILABLE[reason] : reason;
@@ -130,7 +131,7 @@
   function disabled(record) {
     if (!record.add) return;
     record.add.disabled = record.busy
-      || (!record.terminal && record.add.dataset.state !== "checking"
+      || (!record.terminal && !record.opensSettings && record.add.dataset.state !== "checking"
         && (record.needsCheck || (!record.decision?.canAdd && !views(record))));
   }
   function payload(record) {
@@ -215,6 +216,7 @@
       record.viewChecked = false;
       record.needsCheck = true;
       record.decision = null;
+      record.opensSettings = false;
       if (record.add) setMiningButtonState(record, "checking");
     }
   }
@@ -239,7 +241,7 @@
   // The action disables itself while it works, and Chrome then moves focus
   // out of the popup. Pressed from the keyboard, it gets focus back once it
   // is enabled again, unless the reader has focused something else since.
-  // A mouse press takes none back: focus in the popup would hold page hover.
+  // A mouse press takes none back.
   function keyboardFocusReturn(control) {
     if (!control.matches(":focus-visible")) return () => {};
     return () => {
@@ -249,6 +251,20 @@
       if (unfocused && control.isConnected && !control.disabled) control.focus({ preventScroll: true });
     };
   }
+  // The button of a Template without a deck says so and opens Settings; a
+  // custom button's Template that is unavailable says so in its status.
+  function showUnavailable(record, value, error) {
+    if (record.opensSettings && !record.custom) {
+      record.needsCheck = false;
+      setMiningButtonState(record, "unavailable", error);
+    }
+    if (!value && record.custom) {
+      record.needsCheck = false;
+      setMiningButtonState(record, "unavailable", error || "This Anki Template is unavailable.");
+      setStatus(record, error || "This Anki Template is unavailable.", "error");
+    }
+  }
+
   function createAnkiController({
     send,
     onChange,
@@ -260,6 +276,9 @@
     // (netflix-content.js). Its options { audio, gif } name the media wanted;
     // `conceal` is passed on for the tab capture a GIF needs.
     recordNetflixLine = async () => { throw new Error("this page cannot replay Netflix lines."); },
+    // Opens Settings → Anki for the profile the popup's controls act in, or
+    // null where the page cannot open Settings.
+    openSettings = null,
   }) {
     const owners = new Map(), bound = new WeakMap();
     let enabled = false, settingsKey = "", checks = Promise.resolve();
@@ -270,17 +289,17 @@
     const boundHere = record => bound.get(record.binding) === record && record.binding.isConnected;
     const current = record => live(record.group) && boundHere(record);
     const needsCheck = record => boundHere(record) && record.needsCheck && !record.busy && !record.terminal;
-    function available(records, value, error = "") {
+    // `emptyDeck`: the Template's only problem is that it names no deck. Its
+    // button then says so and opens Settings → Anki (docs/languages.md 6.3).
+    function available(records, value, error = "", emptyDeck = false) {
       for (const record of records) {
-        const show = value || record.custom || record.terminal || cachedView(record.decision);
+        record.opensSettings = !value && emptyDeck && typeof openSettings === "function"
+          && !record.terminal && !cachedView(record.decision);
+        const show = value || record.custom || record.terminal || cachedView(record.decision) || record.opensSettings;
         if (show && record.actions.isConnected) controls(record);
         if (record.control) showControls(record, show);
         if (!value && !show) record.needsCheck = false;
-        if (!value && record.custom) {
-          record.needsCheck = false;
-          setMiningButtonState(record, "unavailable", error || "This Anki Template is unavailable.");
-          setStatus(record, error || "This Anki Template is unavailable.", "error");
-        }
+        showUnavailable(record, value, error);
       }
     }
     async function requestCachedView(record) {
@@ -354,7 +373,7 @@
         return;
       }
       for (const record of records) record.configKey = status.configKey;
-      available(records, status.available, status.error);
+      available(records, status.available, status.error, status.emptyDeck === true);
       if (!status.available) return;
       onChange(group.owner);
       await checkRecords(records, owns);
@@ -399,6 +418,7 @@
         if (needsCheck(record)) {
           // Readiness belongs to this result, not to the whole popup's queue.
           record.decision = null;
+          record.opensSettings = false;
           if (enabled) {
             controls(record);
             showControls(record, true);
@@ -657,13 +677,15 @@
       Object.assign(record, { feedback, control, add, output, hidden: false });
       setMiningButtonState(record, "checking");
       record.onMouseDown = event => {
-        if (event.button === 0 && current(record) && !views(record)) {
+        if (event.button === 0 && current(record) && !views(record) && !record.opensSettings) {
           record.pointerRequest = payload(record);
           if (add.dataset.state === "checking") record.pointerRequest.allowDuplicate = true;
         }
       };
       record.onClick = event => {
-        if (views(record) && !(event.detail > 0 && record.pointerRequest?.allowDuplicate === true)) void browse(record);
+        if (record.opensSettings) {
+          if (current(record)) openSettings();
+        } else if (views(record) && !(event.detail > 0 && record.pointerRequest?.allowDuplicate === true)) void browse(record);
         else void submit(record, event.detail > 0);
       };
       add.addEventListener("mousedown", record.onMouseDown);

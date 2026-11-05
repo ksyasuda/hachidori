@@ -9,6 +9,7 @@
 // The scenario's previous file: its steps run before the ones here.
 import "./counts.mjs";
 import { describe } from "node:test";
+import { popupRoot } from "../chrome-popup-root.mjs";
 import { externalLinksFixture, kanjiReadingFuriganaFixture } from "../make-fixture.mjs";
 import { check, step } from "./harness.mjs";
 import { hoverForPopup } from "./popup-reader.mjs";
@@ -41,17 +42,16 @@ async function checkFrameAndFullscreenPopups(tab, popup, pageUrl) {
     for (let attempt = 0; attempt < 12 && !frameResult; attempt += 1) {
       await tab.mouse.move(2, 2);
       await tab.mouse.move(box.x + box.width * 0.15, box.y + box.height / 2);
-      await frame.waitForFunction(() => {
-        const host = document.querySelector("hachidori-host");
-        const panel = host?.shadowRoot?.querySelector(".gsm-hoshidicts-popup");
+      await popupRoot(tab, frame.url()).waitFor(popupShadow => {
+        const panel = popupShadow.querySelector(".gsm-hoshidicts-popup");
         return panel && !panel.hidden && panel.textContent.includes("食べる");
       }, { timeout: 1500 }).then(() => { frameResult = true; }).catch(() => {});
     }
-    frameResult = frameResult && await tab.evaluate(() => {
-      const topPopup = document.querySelector("hachidori-host")?.shadowRoot
-        ?.querySelector(".gsm-hoshidicts-popup");
+    // No host in the top document means no top-level popup either.
+    frameResult = frameResult && (await popupRoot(tab).evaluate(popupShadow => {
+      const topPopup = popupShadow.querySelector(".gsm-hoshidicts-popup");
       return !topPopup || topPopup.hidden;
-    });
+    }) ?? true);
   } finally {
     await tab.$eval("#lookup-frame", element => element.remove());
   }
@@ -73,10 +73,10 @@ async function checkFrameAndFullscreenPopups(tab, popup, pageUrl) {
     await tab.click("#fullscreen-button");
     await tab.waitForFunction(() => !!document.fullscreenElement, { timeout: 5000 });
     opened = await hoverForPopup(tab, popup, "#fullscreen-verb");
-    fullscreenResult = await tab.evaluate(() => {
+    fullscreenResult = await popupRoot(tab).evaluate(popupShadow => {
       const player = document.getElementById("fullscreen-player");
       const host = document.querySelector("#fullscreen-player > hachidori-host");
-      const panel = host?.shadowRoot?.querySelector(".gsm-hoshidicts-popup");
+      const panel = popupShadow.querySelector(".gsm-hoshidicts-popup");
       const rect = panel?.getBoundingClientRect();
       return { mounted: host?.parentElement === player, visible: panel && !panel.hidden,
         hit: rect ? document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2)?.localName : null };
@@ -115,8 +115,8 @@ async function checkPopupStaysInPlace(tab, popup) {
     document.body.firstElementChild.before(feed);
     document.body.style.minHeight = "6000px";
   });
-  const box = () => tab.evaluate(() => {
-    const panel = document.querySelector("hachidori-host")?.shadowRoot?.querySelector(".gsm-hoshidicts-popup");
+  const box = () => popupRoot(tab).evaluate(popupShadow => {
+    const panel = popupShadow.querySelector(".gsm-hoshidicts-popup");
     const rect = panel?.getBoundingClientRect();
     return rect && !panel.hidden ? { left: rect.left, top: rect.top, width: rect.width, height: rect.height } : null;
   });
@@ -324,20 +324,34 @@ async function checkDeinflectionDisclosure(settings, tab, popup) {
 }
 
 // Dictionary cards follow Yomitan: definitions are always shown, and only
-// disclosures a dictionary authors inside its own content collapse.
+// disclosures a dictionary authors inside its own content collapse. The card's
+// dictionary is a tag after its first definition's tags (#604), and every tag
+// there is a bold 11/14 label at 4.5:1 on Yomitan's colour for its category.
 async function checkGlossaryCardsOpen(tab, popup) {
   await tab.keyboard.press("Escape");
   await popup.waitForHidden();
   const rendered = await hoverForPopup(tab, popup, "#verb");
   const before = rendered === null ? null : await popup.glossaryCard();
   let after = null;
-  if (before) {
-    await tab.mouse.click(before.titlePoint.x, before.titlePoint.y);
+  if (before?.tagPoint) {
+    await tab.mouse.click(before.tagPoint.x, before.tagPoint.y);
     after = await popup.glossaryCard();
   }
-  check("dictionary cards render open under a plain title with no disclosure control",
+  const rgb = value => (/^rgb\((\d+), (\d+), (\d+)\)$/u.exec(value) ?? []).slice(1).map(Number);
+  const luminance = value => rgb(value).map(part => part / 255)
+    .map(part => part <= 0.04045 ? part / 12.92 : ((part + 0.055) / 1.055) ** 2.4)
+    .reduce((sum, part, index) => sum + part * [0.2126, 0.7152, 0.0722][index], 0);
+  const contrast = ({ background, color }) => {
+    const [lighter, darker] = [luminance(background), luminance(color)].sort((x, y) => y - x);
+    return (lighter + 0.05) / (darker + 0.05);
+  };
+  // reader.css's --tag-dictionary-background-color in each colour scheme.
+  const dictionaryColour = { light: "rgb(157, 90, 191)", dark: "rgb(143, 86, 172)" };
+  check("dictionary cards render open with their dictionary's tag, in Yomitan's colours, and no disclosure control",
     rendered !== null && before?.count >= 1 && before.tags.every(tag => tag === "DIV") && !before.inDisclosure
-      && before.titleTag === "DIV" && before.label.length > 0 && before.dictionary.length > 0
+      && before.titles === 0 && before.place && before.label.length > 0 && before.dictionary.length > 0
+      && before.row.at(-1).category === "dictionary" && before.row.at(-1).background === dictionaryColour[before.scheme]
+      && before.row.every(tag => tag.weight === "700" && Math.abs(tag.size - 11 / 14) < 0.001 && contrast(tag) >= 4.5)
       && before.cursor !== "pointer" && before.marker === "none" && before.bodyHeight > 0
       && after?.cardHeight === before.cardHeight && after.bodyHeight === before.bodyHeight,
     JSON.stringify({ before, after }));
@@ -436,22 +450,30 @@ async function checkExternalLinks(browser, settings, tab, popup) {
       && evidence.afterInvalid === 1 && evidence.sourceUnchanged && evidence.restored, JSON.stringify(evidence));
 }
 
-// 好き嫌い's kana allow two splits of すききらい (#459). The engine worker reads
-// its kanji's KANJIDIC readings and sends the one that reads; the popup draws it.
+// 好き嫌い's kana allow two splits of すききらい (#459), and 二十四時間's one run of
+// kanji can be read one kanji at a time (#605). The engine worker reads their
+// kanji's KANJIDIC readings and sends the split that reads; the popup draws it.
+// KANJIDIC has no に for 日, so 日本 にほん is read by Jitendex kanwa's 日本
+// に|ほん (#641).
 async function checkKanjiReadingFurigana(settings, tab, popup) {
   const fixture = kanjiReadingFuriganaFixture();
   const originalVerb = await tab.$eval("#verb", element => element.innerHTML);
   await installMediaArchive(settings, fixture.archive);
-  let evidence;
-  try {
+  const lookUp = async (query, headword) => {
     const reply = await settings.evaluate(text => chrome.runtime.sendMessage({ target: "hoshidicts-offscreen",
-      type: "hd_lookup", requestId: "e2e-kanji-reading-furigana", text, maxResults: 1 }), fixture.query);
-    await tab.$eval("#verb", (element, query) => { element.textContent = query; }, fixture.query);
+      type: "hd_lookup", requestId: "e2e-kanji-reading-furigana", text, maxResults: 1 }), query);
+    await tab.$eval("#verb", (element, text) => { element.textContent = text; }, query);
     await tab.bringToFront();
     await tab.keyboard.press("Escape");
-    const shown = await hoverForPopup(tab, popup, "#verb", { accept: state => state.plain.includes(fixture.query) });
-    evidence = { furigana: reply?.results?.[0]?.term?.furigana, rubies: shown?.furiganaAlignment.rubies,
-      headword: shown?.text.includes("好すき嫌きらい") };
+    const shown = await hoverForPopup(tab, popup, "#verb", { accept: state => state.plain.includes(query) });
+    return { furigana: reply?.results?.[0]?.term?.furigana, rubies: shown?.furiganaAlignment.rubies,
+      headword: shown?.text.includes(headword) };
+  };
+  let evidence;
+  try {
+    evidence = { ambiguous: await lookUp(fixture.query, "好すき嫌きらい"),
+      compound: await lookUp(fixture.compound, "二に十じゅう四よ時じ間かん"),
+      kanwa: await lookUp(fixture.kanwa, "日に本ほん") };
   } catch (error) {
     evidence = { error: error.message };
   } finally {
@@ -463,9 +485,16 @@ async function checkKanjiReadingFurigana(settings, tab, popup) {
     await tab.$eval("#verb", (element, html) => { element.innerHTML = html; }, originalVerb);
   }
   check("an ambiguous headword's furigana is split by its kanji's KANJIDIC readings in the engine worker and the popup",
-    JSON.stringify(evidence) === JSON.stringify({ furigana: [{ text: "好", reading: "す" }, { text: "き", reading: "" },
-      { text: "嫌", reading: "きら" }, { text: "い", reading: "" }], rubies: 2, headword: true }),
-    JSON.stringify(evidence));
+    JSON.stringify(evidence.ambiguous) === JSON.stringify({ furigana: [{ text: "好", reading: "す" },
+      { text: "き", reading: "" }, { text: "嫌", reading: "きら" }, { text: "い", reading: "" }], rubies: 2,
+    headword: true }), JSON.stringify(evidence));
+  check("a kanji compound's furigana is read one kanji at a time by its KANJIDIC readings in the engine worker and the popup",
+    JSON.stringify(evidence.compound) === JSON.stringify({ furigana: [{ text: "二", reading: "に" },
+      { text: "十", reading: "じゅう" }, { text: "四", reading: "よ" }, { text: "時", reading: "じ" },
+      { text: "間", reading: "かん" }], rubies: 5, headword: true }), JSON.stringify(evidence));
+  check("a compound that KANJIDIC's readings cannot split is read one kanji at a time by Jitendex kanwa's readings in the engine worker and the popup",
+    JSON.stringify(evidence.kanwa) === JSON.stringify({ furigana: [{ text: "日", reading: "に" },
+      { text: "本", reading: "ほん" }], rubies: 2, headword: true }), JSON.stringify(evidence));
 }
 
 // Issue #430: a custom link's %s is the sentence Anki gets, read the same way

@@ -21,7 +21,8 @@
 // entries on request. Every entry is redacted before it is kept
 // (redactDebugText): credentials, the sign-in, query and fragment of web
 // addresses, data: URL payloads, and any Japanese text, which is how
-// looked-up text and dictionary content would appear in a message.
+// looked-up text and dictionary content would appear in a message, as well
+// as text in the other profiles' languages (setDebugLogLanguages).
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 export const DEBUG_LOG = Symbol.for("hachidori.debugLog");
@@ -42,6 +43,26 @@ const DATA_URL = /\bdata:([^,\s"'<>`]*),[^\s"'<>`)]*/giu;
 // Percent-encoded non-ASCII text in an address path.
 const ENCODED_TEXT = /(?:%[89a-f][\da-f])+/giu;
 const JAPANESE_TEXT = /[\p{scx=Hiragana}\p{scx=Katakana}\p{scx=Han}]+/gu;
+
+// Text in the languages of the installation's other profiles (docs/languages.md
+// 8.5): each pack's expanded text.pattern, less the Latin letters the log's own
+// English is written in, replaced by "[code]" after the Japanese pattern. Packs
+// written only in Latin add nothing.
+let debugLanguageCodes = "";
+let debugLanguageText = [];
+
+// The languages of the profiles in the options record this context adopted.
+// An empty list, or Japanese alone, keeps today's redaction.
+export function setDebugLogLanguages(codes) {
+  const others = [...new Set(codes)].filter(code => code !== "ja");
+  if (others.join() === debugLanguageCodes) return;
+  debugLanguageCodes = others.join();
+  debugLanguageText = others.flatMap(code => {
+    const pack = globalThis.HDLanguages?.get?.(code);
+    if (typeof pack?.text?.pattern !== "string" || !pack.scripts?.some(script => script !== "Latn")) return [];
+    return [[new RegExp(String.raw`(?:(?!\p{Script=Latin})${pack.text.pattern})+`, "gu"), `[${code}]`]];
+  });
+}
 
 // Replace every non-empty string under a credential-like key, at any depth.
 // An empty value stays empty so the report still shows it was never set.
@@ -78,12 +99,13 @@ function redactSecretField(_match, name, value) {
 }
 
 export function redactDebugText(value) {
-  const text = String(value).slice(0, 2 * DEBUG_LOG_MESSAGE_LIMIT)
+  let text = String(value).slice(0, 2 * DEBUG_LOG_MESSAGE_LIMIT)
     .replace(DATA_URL, (_match, type) => `data:${type},${REDACTED}`)
     .replace(WEB_ADDRESS, redactWebAddress)
     .replace(AUTHORIZATION, `$1 ${REDACTED}`)
     .replace(SECRET_FIELD, redactSecretField)
     .replace(JAPANESE_TEXT, REDACTED_JAPANESE);
+  for (const [pattern, label] of debugLanguageText) text = text.replace(pattern, label);
   return text.length > DEBUG_LOG_MESSAGE_LIMIT ? `${text.slice(0, DEBUG_LOG_MESSAGE_LIMIT)}…` : text;
 }
 
@@ -143,20 +165,25 @@ const EVENTS = "events";
 const META = "meta";
 const TOTALS = "totals";
 
-function settled(request) {
+// A request's result, or its error. A cursor's request settles once per call:
+// call again after continue() or advance() for the next position. The search
+// page's line history (search-history.js) waits on its requests with these too.
+export function settled(request) {
   return new Promise((resolve, reject) => {
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
   });
 }
 
-function committed(transaction) {
+// Resolves once `transaction` commits; rejects with its error, or names
+// `store` when it aborts without one.
+export function committed(transaction, store = "debug log") {
   const done = new Promise((resolve, reject) => {
     transaction.oncomplete = () => resolve();
     transaction.onerror = () => reject(transaction.error);
-    transaction.onabort = () => reject(transaction.error ?? new Error("the debug log transaction was aborted"));
+    transaction.onabort = () => reject(transaction.error ?? new Error(`the ${store} transaction was aborted`));
   });
-  // A request that fails first is what write() reports.
+  // A request that fails first is what the operation reports.
   done.catch(() => {});
   return done;
 }
@@ -261,6 +288,21 @@ function storedRecord(entry) {
   record.bytes = 0;
   record.bytes = jsonBytes(record);
   return record;
+}
+
+// A record another document sends for the ring, as the search page's frame
+// does (#644): only its text, numbers and flags, the text redacted again, and
+// its size measured here, so the ring's totals stay exact. Each text keeps its
+// DEBUG_LOG_MESSAGE_LIMIT but the fields are not counted, so the frame's code,
+// the user's own script among it, can empty the ring with one record larger
+// than DEBUG_LOG_MAX_BYTES. The ring holds only the user's own debug info.
+export function debugLogRecord(value) {
+  const record = {};
+  for (const [field, entry] of Object.entries(value ?? {})) {
+    if (typeof entry === "string") record[field] = redactDebugText(entry);
+    else if (["number", "boolean"].includes(typeof entry) || entry === null) record[field] = entry;
+  }
+  return storedRecord(record);
 }
 
 /* ------------------------------------------------------------ capture */

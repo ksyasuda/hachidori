@@ -2,21 +2,53 @@
 
 // Shows the Design controls a theme declares. Untagged controls are core and
 // always show; "all", a missing entry or a missing declaration shows them all.
-export function applyDesignSettings(section, theme) {
+// A control the edited profile's language lacks (data-requirement-unmet, set
+// by Settings from data-requires) stays hidden whatever the theme declares.
+// Colours lists a theme's colour variants after Automatic and shows only for a
+// theme whose entry has some.
+// With the edited profile's language (docs/languages.md 11.4, 11.5): outside
+// Japanese a theme without a language declaration hides the clicked-character
+// dictionary, and the pack's display settings
+// (`[data-pack-settings-group="display"]`) show only for a theme that
+// declares `presentation`.
+export function applyDesignSettings(section, theme, { language = null } = {}) {
   const declared = Array.isArray(theme?.designSettings) ? theme.designSettings : null;
+  // A language code, or a language object (11.1).
+  const code = typeof language === "string" ? language : language?.code ?? null;
+  const undeclaredOutsideJapanese = code !== null && code !== "ja" && !theme?.language;
   for (const control of section.querySelectorAll("[data-design-setting]")) {
-    control.hidden = declared !== null && !declared.includes(control.dataset.designSetting);
+    const key = control.dataset.designSetting;
+    control.hidden = (declared !== null && !declared.includes(key))
+      || "requirementUnmet" in control.dataset
+      || (undeclaredOutsideJapanese && key === "kanjiClickDictionary");
   }
   for (const group of section.querySelectorAll("[data-design-group]")) {
     group.hidden = [...group.querySelectorAll("[data-design-setting]")].every(control => control.hidden);
+  }
+  for (const group of section.querySelectorAll('[data-pack-settings-group="display"]')) {
+    group.hidden = theme?.language?.presentation !== true;
   }
   const hint = section.querySelector("#popup-theme-hint");
   hint.hidden = declared === null;
   hint.textContent = declared === null ? ""
     : `${theme.name} uses only the settings shown here. Your other Design settings are kept for Default.`;
+  const variants = Array.isArray(theme?.variants) ? theme.variants : [];
+  const colours = section.querySelector("[data-theme-variants]");
+  const select = colours.querySelector("select");
+  select.replaceChildren(select.querySelector('option[value="auto"]'), ...variants.map(variant => {
+    const option = section.ownerDocument.createElement("option");
+    option.value = variant.id;
+    option.textContent = variant.name;
+    return option;
+  }));
+  colours.hidden = variants.length === 0;
 }
 
-export function createThemeStore({ root, design, onSelect }) {
+// `onDesign(theme)` follows each catalogue entry the Design controls are
+// filtered by (undefined when the catalogue cannot be read). `getLanguage()`
+// gives the edited profile's language (a code or a language object) once the
+// records have profiles.
+export function createThemeStore({ root, design, onSelect, onDesign = null, getLanguage = () => null }) {
   const document = root.ownerDocument;
   const cards = new Map();
   let options;
@@ -39,6 +71,14 @@ export function createThemeStore({ root, design, onSelect }) {
     if (className) node.className = className;
     if (text) node.textContent = text;
     return node;
+  }
+
+  // Colours shows the saved variant, or Automatic when this theme has no such variant.
+  function renderVariant() {
+    const select = design.querySelector("#opt-popup-theme-variant");
+    if (select === document.activeElement) return;
+    select.value = options.popupThemeVariant;
+    if (select.selectedIndex < 0) select.value = "auto";
   }
 
   function updateSelection() {
@@ -103,7 +143,7 @@ export function createThemeStore({ root, design, onSelect }) {
     if (slug === designTheme) return;
     designTheme = slug;
     void loadCatalogue().then(themes => themes.find(theme => theme.slug === slug)).catch(() => undefined)
-      .then(theme => applyDesignSettings(design, theme));
+      .then(theme => { applyDesignSettings(design, theme, { language: getLanguage() }); renderVariant(); onDesign?.(theme); });
   }
 
   return { render(next) {
@@ -112,5 +152,12 @@ export function createThemeStore({ root, design, onSelect }) {
     loading ??= load();
     updateSelection();
     updateDesign();
+    renderVariant();
+  },
+  // Applies the theme's declarations again, as when the edited profile's
+  // language changes what Design can show.
+  invalidateDesign() {
+    designTheme = undefined;
+    if (options) updateDesign();
   } };
 }

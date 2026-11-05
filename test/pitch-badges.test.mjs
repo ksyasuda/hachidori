@@ -39,7 +39,7 @@ function fixture(t) {
   const candidate = { anchor: source, query: "昭和", sentence: source.textContent, sourceElements: [source], matchOffset: 0 };
   t.after(() => { view.destroy(); window.close(); });
   return { popup, view, render: (value = RESULT, options = {}) => {
-    view.renderResults([value], candidate, { ...HDReaderOptions.normaliseOptions({}), ...options });
+    view.renderResults([value].flat(), candidate, { ...HDReaderOptions.normaliseOptions({}), ...options });
     return [...popup.querySelectorAll(".pronunciation-group")];
   } };
 }
@@ -75,6 +75,39 @@ test("each pitch dictionary is a Yomitan pronunciation group named by its dictio
     ["しょ:high>low", "う:low>low", "わ:low>low"]);
 });
 
+test("every entry shows every pitch accent, however many frequency tags come first (#607)", t => {
+  const f = fixture(t);
+  // A lookup of 非常に returns 非常 as a later entry. Every frequency list ranks
+  // both, and 非常 has more accents than the twelve-tag metadata display budget.
+  const frequencies = count => Array.from({ length: count }, (_, index) => ({ dictionary: `Rank ${index + 1}`,
+    frequencies: [{ value: index + 1, displayValue: String(index + 1) }] }));
+  const dictionaries = Array.from({ length: 7 }, (_, index) => `Pitch ${index + 1}`);
+  const word = result("非常", "ひじょう", dictionaries.map(dictionary => pitch(dictionary, 0, 1)));
+  const phrase = result("非常に", "ひじょうに", [pitch("Pitch 1", 0)]);
+  const shown = parent => [...parent.querySelectorAll(".pronunciation-group")].map(group => [group.dataset.dictionary,
+    ...[...group.querySelectorAll(".pronunciation-downstep-notation")].map(notation => notation.textContent)]);
+  const expected = dictionaries.map(dictionary => [dictionary, "[0]", "[1]"]);
+  for (const count of [0, 12, 20]) {
+    const ranked = value => ({ ...value, term: { ...value.term, frequencies: frequencies(count) } });
+    for (const averageFrequency of [false, true]) {
+      const options = { averageFrequency, expandAll: true };
+      const what = `${count} frequency lists, average ${averageFrequency}`;
+      f.render([ranked(phrase), ranked(word)], options);
+      const [first, later] = f.popup.querySelectorAll(".gsm-hoshidicts-entry");
+      assert.equal(later.querySelectorAll(".gsm-hoshidicts-frequency-metadata"
+        + " .gsm-hoshidicts-tag-frequency:not([data-frequency-average])").length, count, what);
+      assert.deepEqual(shown(first), [["Pitch 1", "[0]"]], what);
+      assert.deepEqual(shown(later), expected, `later 非常, ${what}`);
+      // Looked up on its own, 非常 is the first entry and shows the same.
+      f.render(ranked(word), options);
+      assert.deepEqual(shown(f.popup), expected, `first 非常, ${what}`);
+    }
+  }
+  // Without a budget, a dictionary that lists one accent twice still draws it once.
+  f.render(result("非常", "ひじょう", [pitch("Pitch 1", 0, 0, 1)]));
+  assert.deepEqual(shown(f.popup), [["Pitch 1", "[0]", "[1]"]]);
+});
+
 test("a dictionary's accents share one group and a string pattern reads as its downstep", t => {
   const f = fixture(t);
   // hoshidicts hands Yomitan's "LHL" over as { position: 0, pattern: "LHL" }.
@@ -86,26 +119,28 @@ test("a dictionary's accents share one group and a string pattern reads as its d
   assert.deepEqual(levels(pronunciations[0]), ["は:low>high", "し:high>low"]);
   assert.deepEqual(levels(pronunciations[0]), levels(pronunciations[1]));
   assert.equal(pronunciations[0].title, "Kanjium: はし [2]");
-  // The furigana contour reads the same pattern: a drop after し, not heiban.
+  // The headword's pitch reads the same pattern: a drop after し, not heiban.
   const reading = f.popup.querySelector(".gsm-hoshidicts-pitch-reading");
   assert.equal(reading.dataset.pitchPosition, "2");
   assert.deepEqual([...f.popup.querySelectorAll(".gsm-hoshidicts-expression .gsm-hoshidicts-pitch-mora")]
     .map(mora => `${mora.dataset.pitchLevel}:${mora.dataset.pitchTransition ?? ""}`), ["low:rise", "high:drop"]);
 });
 
-test("the overline furigana style draws the headword with the pronunciation list's Yomitan text", t => {
+test("the overline reading pitch style draws the headword's pitch with the pronunciation list's Yomitan text", t => {
   const f = fixture(t);
   const [group] = f.render(result("食べる", "たべる", [pitch("NHK", 2)]), { pitchAccentFuriganaStyle: "overline" });
   const expression = f.popup.querySelector(".gsm-hoshidicts-expression");
   const card = f.popup.querySelector(".gsm-hoshidicts-glossary-card");
+  // One reading after the headword, whose furigana stays た over 食 (#606).
   const contours = [...expression.querySelectorAll(".gsm-hoshidicts-pitch-contour")];
-  const segments = contours.map(levels);
-  assert.deepEqual(segments, [["た:low>high"], ["べ:high>low", "る:low>low"]]);
-  assert.deepEqual(segments.flat(), levels(group.querySelector(".pronunciation")), "the same levels as the list");
+  assert.deepEqual(contours.map(levels), [["た:low>high", "べ:high>low", "る:low>low"]]);
+  assert.deepEqual(levels(contours[0]), levels(group.querySelector(".pronunciation")), "the same levels as the list");
   assert.ok(contours.every(contour => contour.dataset.pitchStyle === "overline"));
+  assert.deepEqual([...expression.querySelectorAll("rt")].map(rt => rt.textContent), ["た"]);
   assert.equal(expression.querySelectorAll(".gsm-hoshidicts-pitch-mora").length, 0);
   assert.equal(expression.querySelectorAll(".pronunciation-mora > .pronunciation-mora-line").length, 3);
   const reading = expression.querySelector(".gsm-hoshidicts-pitch-reading");
+  assert.equal(reading, contours[0]);
   assert.equal(reading.dataset.pitchPosition, "2");
   assert.equal(reading.dataset.pitchDictionary, "NHK");
   assert.equal(reading.title, "NHK · Pitch accent 2");
@@ -114,10 +149,6 @@ test("the overline furigana style draws the headword with the pronunciation list
     .map(mora => `${mora.dataset.pitchLevel}:${mora.dataset.pitchTransition ?? ""}`), ["low:rise", "high:drop", "low:"]);
   assert.ok(card.isConnected && f.popup.querySelector(".gsm-hoshidicts-glossary-card") === card,
     "a style switch keeps the definitions");
-  // 見る [1] drops at the segment boundary: み, the first segment's last mora, hooks.
-  f.render(result("見る", "みる", [pitch("NHK", 1)]), { pitchAccentFuriganaStyle: "overline" });
-  assert.deepEqual([...f.popup.querySelectorAll(".gsm-hoshidicts-expression .gsm-hoshidicts-pitch-contour")]
-    .map(levels), [["み:high>low"], ["る:low>low"]]);
 });
 
 test("the text, position and graph toggles update an open popup without replacing definitions", t => {
@@ -169,6 +200,37 @@ test("aliases relabel the dictionary tag in place and the names switch hides it 
   assert.ok(card.isConnected && f.popup.querySelector(".gsm-hoshidicts-glossary-card") === card);
 });
 
+test("a verb or adjective class makes kifuku only on a headword that ends like that class (#608)", t => {
+  const f = fixture(t);
+  const groupOf = (expression, reading, value, rules) => {
+    f.render(result(expression, reading, [pitch("NHK", value)], rules));
+    return [f.popup.querySelector(".gsm-hoshidicts-expression").dataset.pitchCategory,
+      f.popup.querySelector(".pronunciation").dataset.pitchCategory];
+  };
+  // Some dictionaries give nouns and na-adjectives a verb or adjective class:
+  // they keep the group their downstep gives. 面倒's reading ends like a godan
+  // verb but its headword does not, and a suru noun is not a suru verb.
+  for (const rules of ["v1", "v5", "vk", "vs", "vz", "adj-i"]) {
+    assert.deepEqual(groupOf("自由", "じゆう", 2, rules), ["nakadaka", "nakadaka"], rules);
+  }
+  for (const [expression, reading, value, rules, expected] of [
+    ["面倒", "めんどう", 3, "v5", "nakadaka"], ["料理", "りょうり", 1, "vs", "atamadaka"],
+    ["ダンス", "ダンス", 1, "vs", "atamadaka"], ["静か", "しずか", 1, "adj-i", "atamadaka"],
+    // 講談社 日本語大辞典 tags nouns ending in し adj-i, so し is not an ending,
+    // and ハッスル (精選版 vs) ends in する only when read as hiragana.
+    ["遠回し", "とおまわし", 3, "adj-i n", "nakadaka"], ["ハッスル", "ハッスル", 1, "vs", "atamadaka"],
+    // Verbs and i-adjectives stay kifuku, under another verb class too (驚く
+    // tagged v1), in katakana, and in classical forms (聞こゆ, サ変, ザ変).
+    ["驚く", "おどろく", 3, "v1", "kifuku"], ["来る", "くる", 1, "vk", "kifuku"],
+    ["ムカツク", "ムカツク", 3, "v5", "kifuku"], ["聞こゆ", "きこゆ", 2, "v5", "kifuku"],
+    ["愛する", "あいする", 3, "vs", "kifuku"], ["期す", "きす", 1, "vs", "kifuku"],
+    ["信ずる", "しんずる", 3, "vz", "kifuku"], ["禁ず", "きんず", 1, "vz", "kifuku"],
+    ["キツイ", "キツイ", 2, "adj-i", "kifuku"],
+  ]) {
+    assert.deepEqual(groupOf(expression, reading, value, rules), [expected, expected], expression);
+  }
+});
+
 test("the headword and each badge carry their pitch accent group, contour or not", t => {
   const f = fixture(t);
   const groupOf = (expression, reading, pitches, rules) => {
@@ -185,7 +247,7 @@ test("the headword and each badge carry their pitch accent group, contour or not
   ]) {
     assert.deepEqual(groupOf(expression, reading, [value], rules), [expected, expected], expression);
   }
-  // The headword follows the furigana's pitch; each badge keeps its own.
+  // The headword follows its reading's pitch; each badge keeps its own.
   const badges = () => [...f.popup.querySelectorAll(".pronunciation")].map(node => node.dataset.pitchCategory);
   const headword = () => f.popup.querySelector(".gsm-hoshidicts-expression");
   f.render(RESULT);
@@ -199,13 +261,84 @@ test("the headword and each badge carry their pitch accent group, contour or not
   assert.equal(headword().dataset.pitchCategory, "heiban");
   // Colours do not need the contour, and the dictionary still chooses the group.
   f.render(RESULT, { showPitchAccentFurigana: false });
-  assert.equal(f.popup.querySelector(".gsm-hoshidicts-pitch-ruby"), null);
+  assert.equal(f.popup.querySelector(".gsm-hoshidicts-pitch-contour"), null);
   assert.equal(headword().dataset.pitchCategory, "heiban");
   f.view.updateDictionaryPresentation({ showPitchAccentFurigana: false, pitchAccentFuriganaDictionary: "Daijirin" });
-  assert.equal(f.popup.querySelector(".gsm-hoshidicts-pitch-ruby"), null);
+  assert.equal(f.popup.querySelector(".gsm-hoshidicts-pitch-contour"), null);
   assert.equal(headword().dataset.pitchCategory, "atamadaka");
   assert.deepEqual(badges(), ["heiban", "atamadaka"]);
   // A headword with no pitch that fits its reading has no group.
   f.render(result("昭和", "しょうわ", [pitch("NHK", 7)]));
   assert.equal(headword().dataset.pitchCategory, undefined);
+});
+
+test("a pattern of more than one accent phrase has no pitch accent group (#596)", t => {
+  const f = fixture(t);
+  const groupOf = (expression, reading, pattern, rules = "") => {
+    f.render(result(expression, reading, [pitch("NHK", entry(0, pattern))], rules));
+    return [f.popup.querySelector(".gsm-hoshidicts-expression").dataset.pitchCategory,
+      f.popup.querySelector(".pronunciation").dataset.pitchCategory];
+  };
+  // A pitch that rises again after it falls starts another accent phrase, and
+  // the pattern does not say where: 二十四時間 に＼じゅう・よじ＼かん (NHK [1・2])
+  // and 十人十色 じゅ＼うにん・と＼いろ ([1・1]) are both HLLLHLL, but their
+  // second phrases are nakadaka and atamadaka. Also one downstep then a rise
+  // (一子相伝 [1・0]), a verb's phrases (我を張る [0・0]), the particle's level
+  // (月雪花 [2・2・2]) and a rise in the particle's level alone, which no one
+  // phrase gives (昭和 HLLH).
+  for (const [expression, reading, pattern, rules] of [
+    ["二十四時間", "にじゅうよじかん", "HLLLHLL"], ["十人十色", "じゅうにんといろ", "HLLLHLL"],
+    ["一子相伝", "いっしそうでん", "HLLLHHH"], ["我を張る", "がをはる", "LHLH", "v5"],
+    ["月雪花", "つきゆきはな", "LHLHLHL"], ["昭和", "しょうわ", "HLLH"],
+  ]) {
+    assert.deepEqual(groupOf(expression, reading, pattern, rules), [undefined, undefined], expression);
+  }
+  // The reading still draws that pitch, with both drops.
+  f.render(result("二十四時間", "にじゅうよじかん", [pitch("NHK", entry(0, "HLLLHLL"))]));
+  assert.equal(f.popup.querySelector(".gsm-hoshidicts-pitch-reading").dataset.pitchPosition, "1,5");
+  assert.deepEqual([...f.popup.querySelectorAll(".gsm-hoshidicts-expression .gsm-hoshidicts-pitch-mora")]
+    .map(mora => `${mora.dataset.pitchLevel}:${mora.dataset.pitchTransition ?? ""}`),
+  ["high:drop", "low:", "low:", "low:rise", "high:drop", "low:", "low:"]);
+  // A pattern of one phrase keeps its group, with or without the particle's level.
+  for (const [expression, reading, pattern, rules, expected] of [
+    ["人生", "じんせい", "HLLL", "", "atamadaka"], ["弱点", "じゃくてん", "LHHL", "", "nakadaka"],
+    ["道具", "どうぐ", "LHHL", "", "odaka"], ["自然", "しぜん", "LHHH", "", "heiban"],
+    ["驚く", "おどろく", "LHHL", "v5", "kifuku"],
+  ]) {
+    assert.deepEqual(groupOf(expression, reading, pattern, rules), [expected, expected], expression);
+  }
+});
+
+test("a headword spelt in its reading's kana carries its own pitch, and one spelt in kanji needs a reading (#606)", t => {
+  const f = fixture(t);
+  const expression = () => f.popup.querySelector(".gsm-hoshidicts-expression");
+  const morae = node => [...node.querySelectorAll(".gsm-hoshidicts-pitch-mora")]
+    .map(mora => `${mora.textContent}:${mora.dataset.pitchLevel}`);
+  // てくてく [1]: no furigana and no reading beside it; its own kana are the contour.
+  const tekuteku = result("てくてく", "てくてく", [pitch("NHK", 1)]);
+  f.render(tekuteku);
+  const [contour, ...rest] = expression().children;
+  assert.deepEqual(rest, []);
+  assert.equal(expression().querySelector("ruby, .gsm-hoshidicts-pitch-reading"), null);
+  assert.ok(contour.matches("span.gsm-hoshidicts-pitch-contour"), contour.outerHTML);
+  assert.deepEqual(morae(contour), ["て:high", "く:low", "て:low", "く:low"]);
+  assert.deepEqual([contour.dataset.pitchPosition, contour.dataset.pitchDictionary, contour.title],
+    ["1", "NHK", "NHK · Pitch accent 1"]);
+  assert.equal(expression().textContent, "てくてく");
+  assert.equal(expression().dataset.pitchCategory, "atamadaka");
+  f.render(tekuteku, { pitchAccentFuriganaStyle: "overline" });
+  assert.deepEqual(levels(expression()), ["て:high>low", "く:low>low", "て:low>low", "く:low>low"]);
+  assert.equal(expression().querySelector(".gsm-hoshidicts-pitch-reading"), null);
+  f.render(tekuteku, { showPitchAccentFurigana: false });
+  assert.equal(expression().innerHTML, "てくてく");
+  // A katakana headword read in hiragana is spelt in its reading's kana too.
+  f.render(result("テレビ", "てれび", [pitch("NHK", 1)]));
+  assert.equal(expression().querySelector("ruby, .gsm-hoshidicts-pitch-reading"), null);
+  assert.deepEqual(morae(expression()), ["テ:high", "レ:low", "ビ:low"]);
+  // As Yomitan's data-reading-is-same hides the reading, a kanji headword
+  // whose reading is itself has none to carry the pitch, and kanji are not morae.
+  f.render(result("昭和", "", [pitch("NHK", 0)]));
+  assert.equal(expression().querySelector(".gsm-hoshidicts-pitch-contour, ruby"), null);
+  assert.equal(expression().textContent, "昭和");
+  assert.equal(expression().querySelectorAll(".gsm-hoshidicts-kanji-link").length, 2);
 });

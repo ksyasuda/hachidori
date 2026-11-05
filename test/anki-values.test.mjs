@@ -21,6 +21,16 @@ test("Anki values escape literal data, reuse lookup furigana and preserve UTF-16
   assert.equal(await render(request(), "{sentence-furigana}|{sentence-furigana-plain}"), "🍵 <b>食べます</b>。|🍵 <b>食べます</b>。");
 });
 
+test("{sentence-furigana} reads the match as its result and the rest from the engine's segment spans", async () => {
+  const word = (start, length, expression, reading) => ({ start, length, candidates: [{ expression, reading }] });
+  const source = request({ sentence: "今日は食べますと言った。", matchOffset: 3,
+    sentenceSegments: [[word(0, 2, "今日", "きょう"), word(2, 1, "は", "は")],
+      [word(0, 1, "と", "と"), word(1, 3, "言う", "いう")]] });
+  assert.equal(await render(source, "{sentence-furigana}"),
+    "<ruby>今日<rt>きょう</rt></ruby>は<b><ruby>食<rt>た</rt></ruby>べます</b>と<ruby>言<rt>い</rt></ruby>った。");
+  assert.equal(await render(source, "{sentence-furigana-plain}"), "今日[きょう]は<b>食[た]べます</b>と 言[い]った。");
+});
+
 test("{popup-selection-text} keeps the selection's line breaks, as Yomitan's getMedia does", async () => {
   assert.equal(await render(request({ popupSelectionText: "to eat\n<to drink>" }), "{popup-selection-text}"),
     "to eat<br>\n&lt;to drink&gt;");
@@ -276,6 +286,21 @@ test("pitch, part-of-speech, tags and transcriptions keep source meanings and ma
   assert.match(await render(source, "{phonetic-transcriptions}"), /&lt;ipa&gt;/u);
   assert.equal(await render(source, "{pitch}"), "<b>Pitch</b>: LHH, LHL (nasal 1; devoice 2), &lt;ipa&gt;");
   assert.equal(await render(source, "{audio}", { audio: "[sound:chosen.mp3]" }), "[sound:chosen.mp3]");
+});
+
+test("{pitch-accent-categories} takes kifuku from a word class only where the headword ends like it (#608)", async () => {
+  const term = (expression, reading, rules) => ({ ...request().term, expression, reading, rules,
+    pitches: [{ dictionary: "Pitch", transcriptions: [], pitches: [{ position: 2, pattern: "", nasal: [], devoice: [] }] }] });
+  assert.equal(await render(request({ term: term("自由", "じゆう", "v5") }), "{pitch-accent-categories}"), "nakadaka");
+  assert.equal(await render(request({ term: term("食べる", "たべる", "v1") }), "{pitch-accent-categories}"), "kifuku");
+});
+
+test("{pitch-accent-categories} gives no group to a pattern of more than one accent phrase (#596)", async () => {
+  // 二十四時間 に＼じゅう・よじ＼かん as one pattern, beside a [2] from the same dictionary.
+  const pitch = (position, pattern) => ({ position, pattern, nasal: [], devoice: [] });
+  const term = { ...request().term, expression: "二十四時間", reading: "にじゅうよじかん", rules: "",
+    pitches: [{ dictionary: "Pitch", transcriptions: [], pitches: [pitch(0, "HLLLHLL"), pitch(2, "")] }] };
+  assert.equal(await render(request({ term }), "{pitch-accent-categories}"), "nakadaka");
 });
 
 test("the screenshot marker references only a stored picture and escapes its filename", async () => {

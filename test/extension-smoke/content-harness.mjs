@@ -22,7 +22,7 @@ let JSDOM;
 
 const settle = () => new Promise((resolvePromise) => setTimeout(resolvePromise, 0));
 
-async function createHarness(kanjiClickDictionary = { title: "Generic", kind: "term" }, { holdLookupStats = false, options: optionOverrides = {}, deferInitialStorage = false, url = "https://example.test/" } = {}) {
+async function createHarness(kanjiClickDictionary = { title: "Generic", kind: "term" }, { holdLookupStats = false, options: optionOverrides = {}, deferInitialStorage = false, url = "https://example.test/", dock = null, userScripts = false, prebuildUi = true } = {}) {
   const dom = new JSDOM(
     "<!doctype html><body><span id=anchor>\u98df\u3079\u305f</span></body>",
     {
@@ -35,6 +35,13 @@ async function createHarness(kanjiClickDictionary = { title: "Generic", kind: "t
   const popupEvents = [];
   window.addEventListener("hachidori-popup-shown", () => popupEvents.push("shown"));
   window.addEventListener("hachidori-popup-hidden", () => popupEvents.push("hidden"));
+  // The reader's requests for Custom JavaScript's bridge to attach its root.
+  let rootRequests = 0;
+  window.addEventListener("hachidori-popup-root", () => { rootRequests += 1; }, true);
+  // `userScripts` runs the bridge as Chrome does, ahead of the saved code. jsdom
+  // has one world, so the bridge's shadowRoot getter also stands in for
+  // chrome.dom.openOrClosedShadowRoot.
+  if (userScripts) window.eval(readFileSync(resolve(EXTENSION, "custom-javascript-bridge.js"), "utf8"));
   let storageListener = null;
   let deferredInitialStorage = null;
   const popupRecords = new Map();
@@ -119,6 +126,7 @@ async function createHarness(kanjiClickDictionary = { title: "Generic", kind: "t
         lookupStats.hidden = true;
         const definitions = window.document.createElement("ol");
         definitions.className = "gsm-hoshidicts-definitions";
+        definitions.append(window.document.createElement("li"));
         const audioButton = window.document.createElement("button");
         audioButton.className = "gsm-hoshidicts-audio-button";
         callbacks.popup.append(lookupStats, definitions, audioButton);
@@ -168,6 +176,7 @@ async function createHarness(kanjiClickDictionary = { title: "Generic", kind: "t
   };
   const runtimeListeners = new Set();
   window.chrome = {
+    ...(userScripts ? { dom: { openOrClosedShadowRoot: element => element.shadowRoot } } : {}),
     runtime: {
       id: "hachidoricontnotesmoke",
       onMessage: { addListener(fn) { runtimeListeners.add(fn); }, removeListener(fn) { runtimeListeners.delete(fn); } },
@@ -242,6 +251,9 @@ async function createHarness(kanjiClickDictionary = { title: "Generic", kind: "t
     setOverlayMode(value) { overlayMode = value === true; },
     selectionDragging() { return selectionDragActive; },
     viewRequest(depth = 0) { return levels[depth]?.currentViewRequest; },
+    dock: dockResults,
+    search,
+    lookUpOnClick,
     resolveCandidate,
     resolveSelectedLookupCandidate,
     resolveSelectionScanCandidate,
@@ -301,7 +313,16 @@ async function createHarness(kanjiClickDictionary = { title: "Generic", kind: "t
   window.eval(readFileSync(resolve(EXTENSION, "content-scan.js"), "utf8"));
   window.eval(instrumented);
   const driver = window.__hachidoriContentNoteSmoke;
-  const popup = await driver.install();
+  // The search page's results area (#610), docked before the reader builds its popup.
+  const dockElement = dock === null ? null : window.document.createElement("main");
+  if (dockElement) {
+    dockElement.getBoundingClientRect = () => ({ ...dock, right: dock.left + dock.width, bottom: dock.top + dock.height,
+      x: dock.left, y: dock.top });
+    window.document.body.append(dockElement);
+    driver.dock(dockElement);
+  }
+  // `prebuildUi: false` leaves the popup to the reader's first lookup, as on a page.
+  const popup = prebuildUi ? await driver.install() : null;
   const popupRecord = (depth = 0) => popupRecords.get(driver.popupAt(depth));
   const anchor = window.document.getElementById("anchor");
   const anchorRange = window.document.createRange();
@@ -404,6 +425,7 @@ async function createHarness(kanjiClickDictionary = { title: "Generic", kind: "t
     anchor,
     appliedStyles,
     candidate,
+    dockElement,
     createLayoutView(callbacks) {
       const view = createLayoutView(callbacks);
       popupRecords.get(callbacks.popup).layoutView = view;
@@ -448,6 +470,8 @@ async function createHarness(kanjiClickDictionary = { title: "Generic", kind: "t
     pending,
     popup,
     popupEvents,
+    get rootRequests() { return rootRequests; },
+    window,
     render: (depth = 0) => popupRecord(depth)?.renders.at(-1),
     setTermViewport(value) { popupRecord().viewport = value; },
     presentations: (depth = 0) => popupRecord(depth)?.presentations,
@@ -526,9 +550,8 @@ async function contentNoteStage(cases) {
 }
 
 // jsdom lays nothing out; put every glyph under a popup case's pointer.
-function glyphsUnderPointer(harness) {
-  harness.popup.ownerDocument.defaultView.Range.prototype.getClientRects =
-    () => [{ left: 110, top: 70, right: 130, bottom: 90 }];
+function glyphsUnderPointer(harness, rect = { left: 110, top: 70, right: 130, bottom: 90 }) {
+  harness.popup.ownerDocument.defaultView.Range.prototype.getClientRects = () => [rect];
 }
 
 export {

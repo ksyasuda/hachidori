@@ -8,6 +8,7 @@ export const KEYBIND_OPTION_LABELS = {
   personalDictionaryEnabled: "Use the personal dictionary",
   showNoResultNotice: "Show a popup when a selection has no definition",
   hidePopupOnCursorExit: "Hide popup on cursor exit",
+  showMetadataOnlyResults: "Show words that only frequency or pitch dictionaries have",
   audioAutoplay: "Automatically play the first lookup result",
   sourceHighlightEnabled: "Highlight the word on the page",
   showPopupAudioButton: "Show the audio button",
@@ -20,7 +21,7 @@ export const KEYBIND_OPTION_LABELS = {
   showFrequencyTagsWithAverage: "Show each dictionary's frequencies with the averages",
   showFrequencyDictionaryNames: "Show frequency dictionary names",
   compactFrequencyNumbers: "Abbreviate large frequency numbers",
-  showPitchAccentFurigana: "Show pitch in furigana",
+  showPitchAccentFurigana: "Show pitch on the reading",
   showPitchAccentBadge: "Show pitch badges",
   showPitchAccentDictionaryNames: "Show pitch dictionary names",
   showPitchAccentText: "Show pitch accent text",
@@ -29,9 +30,10 @@ export const KEYBIND_OPTION_LABELS = {
   showPitchAccentColors: "Show pitch accent colours",
   // Stored inverted; named like the Settings checkbox it flips.
   hidePopupGrammarTags: "Show grammar tags",
+  searchClickLookup: "Look up words with a click on the search page",
 };
 const MODIFIER_NAMES = { meta: "Meta", ctrl: "Ctrl", alt: "Alt", shift: "Shift" };
-const SCOPE_LABELS = { popup: "While a popup is open", web: "Anywhere on the page" };
+const SCOPE_LABELS = { popup: "While a popup is open", search: "On the search page", web: "Anywhere on the page" };
 
 // Yomitan's HotkeyUtil display: modifiers first, a letter key without "Key".
 export function formatKeybind(key, modifiers) {
@@ -56,8 +58,12 @@ function renderScopes(row, action, bind) {
   }
 }
 
+// `optionAvailable(key)` says whether the edited profile's language has what a
+// Toggle option target needs, and `languageName()` names that language
+// (docs/languages.md 7.3 and 7.4); both default to today's Japanese page.
 export function createKeybindSettingsController({ document, readKeybinds, editKeybinds, readAudioSources,
-  getBrowserCommands, openBrowserShortcuts, browserShortcutsAvailable = true }) {
+  getBrowserCommands, openBrowserShortcuts, browserShortcutsAvailable = true,
+  optionAvailable = () => true, languageName = () => "Japanese" }) {
   const window = document.defaultView;
   const { KEYBIND_ACTIONS, KEYBIND_ARGUMENT_DEFAULTS, KEYBIND_MODIFIER_CODES, KEYBIND_SCOPES, KEYBIND_TOGGLE_OPTIONS,
     AUDIO_SOURCE_LABELS, DEFAULT_OPTIONS, keybindModifiers, keybindWheelKey } = window.HDReaderOptions;
@@ -66,7 +72,10 @@ export function createKeybindSettingsController({ document, readKeybinds, editKe
   const rows = [];
 
   const copy = bind => ({ ...bind, modifiers: [...bind.modifiers], scopes: [...bind.scopes] });
-  const defaultFor = action => DEFAULT_OPTIONS.keybinds.find(bind => bind.action === action);
+  // The action's first default in the row's scopes, else its first: Add note
+  // is Alt+E in a popup and Enter on the search page.
+  const defaultFor = ({ action, scopes }) => DEFAULT_OPTIONS.keybinds.find(bind => bind.action === action
+    && bind.scopes.join() === scopes.join()) ?? DEFAULT_OPTIONS.keybinds.find(bind => bind.action === action);
 
   function change(row, patch) {
     editKeybinds(readKeybinds().map((bind, index) => index === row.index ? { ...bind, ...patch } : bind));
@@ -111,12 +120,13 @@ export function createKeybindSettingsController({ document, readKeybinds, editKe
       <label class="field"><span class="field-label">Action</span><select class="keybind-action"></select></label>
       <label class="field keybind-count-field"><span class="field-label">Count</span><input class="keybind-count" type="number" min="1" step="1" inputmode="numeric"></label>
       <label class="field keybind-source-field"><span class="field-label">Source</span><select class="keybind-source"></select></label>
-      <label class="field keybind-option-field"><span class="field-label">Option</span><select class="keybind-option"></select></label>
+      <label class="field keybind-option-field"><span class="field-label">Option</span><select class="keybind-option"></select><span class="field-hint keybind-option-note" hidden></span></label>
       </div>
       <div class="keybind-scopes"></div>`;
     const row = { element, index: -1, sourceKey: "" };
-    for (const name of ["enabled-input", "number", "clear", "reset", "remove", "input", "action", "count", "source", "option"]) {
-      row[name.replace("-input", "")] = element.querySelector(`.keybind-${name}`);
+    for (const name of ["enabled-input", "number", "clear", "reset", "remove", "input", "action", "count", "source", "option",
+      "option-note"]) {
+      row[name.replace("-input", "").replace("-note", "Note")] = element.querySelector(`.keybind-${name}`);
     }
     row.fields = { count: element.querySelector(".keybind-count-field"), audioSource: element.querySelector(".keybind-source-field"),
       option: element.querySelector(".keybind-option-field") };
@@ -141,7 +151,7 @@ export function createKeybindSettingsController({ document, readKeybinds, editKe
     row.input.addEventListener("wheel", event => captureWheel(row, event), { passive: false });
     row.clear.addEventListener("click", () => change(row, { key: null, modifiers: [] }));
     row.reset.addEventListener("click", () => {
-      const fallback = defaultFor(readKeybinds()[row.index].action);
+      const fallback = defaultFor(readKeybinds()[row.index]);
       if (fallback) change(row, { key: fallback.key, modifiers: [...fallback.modifiers], argument: fallback.argument });
     });
     row.remove.addEventListener("click", () => {
@@ -183,13 +193,33 @@ export function createKeybindSettingsController({ document, readKeybinds, editKe
     if (control !== document.activeElement && control.value !== value) control.value = value;
   }
 
+  // Keybinds are global; their Toggle option targets are profile keys. New
+  // arguments are those the edited profile's language has; a stored one it
+  // lacks stays selected and says so (docs/languages.md 7.3).
+  function renderOptionChoices(row, bind) {
+    const language = languageName();
+    for (const choice of row.option.options) {
+      if (choice.value === "") continue;
+      const label = KEYBIND_OPTION_LABELS[choice.value].replace("Japanese", language);
+      if (choice.textContent !== label) choice.textContent = label;
+      const hidden = choice.value !== bind.argument && !optionAvailable(choice.value);
+      if (choice.hidden !== hidden) choice.hidden = hidden;
+    }
+    const unavailable = bind.argument !== "" && !optionAvailable(bind.argument);
+    setText(row.optionNote, unavailable ? `Not available in ${language}` : "");
+    if (row.optionNote.hidden === unavailable) row.optionNote.hidden = !unavailable;
+  }
+
   function renderArgument(row, action, bind) {
     for (const [kind, field] of Object.entries(row.fields)) {
       if (field.hidden !== (action.argument !== kind)) field.hidden = action.argument !== kind;
     }
     if (action.argument === "count") setValue(row.count, bind.argument);
     if (action.argument === "audioSource") renderSources(row, bind);
-    if (action.argument === "option") setValue(row.option, bind.argument);
+    if (action.argument === "option") {
+      renderOptionChoices(row, bind);
+      setValue(row.option, bind.argument);
+    }
   }
 
   function renderRow(row, bind, index) {
@@ -203,7 +233,7 @@ export function createKeybindSettingsController({ document, readKeybinds, editKe
     setValue(row.action, bind.action);
     renderArgument(row, action, bind);
     renderScopes(row, action, bind);
-    row.reset.disabled = !defaultFor(bind.action);
+    row.reset.disabled = !defaultFor(bind);
     labelControl(row.enabled, `Enable ${number}`);
     labelControl(row.input, `Keys for ${number}: press a key combination`);
     for (const [key, label] of [["clear", "Clear keys"], ["reset", "Reset"], ["remove", "Remove"]]) {

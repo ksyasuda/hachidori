@@ -8,8 +8,13 @@ import {
   assertLinkedAnkiFrame, browserName,
   formatHostAddress, formatLinkAddress, forwardableRequest, mutatingForwardedRequest,
   parseClientFrame, parseHostFrame,
-  parseLinkAddress,
+  parseLinkAddress, sharingPort,
 } from "../extension/sharing-protocol.js";
+
+test("a sharing port is a whole number from 1 to 65535", () => {
+  for (const [value, port] of [["6771", 6771], [" 8771 ", 8771], [1, 1], ["65535", 65535]]) assert.equal(sharingPort(value), port);
+  for (const bad of ["", "0", "65536", "-1", "87.5", "1e3", "port", null, undefined]) assert.equal(sharingPort(bad), null, String(bad));
+});
 
 test("link addresses take a host, host:port or a ws:// URL, and say where that is", () => {
   const local = { host: "127.0.0.1", port: DEFAULT_SHARING_PORT, address: `ws://127.0.0.1:${DEFAULT_SHARING_PORT}/link`, display: "this computer" };
@@ -37,6 +42,8 @@ test("a browser names itself by its brand", () => {
   assert.equal(browserName(brands()), "another browser");
   assert.equal(browserName({}), "another browser");
   assert.equal(browserName(undefined), "another browser");
+  // Firefox has no user-agent brands; its user agent names it.
+  assert.equal(browserName({ userAgent: "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" }), "Firefox");
 });
 
 test("only host-owned plain-message requests forward; screenshots and blob imports stay local", () => {

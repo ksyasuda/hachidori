@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-import { ankiAvailability, isUndispatchedAnkiTransportError } from "./anki.js";
+import { ANKI_DECK_UNSET, ankiAvailability, isUndispatchedAnkiTransportError } from "./anki.js";
 import { ankiCaptureRequirements, resolveAnkiTemplates } from "./anki-templates.js";
 import { ankiDigest } from "./anki-digest.js";
 import { inspectAnkiNoteIds } from "./anki-index.js";
-import { ankiSetupFamily } from "./anki-setup.js";
+import { ankiListedFamily } from "./anki-setup.js";
 import { ankiBrowseQuery, ankiNoteIdsQuery, ankiNoteOptions, canonicalAnkiFields, checkAnkiDuplicate, explainAnkiRefusal,
-  findAnkiDuplicateNotes, isAnkiDuplicateError, overwriteAnkiFields, validateAnkiNote, validateAnkiNotes } from "./anki-duplicates.js";
+  ankiUpdateKeepsField, findAnkiDuplicateNotes, isAnkiDuplicateError, overwriteAnkiFields, validateAnkiNote, validateAnkiNotes } from "./anki-duplicates.js";
 
 const CONFIG_CHANGED = "Anki configuration changed. Refresh this result before adding a note.";
 // The sentence-audio field the Kiku, Lapis and Senren presets leave blank.
@@ -22,7 +22,8 @@ const netflixRequest = (config, request) => config.netflixMining === true
 // never changed.
 function requestConfiguration(current, request) {
   if (!netflixRequest(current.config, request)) return current;
-  const field = SENTENCE_AUDIO_FIELDS[ankiSetupFamily(current.config.model)];
+  const families = Array.isArray(current.config.noteTypeFamilies) ? current.config.noteTypeFamilies : null;
+  const field = SENTENCE_AUDIO_FIELDS[ankiListedFamily(current.config.model, families)];
   const template = field === undefined ? undefined : current.resolved.templates[field];
   if (template === undefined || template.value.trim() !== "") return current;
   return { ...current, resolved: { ...current.resolved,
@@ -156,7 +157,7 @@ function omitUnchangedFields(fields, existing) {
   return fields;
 }
 
-function fieldsForDecision(prepared, checked) {
+function fieldsForDecision(prepared, checked, request) {
   const target = checked.target;
   if (!target) {
     return {
@@ -166,13 +167,15 @@ function fieldsForDecision(prepared, checked) {
     };
   }
   const canonical = canonicalAnkiFields(prepared.note.fields, prepared.resolved.templates, target.fields);
+  const templates = Object.fromEntries(Object.entries(canonical.templates)
+    .filter(([, template]) => !ankiUpdateKeepsField(template, request)));
   // Only the initial write omits unchanged values. Pronunciation enrichment
   // compares its complete desired value with the text-only write it replaces.
-  const fields = omitUnchangedFields(overwriteAnkiFields(canonical.fields, target.fields, canonical.templates), target.fields);
+  const fields = omitUnchangedFields(overwriteAnkiFields(canonical.fields, target.fields, templates), target.fields);
   return {
     fields,
     target,
-    templates: Object.fromEntries(Object.entries(canonical.templates).filter(([field]) => Object.hasOwn(fields, field))),
+    templates: Object.fromEntries(Object.entries(templates).filter(([field]) => Object.hasOwn(fields, field))),
   };
 }
 
@@ -269,7 +272,10 @@ export function createAnkiMiningService({
 
   async function status(templateId) {
     const current = await configuration(templateId);
-    return { available: current.errors.length === 0, configKey: current.configKey, error: current.errors.join("\n") };
+    return { available: current.errors.length === 0, configKey: current.configKey, error: current.errors.join("\n"),
+      // Only a deck is missing: the popup's Anki button then opens Settings →
+      // Anki (docs/languages.md 6.3).
+      ...(current.errors.length === 1 && current.errors[0] === ANKI_DECK_UNSET ? { emptyDeck: true } : {}) };
   }
 
   async function view(request) {
@@ -341,7 +347,7 @@ export function createAnkiMiningService({
   }
 
   async function preflightReply(request, prepared, result) {
-    const applied = result.canAdd ? fieldsForDecision(prepared, result) : null;
+    const applied = result.canAdd ? fieldsForDecision(prepared, result, request) : null;
     const extra = await preflightExtra({ request, prepared, applied, deferred: false });
     return {
       state: result.state,
@@ -412,7 +418,7 @@ export function createAnkiMiningService({
     if (!checked.canAdd) return { state: checked.state, error: checked.error,
       action: checked.action, noteIds: checked.noteIds };
     const { config, configJson, firstField, note, invoke } = prepared;
-    const { fields, target } = fieldsForDecision(prepared, checked);
+    const { fields, target } = fieldsForDecision(prepared, checked, request);
     if (JSON.stringify(await readConfig(request?.templateId)) !== configJson) throw new Error(CONFIG_CHANGED);
     const writeResources = await beforeWrite({
       request,

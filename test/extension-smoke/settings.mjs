@@ -183,7 +183,7 @@ async function settingsNavigationStage() {
     if (document.getElementById("design")) {
       await navigate("design");
       const preview = document.getElementById("design-preview");
-      design &&= document.getElementById("opt-popup-theme").options.length === 47;
+      design &&= document.getElementById("opt-popup-theme").options.length === 48;
       const updates = [];
       preview.contentWindow.HDDesignPreview = { update(value) { updates.push(structuredClone(value)); } };
       preview.dispatchEvent(new window.Event("load"));
@@ -705,7 +705,13 @@ async function settingsFrequencyStage() {
       await editControl(blurControl("opt-blur-reveal"), "hover");
       metadataDetails.push(blurControl("opt-blur-delay").disabled
         && blurControl("definition-blur-delay-control").hidden
+        && blurControl("definition-blur-reveal-help").textContent.startsWith("Hovering a definition")
         && JSON.stringify(writes.at(-1).options) === JSON.stringify({ definitionBlurReveal: "hover" }));
+      await editControl(blurControl("opt-blur-reveal"), "click");
+      metadataDetails.push(blurControl("opt-blur-delay").disabled
+        && blurControl("definition-blur-delay-control").hidden
+        && blurControl("definition-blur-reveal-help").textContent.startsWith("Only clicking a definition")
+        && JSON.stringify(writes.at(-1).options) === JSON.stringify({ definitionBlurReveal: "click" }));
       // The toggles above leave the contour off and colours on: the dictionary
       // still picks the headword's colour, so it stays editable until both are off.
       metadataDetails.push(!pitch.disabled);
@@ -751,7 +757,7 @@ async function settingsFrequencyStage() {
     }
     const theme = window.document.getElementById("opt-popup-theme");
     window.location.hash = "#design";
-    await until(() => theme.options.length === 47);
+    await until(() => theme.options.length === 48);
     let settingsTheme = window.document.documentElement.dataset.hoshidictsTheme === "default";
     const toolbarSelect = window.document.getElementById("opt-popup-toolbar");
     await editControl(toolbarSelect, "bottom");

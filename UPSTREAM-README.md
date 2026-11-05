@@ -9,15 +9,18 @@
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0--or--later-7c3aed" alt="GPL-3.0-or-later license"></a>
   <a href="#install-in-15-seconds"><img src="https://img.shields.io/badge/Chrome-128%2B-4285F4?logo=googlechrome&logoColor=white" alt="Chrome 128 or newer"></a>
+  <a href="docs/firefox.md"><img src="https://img.shields.io/badge/Firefox-153%2B-FF7139?logo=firefoxbrowser&logoColor=white" alt="Firefox 153 or newer"></a>
   <a href="docs/privacy.md"><img src="https://img.shields.io/badge/dictionary_engine-local-0f766e" alt="Dictionary engine runs locally"></a>
   <a href="https://sonarcloud.io/summary/new_code?id=bee-san_hachidori"><img src="https://sonarcloud.io/api/project_badges/measure?project=bee-san_hachidori&metric=alert_status" alt="SonarQube Cloud quality gate"></a>
   <a href="https://github.com/bee-san/hachidori"><img src="https://img.shields.io/github/stars/bee-san/hachidori?style=flat&logo=github&color=f59e0b" alt="GitHub stars"></a>
+  <a href="https://discord.skerritt.blog"><img alt="Discord" src="https://img.shields.io/discord/754001738184392704?logo=discord&label=Discord"></a>
 </p>
 
 <p align="center">
   <a href="#install-in-15-seconds">Install</a> ·
   <a href="benchmark/README.md">Benchmarks</a> ·
   <a href="docs/architecture.md">Architecture</a> ·
+  <a href="docs/firefox.md">Firefox</a> ·
   <a href="extension/README.md">Extension</a> ·
   <a href="docs/asbplayer.md">asbplayer</a> ·
   <a href="docs/sharing.md">Sharing</a> ·
@@ -27,7 +30,7 @@
   <a href="CONTRIBUTING.md">Contributing</a>
 </p>
 
-Hachidori is a blazing fast Japanese Dictionary Chrome Extension that is feature rich and opinionated.
+Hachidori is a blazing fast Japanese Dictionary extension for Chrome and Firefox that is feature rich and opinionated.
 
 <img width="1701" height="1127" alt="image" src="https://github.com/user-attachments/assets/390c553a-a604-4fba-af7d-ddaa28b12f37" />
 
@@ -35,6 +38,8 @@ Hachidori is a blazing fast Japanese Dictionary Chrome Extension that is feature
 ## Install in 15 seconds
 
 Click <a href="https://chromewebstore.google.com/detail/hachidori/mikpaebfdmidjnopgffchicnmoahhcbe">here to install from Chrome store.</a> (note: this will always lag behind the repo and may have bugs fixed in the repo)
+
+For Firefox 153 or newer, download the `-firefox.zip` from a [release](https://github.com/bee-san/hachidori/releases) after 0.3.2 and follow the [Firefox guide](docs/firefox.md) to install it.
 
 <p align="center">
   <img src="docs/assets/install-in-60-seconds.gif" alt="Animated walkthrough of Hachidori's first-run setup, dictionary installation, Anki detection, and Japanese lookup" width="720">
@@ -55,9 +60,6 @@ Do you keep on seeing a name pop up over & over again in a book, but it's not in
 
 With Hachidori, you can highlight the word and add it as a custom definition.
 
-Never add your own words? Turn off **Settings → Dictionaries → Personal dictionary →
-Use the personal dictionary** and highlighting text no longer opens a popup.
-
 <p align="center">
   <img src="docs/assets/custom-dictionary.gif" alt="Animated demonstration of adding and viewing a custom dictionary definition in Hachidori" width="720">
 </p>
@@ -66,7 +68,7 @@ Use the personal dictionary** and highlighting text no longer opens a popup.
 
 Sometimes we fall into a trap of looking up a word over & over again, but never learning it.
 
-Hachidori records how many times you have looked up a word and can blur it for you for a few seconds to force you to remember it.
+Hachidori records how many times you have looked up a word and can blur it for you for a few seconds to force you to remember it. If you'd rather decide when to look, set it to reveal only when you click.
 
 It can even use anki.
 
@@ -101,18 +103,8 @@ I also have personally been using this for months, and as I am the main user of 
 
 The assets used are AI generated. If you are an artist and want to contribute to open source, please feel free to make a real logo or a visual novel style background.
 
-## Credits
+# Credits
 
-The logo pack and six visual novel backgrounds were supplied by bee-san. See the
-[asset ownership and publishing record](docs/asset-rights.md) for the original
-assets and their copyright declaration.
+Thanks to Manhhao of hoshi-dicts for creating the underlying dictionary program.
 
-Hachidori is powered by [hoshidicts](https://github.com/Manhhao/hoshidicts) by Manhhao. Its popup renderer, structured-content renderer, furigana segmentation, and CSS are ported from [GameSentenceMiner PR #549](https://github.com/bpwhelan/GameSentenceMiner/pull/549), which adapts [Hoshi Reader](https://github.com/Manhhao/Hoshi-Reader) and [Yomitan](https://github.com/yomidevs/yomitan). See the full [renderer attribution](extension/render/ATTRIBUTION.md).
-
-The experimental Netflix mining's subtitle hooks are adapted from [Subadub](https://github.com/rsimmons/subadub) by Russel Simmons, under the MIT licence ([notice](distribution/licenses/subadub-LICENSE)). Its looping GIFs are encoded with [gifenc](https://github.com/mattdesl/gifenc) by Matt DesLauriers, under the MIT licence ([notice](distribution/licenses/gifenc-LICENSE)).
-
-Headword furigana use the kanji readings of [KANJIDIC2](https://www.edrdg.org/wiki/index.php/KANJIDIC_Project). This file is the property of the [Electronic Dictionary Research and Development Group](https://www.edrdg.org/), and is used in conformance with the Group's [licence](https://www.edrdg.org/edrdg/licence.html). The readings in `extension/vendor/kanjidic/` remain under [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/).
-
-## License
-
-Hachidori is available under [GPL-3.0-or-later](LICENSE), matching hoshidicts and the ported GameSentenceMiner code.
+Thanks to Yomitan for whom this project would not be possible.

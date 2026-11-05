@@ -29,6 +29,13 @@ npm --prefix test/tooling run test:fallback     # IDBFS path
 npm --prefix test/tooling run test:overlay      # GameSentenceMiner overlay mode
 HACHIDORI_CHROME_BUILD=128.0.6613.137 \
   node test/run.mjs chrome-e2e                   # manifest-minimum Chrome
+node test/run.mjs firefox-lint                   # web-ext lint on the Firefox build
+npm --prefix test/tooling run install:firefox    # Firefox 159.0
+npm --prefix test/tooling run test:firefox       # the real-Firefox suite
+HACHIDORI_FIREFOX_BUILD=stable_153.0 \
+  node test/run.mjs firefox-e2e                  # manifest-minimum Firefox
+node test/run.mjs firefox-languages              # a profile switch and an English and an Arabic lookup in Firefox
+HACHIDORI_BENCH_DATA=DIR node test/run.mjs firefox-large  # full Pixiv import in Firefox
 ```
 
 `test/tooling/package-lock.json` locks jsdom, Puppeteer, the browser installer,
@@ -52,12 +59,14 @@ For a Linux container that cannot run Chrome's sandbox, set
 `HACHIDORI_ALLOW_NO_SANDBOX=1` for the browser commands. Sharing needs a usable
 non-loopback network address for its other-computer checks.
 
-`.github/workflows/runtime-tests.yml` runs ESLint, the Node contracts, smoke
-tests and the five Chrome browser suites on every PR and push to `main`, or
+`.github/workflows/runtime-tests.yml` runs ESLint and `web-ext lint`, the Node
+contracts, smoke tests, the five Chrome browser suites and the Firefox suite on
+the current and the manifest-minimum Firefox on every PR and push to `main`, or
 manually. It also
 runs the primary Chrome suite on the exact Chrome 128 build recorded beside the
-current Chrome 152 pin, and creates and checksum-verifies the Chrome/source
-release pair. The release contract fails if the tested minimum drifts from the
+current Chrome 152 pin, imports the full Pixiv dictionary in Chrome and in
+Firefox, and creates and checksum-verifies the Chrome, Firefox and source
+release set, linting the packaged Firefox ZIP. The release contract fails if the tested minimum drifts from the
 manifest. The browser matrix runs independently so one failing suite cannot hide
 the others. Failing CI jobs upload `test/tmp/ci`, the available screenshots, and
 the browser profiles retained by failed suites, for seven days. The same commands
@@ -167,6 +176,7 @@ see [benchmark/README.md](../benchmark/README.md).
 | `anki-audio`, `anki-offscreen-audio` | First decodable pronunciation exported without playback, exact TTS voice capture, linked TTS planned without host capture. |
 | `anki-client-media` | Linked screenshot and browser-speech WAV bytes are allowlisted against the request; stale and malformed media are refused. |
 | `anki-content` | The reader's Anki action across cold/warm cache, live repair, stale IDs, failures, retries and nested popups; an unresolved action is an enabled, busy Arrow Clockwise that adds anyway when clicked; a renderer can name the result owning the custom Anki buttons. |
+| `anki-deck-settings` | A Template that names no deck (docs/languages.md 6.3): the mining service marks that readiness, the popup's Anki button keeps "Choose an available deck." and opens Settings → Anki on the profile in effect through `content.js` and the worker's `hd_open_settings`, Settings starts on the profile its address names, and every other unavailable Template keeps today's button. |
 | `anki-duplicates` | Duplicate options keep Anki's race guard on the configured type; browse searches escape HTML and query syntax. |
 | `anki-enrichment` | Audio enrichment applies overwrite modes once and preserves a late external edit. |
 | `anki-glossary` | Rich and plain glossary markers: ordered senses, aliases, safe media, `<br>`, one `li[data-dictionary]` per row, image sizes, style escaping, Yomitan's inline structured-content styles at 67db60d, and dictionary CSS scoped by selector prefix (the cascade itself is checked in Chrome). |
@@ -183,46 +193,58 @@ see [benchmark/README.md](../benchmark/README.md).
 | `audio-*` (`sources`, `player`, `offscreen`, `cache`, `repository`, `content`) | Audio source options, candidate order, the player and its cleanup, TTS voices, Test deadlines, LRU/TTL/byte accounting, leases, exact candidate identity, the pronunciation chooser's placement and focus, autoplay, and named failures (#499, #501). |
 | `autumn-theme` | Autumn stays one light theme and keeps text, badges and statuses readable. |
 | `backup-archive`, `backup-automatic`, `backup-downloads`, `backup-settings`, `backup-state` | Backup export and restore without stream-to-blob consumption, automatic cadence and schema, download URL lifetime, Settings ages and confirmation, restore revisions. |
+| `backup-profiles` | Backups with language profiles (docs/languages.md 17.1, 17.2, 17.6): the Japanese view as the version 3 snapshot beside `profiles`, version 4 archives that builds without profiles read as version 3, restores that leave out a language without a pack, keep data-only languages, build the Japanese profile when no profile remains and give every language's document and count generation fresh revisions, the preview's language lines, the worker's payload, automatic snapshots and restore compare-and-set, and an export, preparation and restore through the real WebAssembly engine. |
 | `base64`, `browser-api` | Base64 helpers against `btoa`/`atob`; the extension API module and exact sender URLs. |
-| `browser-commands` | The worker's command listener against the manifest: the toggle's revisioned write, Settings, and argument-free keybind actions forwarded to the active tab. |
+| `browser-commands` | The worker's command listener against the manifest: the toggle's revisioned write, Settings, the three search page shortcuts, and argument-free keybind actions forwarded to the active tab. |
 | `chrome-web-store` | The service-account assertion and its token endpoint. |
 | `custom-button-settings`, `custom-buttons-renderer`, `external-link-host` | Link templates and Anki Template selection, button editing, the overlay host request/result boundary, live editing without replacing cards or drafts. |
 | `custom-dictionary` | The personal dictionary's source and ZIP contract: parsing, comments, ordered duplicates, malformed-line reports, CRLF append, escape round trips, a byte-deterministic multi-bank ZIP (imported through the real WASM engine by the smoke suite). |
-| `custom-javascript` | Custom JavaScript sits beneath Custom CSS with one warning and persists as a Design option. |
-| `debug-info`, `debug-log` | The debug report's contents without reader content; the log's capture, redaction, named actions and shown errors, the IndexedDB ring's batches, repeat counts, entry and byte limits across writers, and a reloaded page's report. |
+| `custom-javascript` | Custom JavaScript sits beneath Custom CSS with one warning and persists as a Design option; its registration runs `custom-javascript-bridge.js` first, which attaches the reader's closed root and returns it through `host.shadowRoot`. |
+| `debug-info`, `debug-log`, `debug-log-languages` | The debug report's contents without reader content; the log's capture, redaction (with profiles, also of the other languages' text, docs/languages.md 8.5), named actions and shown errors, the IndexedDB ring's batches, repeat counts, entry and byte limits across writers, and a reloaded page's report. |
 | `definition-blur-frequency` | Frequency blur options and their inclusive boundaries. |
+| `definition-tag-colors` | Definition tags take Yomitan's colour for their category, each at 4.5:1 for its label in light and dark palettes and 7:1 in High contrast (#604). |
 | `dictionary-import`, `dictionary-import-errors` | Revision comparison, MDX loss-count notes, and mmap/writeback failures that cleanup cannot hide. |
 | `dictionary-import-attempts` | A Settings import's turn at the engine (#578): it waits while the engine starts or a change holds it, polling with backoff up to a 30-minute timeout, and Cancel ends the wait at once; a failed attempt is retried up to three times, never after the library changed and never for memory, storage or engine-start failures. |
 | `dictionary-index-storage` | The hash-index budget: smallest tables stay resident, stable ties, enabled packages counted once, 65 MiB with **Use less ram by default** and 32 MiB in Low memory mode. |
 | `dictionary-name-drafts`, `dictionary-update-schedule` | Name autosave and external renames; per-dictionary schedules and due times. |
+| `engine-profile-code` | A Japanese-only engine start loads no profile code (docs/languages.md 5): the engine worker's modules leave `HDReaderOptions` and `HDLanguages` unset, a Japanese lookup does not load them and a profile request does. |
 | `engine-recycler`, `memory-settings`, `low-memory-option` | [Low memory mode](../docs/memory.md): the recycle scheduler, the Advanced → Memory readout and per-row *In memory*, and the options' normalisation. |
 | `engine-status-settings` | Load failures render as a summary with one literal entry per dictionary. |
 | `error-text` | The exact text each `error-text.js` variant gives an Error, an empty-message Error, a string, a plain object with and without a `message`, an Error from another realm, and `null`, `undefined` and `NaN`, so sharing the variants cannot change a log line, status or reply. |
 | `experimental-features`, `experimental-settings` | The experimental-features registry and its switches. |
 | `fluent-icons`, `settings-fluent-icons` | The vendored Fluent subset, its provenance and use by controls. |
 | `frequency-presentation` | Yomitan-style frequency values and tags, abbreviations, averages and live controls. |
-| `furigana` | Headword furigana split by KANJIDIC readings. |
+| `furigana` | Headword furigana split by KANJIDIC readings: the one split that reads where the kana leave several (#459), and each run of kanji read one kanji at a time where one split reads (#605), with Jitendex kanwa's readings and compounds where KANJIDIC's read none (#641). |
 | `google-docs` | The Google Docs flag and its main-world script. |
 | `issue-template` | The issue template and its validator, with mocked GitHub calls; it never closes real issues. The Issue template workflow also runs it on relevant pull requests and pushes to `main`; that workflow's issue-event job enforces the template on opened, edited and reopened issues. |
 | `kanji-click-settings`, `kanji-group-mining`, `reader-options` | The clicked-kanji chooser and groups, `kanjiEntryResult` against the engine's `LookupResult`, and reader option normalisation. |
-| `keybind-settings` | Yomitan's default keybinds, capture, Alt+wheel rows and Chrome's browser shortcuts list. |
+| `keybind-settings` | Yomitan's default keybinds, capture, Alt+wheel rows, the search page's scope and default rows (and a list saved before it gaining them when read), Reset by the row's scope, and Chrome's browser shortcuts list. |
+| `language-packs` | `extension/vendor/languages/` is what `scripts/sync-languages.mjs` makes of the submodule's packs: class fields and display transforms expanded by hoshidicts' `tools/lib/classes.mjs` and matching each pack's `tests/classes.json`, `registry-reader.js` within 64 KB, valid host blocks, personal-dictionary ids (docs/languages.md 9.1). Needs the submodule. |
 | `linked-import` | Dictionary uploads from a linked browser: chunk order and limits, replace or install beside, aborts and timeouts. |
 | `local-audio-setup`, `local-file-access`, `startup-practice` | Local audio detection, the file-access prompt and the startup practice step's recovery. |
 | `lookup-stats` | Canonical lookup-count keys and their row updates. |
 | `message-types` | `extension/message-types.js` equals the `hd_*` names written in the code of every extension JavaScript file outside `vendor/`, comments aside: an unlisted or misspelt name fails, as does a listed name nothing uses. It loads the list as a classic script and as an ES module, and checks that blanking comments leaves strings, templates and regular expressions alone. |
 | `netflix`, `netflix-subtitles`, `netflix-page`, `netflix-content`, `netflix-capture`, `netflix-gif`, `netflix-audio`, `netflix-preview` | Experimental Netflix mining without Netflix: the flag, WebVTT/TTML parsing from `test/data/netflix/` (lines written for these tests), the page hooks, the player replay and a line played on without a seek, hover pause, the recorder's clock fit, GIF encoding, and the preview helper. `netflix-audio` drives the line audio with a jsdom video on a scripted timeline and fake Web Audio: a line heard at 1× is cut to within 2 ms of its media time, the silence between a pause and its event is not heard, a line paused and played on mid-block joins its two hearings sample for sample, other speeds, seeks and a new episode end a stretch, only 30 s stay, nothing joins a graph Chrome has not let start, and the switch going off stops the copy and frees the buffer; also the shared silence test and WAV encoder. `netflix-content` cuts a heard line with no replay or recorder frame, plays on a line stopped partway, replays one not heard, and records a `{gif}` with tab capture concealed while its sentence audio comes from the line audio, which a failed GIF recording does not take with it. Netflix's real playback and protected video are not covered by any automated suite, nor are preview availability and image quality on a signed-in title (see [capture research](../docs/netflix-screenshot-research.md)); `chrome-netflix-mining.mjs` runs the capture grant and the recording in a real Chrome on a fixture page. |
 | `note-editor` | The personal-dictionary pencil on term, kanji and missing-word views. |
-| `pitch-accent-colors`, `pitch-badges` | Pitch colours at 3:1 in every palette; Yomitan's pronunciation markup in the popup. |
-| `popup-scale`, `popup-theme`, `progressive-results` | Popup scale, AUTO appearance and progressively appended results. |
+| `pitch-accent-colors`, `pitch-badges` | Pitch colours at 3:1 in every palette; Yomitan's pronunciation markup in the popup, with every accent in the first and later entries whatever their frequency tags, each repeated accent drawn once. |
+| `popup-scale`, `popup-theme`, `progressive-results` | Popup scale, AUTO appearance, the host attributes of Design options and progressively appended results. |
+| `profiles` | The profile layer (docs/languages.md 4-6): every option record the other suites use projects as `normaliseOptions` did before profiles (`test/data/profiles-golden.json`), the one writer, masking, dictionary-state views, and the service worker's profile requests, language-scoped records, requests without a profile and lookup routing. |
 | `recommended-dictionaries`, `recommended-install-client`, `setup-installer`, `setup-state` | The catalogue as the single description of the recommended set, the installer's runs, the revisioned setup record and mining capabilities. |
 | `release-compatibility` | The manifest, minimum Chrome, current Chrome and release tag share one contract. |
 | `scan-delay-settings`, `sentence` | Scan delay controls; Yomitan's sentence boundaries. |
+| `search-bridge` | The search page's sandboxed frame (#644) and `search.html`: every request the content scripts' reader sends is forwarded and any other refused, of option writes only a Toggle option keybind's; only the reader's stored keys, without the AnkiConnect key, and its events reach the frame; the frame's debug records are measured and redacted again and update only its own; `search.html` connects only its own frame's first offer, gives the user's script only to a sandboxed frame and starts again when the frame navigates; the frame's scripts read and send only what is forwarded; and the frame offers its one port to the extension's origin alone, connects once, reports failures through `runtime.lastError` as Chrome's callbacks do, takes the Clipboard monitor's text from `search.html`, and keeps its own API when Firefox 153 does not sandbox it; the frame's history requests (add, list, edit and remove, nothing else), a line kept only while the history is on, with the limit and the window `search.html` names, and each change sent to the frame. |
+| `search-history` | The search page's line history (`search-history.js`), on `indexeddb-fake.mjs`: each line with its time, source and page, a repeat of the newest kept once, the newest lines up to the limit, lists from either side of a line, edits, removals, prunes and clears, and every change heard by every open page. |
+| `search-lines` | The searched text's cursor (`search-lines.js`), the port of Rubi's `core/text_rows.c`, on cases from Rubi's `test_text_rows.c` in UTF-16 units: rows and columns, reading order across rows, a one-row text's ends, Japanese-only stops, Right past the matched word and Left back over up to 16 Rights. |
+| `search-clipboard` | The search page's clipboard monitor (#639), Yomitan's polling: the first read is where it starts, each new text is reported once and trimmed, failures and blanks report nothing, a read that ends after `stop()` is dropped, and a long copy is searched from its first 1,000 characters after its leading spaces. |
+| `search-templates` | The search page's Anki Template switch (#656): a choice moves its Template first and keeps the others' order and the AnkiConnect address and key, as Set built-in does, and is a valid options write; the list is sorted by name, so it stays put as a choice moves its Template first, under its heading, with the built-in Template chosen, and only with more than one; `search.html`'s switch writes again after a conflict, saves only the last choice made while one is saved, shows the stored Template again after a failed write, and writes nothing for the Template already first. |
+| `search-window` | Opening the search page (#610) as Yomitan does: a new tab, the current tab or a popup window, bringing an open search page forward and reusing only a popup window for the popup window shortcut, which opens at the size Reading → Search page sets (#656). |
 | `settings-dom`, `settings-labels`, `settings-search` | Settings live regions, unique visible labels and keybind label polarity, global search. |
 | `sharing-protocol`, `sharing-client`, `sharing-host`, `sharing-settings` | The sharing wire contract, link generations, retired relay clients and Settings → Sharing. The relay's own checks live in [hachidori-anki](https://github.com/bee-san/hachidori-anki#develop-and-test). |
-| `theme-renderer` | The popup theme renderers (Nazeka, Plain, JL, Bee): their DOM, actions, tabs, Notes and the Design settings each theme declares. |
-| `toolbar` | The toolbar toggle and its revision conflicts. |
+| `sharing-profiles` | Sharing with language profiles (docs/languages.md 17.3-17.6) through the worker's own sharing code, an in-memory relay and older and profile-aware linked browsers: today's frames for a single-profile host, the opt-in and its refusals, the Japanese view in hellos, change frames and replies, forced reconnections with requests in flight, profile requests through a link, unlink and overlay mode with profiles, and the allowlists' `profileId`. |
+| `theme-renderer` | The popup theme renderers (Nazeka, Plain, JL, Bee, Crystal): their DOM, actions, tabs, Notes, the Design settings each theme declares and the colour variants it lists. |
+| `toolbar` | The toolbar toggle and its revision conflicts; Search beside Settings and Reading's switch for it. |
 | `word-highlights`, `word-status-overrides` | Word highlighting with jsdom and a fake engine (#520), and the Mark as known/Ignore record. |
-| `yomitan-parity` | The renderer against Yomitan's own output at 67db60d, written inline. |
+| `yomitan-parity` | The renderer against Yomitan's own output at 67db60d (each card's dictionary tag at d3c54c1), written inline. |
 
 `anki_note_type_upstream_test.py` is the one Python test. The Anki note-type
 compatibility workflow runs it with
@@ -242,14 +264,24 @@ pinned/latest package commands and the schema-only boundary.
   (`HACHIDORI_WASM_VARIANT=fallback`) on plain MEMFS: import counts, the mmap
   regression, all four kinds, lookups by structure and value, kanji, styles,
   tags, media, error paths, reset, import staging, every on-disk layout,
-  interrupted-install recovery, dictionary-scoped lookups, response and media
-  bounds, MDX import, definition order, `hdw_segment` against
+  interrupted-install recovery, dictionary-scoped lookups, words that only
+  frequency and pitch dictionaries have (`metadataOnlyTerms`, #620, #658),
+  response and media bounds, MDX import, definition order, `hdw_segment` against
   `segmentation-reference.mjs`, and the Yomitan conjugation rules through the
   importer: historical kana, emphatic negatives, one-character stems,
   whole-word honorifics, kanji variants and excluded spellings (the engine's
   own test runs Yomitan's full corpus natively). Exits 0 on success, 1 on a
   failed check, 2 when the wasm module has not been built. See
   [node-smoke details](#node-smoke-details).
+- **`node-smoke-languages.mjs`** drives the language ABI (docs/languages.md 9,
+  engine contract 10.4) on the same three bundles with the fixture packs of
+  `test/data/languages/` and the English and Arabic dictionaries of
+  `make-language-fixtures.mjs`: Japanese requests without language keys answer
+  with the bytes of the build before the ABI (`test/data/languages-japanese-replies.json`),
+  `hdw_language_load`, `hdw_languages`, `hdw_deinflect`, lookups with
+  `language` and `dictionaries` (an empty list finds nothing; a selection
+  answers as if only it were loaded), `hdw_kanji_with_options` and
+  segmentation per language.
 - **`threaded-bridge-smoke.mjs`** imports the real offscreen bridge with
   controlled worker and fallback endpoints (through Node 22.15's
   `module.registerHooks`): the 128-request admission bound, responsive status,
@@ -294,7 +326,7 @@ wasm module or the fixtures are missing.
 | `recommended.mjs` | The five trusted recommendations, the shared dictionary-group module, and the Settings installer. |
 | `settings.mjs`, `library.mjs` | Settings navigation, reader controls and autosave; library management, groups, removal, batch imports that wait for a busy engine, retry and cancel, and MDX imports. |
 | `startup.mjs`, `design.mjs`, `source-highlight.mjs` | The startup page (welcome, installer runs, recovery, practice, visual novel scenes), the Design preview, source highlighting. |
-| `content.mjs`, `content-harness.mjs`, `content-*.mjs` | The real `content.js`, with `content-dictionaries.js` and `content-scan.js`, in jsdom pages: stale kanji replies; popup visibility, fullscreen hosts, failures and option revisions; lookup counts and blur; scanning and selections; activation, scan delays and keybinds; nested popups and media; Notes. |
+| `content.mjs`, `content-harness.mjs`, `content-*.mjs` | The real `content.js`, with `content-dictionaries.js` and `content-scan.js`, in jsdom pages: stale kanji replies; popup visibility, fullscreen hosts, failures and option revisions; the popup's closed shadow root, with Custom JavaScript's bridge or without it and for a lookup that starts before the stored options arrive (#645), and the open one the search page's frame gives saved Custom JavaScript (#644); lookup counts; blur, which a first result without definitions never takes (#620); scanning and selections; activation, scan delays and keybinds; nested popups and media; Notes; the search page's docked results, looked up again when a lookup option such as #620's changes, its click lookups on the query and in the results (#656), and a search from the searched text's cursor resolving to the length its result matched (`content-search.mjs`). |
 | `engine.mjs` → `engine-replacement.mjs` → `engine-updates.mjs` → `engine-library.mjs` → `engine-lookup.mjs` → `renderer.mjs` → `engine-restart.mjs` → `engine-storage.mjs` | One scenario on one engine: boot and relay, storage ownership and `hd_import`, atomic replacement, trusted recommended imports and managed updates, library state (migration, CAS ownership, titles, reloads), every read path and error path, the renderer against the engine's replies, `hd_remove`, the trained layout, a restart, then isolated imports, paged dictionaries and blob-backed IDBFS. |
 
 The fakes cover only the Chrome surface the extension actually touches:
@@ -348,8 +380,8 @@ the extension_pages CSP permits compiling the wasm in the offscreen document,
 that `chrome.offscreen` and `chrome.runtime.getContexts` behave as assumed, that
 OPFS survives a browser restart, and that a real `caretRangeFromPoint` hover
 produces a rendered popup. `test/run.mjs chrome-e2e` also runs
-`chrome-popup-scale.mjs` (fractional popup scale, real pointer hit testing) and
-`chrome-bulk-import.mjs` (below).
+`chrome-clipboard-monitor.mjs`, `chrome-popup-scale.mjs` (fractional popup scale,
+real pointer hit testing) and `chrome-bulk-import.mjs` (below).
 
 Its steps run in this order, in one profile:
 
@@ -364,11 +396,12 @@ Its steps run in this order, in one profile:
 | `import.mjs` | The `.zip` input, import into OPFS and storage, batch import and re-import, the dictionary row. |
 | `library.mjs` | Settings navigation and keyboard access, the Google Docs flag, popup themes and the first frame, positions, bulk updates, reordering, aliases, groups, kanji choices. |
 | `custom-dictionary.mjs` | Settings saves a personal source through the real importer. |
-| `reader.mjs` | The reading tab: popup resizing, hit testing, multiline placement, zoom, glyph boxes, wheels, the first inflected-verb popup. |
+| `reader.mjs` | The reading tab: popup resizing, hit testing, multiline placement, zoom, glyph boxes, wheels, the first inflected-verb popup, and Dark Reader isolation in a tab of its own. |
 | `counts.mjs` | Lookup counts, definition blur, Anki maturity blur, word highlighting. |
 | `popup.mjs`, `nested.mjs`, `tabs.mjs`, `layout.mjs` | Frames and fullscreen, staying in place, tab switches, deinflection, cards, links, furigana; nested lookups; dictionary tabs, columns and kanji groups; compact summaries, glossaries, tables, the action row, dynamic headwords, count layout, the audio chooser. |
-| `activation.mjs`, `metadata.mjs`, `anki.mjs` | Activation keys and selections, the source-highlight fallback; frequency direction, metadata, popup audio; mining to a fake AnkiConnect. |
-| `kanji.mjs`, `popup-content.mjs`, `notes.mjs` | Clicked-kanji navigation; the hover highlight, Escape, structured content, non-Japanese text, Note drafts; term and kanji Notes. |
+| `activation.mjs`, `metadata.mjs`, `anki.mjs` | Activation keys and selections, the source-highlight fallback; frequency direction, metadata, a later entry's pitch accents after twelve frequency tags, a word that only frequency and pitch dictionaries have shown first without definitions only while Reading → Results asks for it (#620), and a reading only they have after the word a dictionary defines (#658), popup audio; mining to a fake AnkiConnect. |
+| `kanji.mjs`, `popup-content.mjs`, `notes.mjs` | Clicked-kanji navigation, Back and Forward on Alt+B and Alt+F; the hover highlight, Escape, structured content, non-Japanese text, Note drafts; term and kanji Notes. |
+| `search.mjs` | The search page (#610): its shortcuts, the toolbar's Search and Reading's switch for it, the popup window at the size Reading → Search page sets (#656), its Clipboard monitor off by default with nothing read from the clipboard (#639), real results docked under the box through clicks and Escape, typing and pasting, a miss, and live theme changes; Look up words with a click (#656), off by default, then a click on a word of the query or of the results, and a drag that selects; the Anki Template switch (#656), hidden with one Template, over the frame's invisible copy, chosen by key and by pointer; Custom JavaScript there (#644), which runs only once Allow User Scripts is on and reaches the docked result. |
 | `updates.mjs` | Managed updates: scoped checks, Check now, Update all, the global and per-dictionary schedules, real alarms, a failed update, hovering through an update, alarm recreation after a worker restart. |
 | `restart.mjs` | Backups and atomic replacement in Chrome, then `SIGKILL` and a relaunch on the same profile: settings, counts, setup, the library, OPFS and lookups survive; removal. |
 | `memory.mjs`, `media.mjs`, `file-access.mjs` | Low memory mode, the RAM default, entry and hash storage; lookup bounds, deep structured content and dictionary media; saved-page setup with Chrome's file access. |
@@ -424,7 +457,7 @@ state; the scheduled-update cases create real near-future Chrome alarms.
   `dictionaryCount === 4` (every kind the combined fixture registers), and
   index and archive request counts for managed updates.
 
-The popup's shadow root is closed, and puppeteer's `pierce/` selectors find
+The normal popup's shadow root is closed, and puppeteer's `pierce/` selectors find
 nothing in it; CDP's `DOM.getDocument` with `pierce: true` does, so
 `popupReader()` goes through a session. The headword is furigana ruby, so
 `textContent` reads `食たべる`; `popupReader()` also returns a `plain` copy without
@@ -449,6 +482,73 @@ disables a command-line extension when it reloads).
 
 These run separately:
 
+- **`chrome-backup-release.mjs`** (`node test/run.mjs chrome-backup-release`)
+  restores a backup the previous release exported. It downloads that release's
+  Chrome ZIP into `test/tmp/releases/<version>/`, checks it against the
+  release's `SHA256SUMS` line and the SHA-256 pinned in the file, and unpacks it
+  with the vendored zip.js. In a fresh profile the released build imports five
+  dictionaries (the combined fixture, a rank-based frequency-only list with an
+  update source, a sorting dictionary, the generic kanji and the trained
+  fixtures), aliases, disables, favourites, reorders and groups them, saves a
+  personal source, checks for updates, sets the default and a per-dictionary
+  schedule, changes Reading, Design, Audio, Anki, keybind, backup and
+  experimental settings, counts lookups, marks a word known and one ignored, and
+  exports through a real Chrome download. This checkout restores that file
+  through Settings in a fresh profile: every item must come back equal, or
+  differ only by a documented rule the check asserts (switches restore by name,
+  a promoted switch becomes its setting, a newer setting keeps its default, a
+  keybind list without a search page row gains that page's default rows), and
+  work in real popups, mining through a fake AnkiConnect. It then saves the
+  newest blur Reveal choice its Settings offer, exports, and restores that
+  backup in another fresh profile, checking the same items. Last, a fresh
+  Firefox profile with the Firefox build (see [Firefox suites](#firefox-suites))
+  restores the released backup through Settings with the same record and
+  Settings checks, and its engine answers lookups from the restored
+  dictionaries; the Firefox popup itself is `firefox-e2e.mjs`'s. It downloads a
+  GitHub release, so it is not in the pull-request CI matrix: run it before a
+  release PR, and move its pinned release to each new one.
+- **`chrome-clipboard-monitor.mjs`** (run by `test/run.mjs chrome-e2e`, #639)
+  copies text in another tab of a copy of the extension that holds
+  `clipboardRead` from the start, since headless Chrome cannot answer the
+  permission prompt. The search page, without focus, must search Japanese text
+  with its real result through the worker and the offscreen document, and must
+  not search what was on the clipboard before, text without Japanese, its own
+  copies and cuts or a copy made while a Note is written; a 300,000-character
+  copy must be searched, and read, as its first 1,000 characters; Settings must
+  not be able to read the clipboard. Only text the reader would search may reach
+  the search page's frame, where Custom JavaScript runs; a click on the switch
+  must leave the reader's keybinds working (Alt+P plays the result), a click on
+  the focused switch must leave focus on it, and a 120 ms touch tap must hand
+  focus back like a click (#644).
+  `HACHIDORI_SEARCH_SCREENSHOTS=DIR` saves the page in four palettes. The
+  switch's request for the permission and turning it off are tested in Firefox,
+  whose test profile grants optional permissions without a prompt; no suite
+  shows the prompt.
+- **`chrome-search-history.mjs`** (run by `test/run.mjs chrome-e2e`) is the
+  [search history](../docs/search-history.md) in a copy of the extension that
+  holds `clipboardRead`: off by default the page keeps nothing and is as it
+  was; switched on, lines typed, pasted and copied in another tab are kept
+  with their source and window and a repeat of the newest once; Up and Down in
+  the box walk them and bring the draft back, and leave a selection and the
+  box's lower lines to the box; in the searched text Left and Right move the
+  cursor by the matched word and retrace, a one-row text goes round for a
+  fresh press only, a clicked word takes the cursor (Look up words with a
+  click) while a click on a comma or the cursor's own character looks nothing
+  up again, Up and Down move between a long line's rows keeping the
+  column, also in a narrower box, and past its top row through every earlier
+  line, whose neighbours' rows are smaller and keep 4.5:1 in every palette,
+  and dimmer than the searched text in every palette with room; each word is
+  read out from a live region, alone once its lookup answers, only while
+  the searched text has focus, and on a click only for the word it moves to; Enter adds the word to a fake
+  AnkiConnect with its earlier line as the sentence; the keys follow a rebound
+  keybind and leave other controls alone; the history's switch, which ends a
+  visit, and a walk in the box on its draft, when turned off; a second page in
+  the popup window; Settings → Advanced's count, lowered limit (a refused save
+  deletes nothing) and Clear history, whose status stays off Reading's rail
+  link; and `HDSearchHistory`, which lists, edits and removes lines, tells of
+  each change, pauses the Clipboard monitor's text and looks a word up.
+  `HACHIDORI_SEARCH_SCREENSHOTS=DIR` saves an earlier line's visit in four
+  palettes and forced colours.
 - **`chrome-bulk-import.mjs`** (run by `test/run.mjs chrome-e2e`, #578)
   imports a batch of 50 archives from Settings on a fresh profile, five of them
   100,000-row frequency lists, while a second Settings page sends imports at
@@ -472,6 +572,50 @@ These run separately:
   non-loopback address and the pinned GitHub release, or
   `HACHIDORI_ANKI_ADDON=/path/to/hachidori-relay.ankiaddon` to serve a local
   archive instead.
+- **`chrome-languages/backup.mjs`** and **`chrome-languages/sharing.mjs`**, run by
+  `node test/run.mjs chrome-languages` after `chrome-languages.mjs`, cover
+  backups and sharing with language profiles (docs/languages.md 18). The
+  first exports a version 4 backup with Japanese and English, restores it
+  through Settings in a fresh profile, in a build without the English pack
+  and in the released build that `chrome-backup-release.mjs` pins, and
+  restores an automatic snapshot. The second runs a host, the released build
+  as an older linked browser and three profile-aware builds through the
+  pinned relay (`HACHIDORI_LANGUAGES_SHARING_PORT`, default 18773): a host
+  that gains profiles while both kinds are linked, refusals for a missing
+  pack and for a language held only through data, a write in flight across
+  an add, unlink with the browser's own English data, and an English-only
+  host. Both build their extension copies with
+  `chrome-languages/builds.mjs`; the sharing suite needs `python3` and the
+  relay from `HACHIDORI_RELAY_SERVER`, `HACHIDORI_ANKI_ADDON` or the pinned
+  release.
+- **`chrome-language-pack.mjs`** (`node test/run.mjs chrome-language-pack`)
+  checks one language pack of `extension/vendor/languages/` with a real
+  dictionary: the check each language's pack passes before it merges. It is
+  not in CI, because it needs the dictionary. In a fresh profile Settings
+  adds the language (`HACHIDORI_LANGUAGE`) beside Japanese and imports the
+  dictionary (`HACHIDORI_DICTIONARY`, any Yomitan .zip) into it. Each case of
+  `HACHIDORI_CASES` (`sentence<TAB>word<TAB>expected headword`, by default the
+  pack's practice sample) is a page in the language, hovered where the pack's
+  scan starts; the first result's headword must be the expected one. The
+  first result is added to a fake AnkiConnect, and the toolbar switches to
+  Japanese and back. It prints one JSON summary line and saves screenshots of
+  the language dialog, the switcher and the first lookup. Its header lists
+  the inputs; `test/data/language-pack/` has the English, Arabic and Japanese
+  cases it was proved with (for kaikki-to-yomitan's dictionaries and
+  Jitendex).
+- **`chrome-dark-reader.mjs`**, called by the primary Chrome suite, runs the pinned
+  Dark Reader API build against the production popup in a tab of its own. It
+  checks Default, Light, Dark, High contrast and Custom CSS while the page
+  actually darkens. It then allows Hachidori's user scripts (the Allow User
+  Scripts switch from Chrome 138, developer mode before it), saves a Custom
+  JavaScript that marks the popup through `host.shadowRoot`, reloads, and checks
+  the same with Automatic colours under a dark preference, the root still
+  closed to the page (#645). Before/after PNGs go to `test/tmp/ci/dark-reader-*.png`.
+  `chrome-popup-root.mjs` reads closed roots through CDP without exposing them
+  to page scripts; its `exposePopupRoot` hands the root to the page's own code
+  for the benchmarks and the promo capture, then detaches. The API build
+  exercises Dynamic mode; Filter modes and the installed Dark Reader extension
+  UI are outside this check.
 - **`chrome-theme-contrast.mjs`** samples a monochrome and an untagged SVG in
   every palette plus emulated forced colors (3:1 normally, 20:1 forced) and the
   word-highlight lines on light and dark pages; `test/tmp/ci/theme-contrast.png`
@@ -512,8 +656,9 @@ These run separately:
 - **`chrome-theme-store.mjs`** is a focused theme-store check; `electron-backup.cjs`
   is a real-Electron overlay backup regression (see its header).
 - `chrome-action-row`, `chrome-audio-chooser`, `chrome-compact-summary`,
-  `chrome-dynamic-headword`, `chrome-glossary-layout`, `chrome-lookup-count-layout`,
-  `chrome-structured-table`, `chrome-popup-resize`, `chrome-library-navigation`,
+  `chrome-dynamic-headword`, `chrome-glossary-layout`, `chrome-headword-pitch`,
+  `chrome-lookup-count-layout`, `chrome-structured-table`, `chrome-popup-resize`,
+  `chrome-library-navigation`,
   `chrome-settings-first-frame`, `chrome-settings-feedback-scenarios`,
   `chrome-dictionary-management-scenarios`, `chrome-dictionary-rank-scenarios` and
   `chrome-backup-scenarios.mjs` are scenarios `chrome-e2e.mjs` calls; each
@@ -522,6 +667,75 @@ These run separately:
   `capture-resources.mjs` and `gif-structure.mjs` are shared helpers;
   `settings-modules.mjs` lists the Settings page's own modules, which the
   jsdom Settings tests and the smoke loader evaluate as one script.
+
+### Firefox suites
+
+The Firefox build (`scripts/build-firefox.py`, written to
+`test/tmp/firefox-extension` by the launcher) runs in a real Firefox through
+Puppeteer's WebDriver BiDi, installed as a temporary add-on.
+`HACHIDORI_FIREFOX` overrides the browser, `HACHIDORI_FIREFOX_BUILD` selects
+another `@puppeteer/browsers` Firefox build (`stable_153.0` is the manifest
+minimum), `HACHIDORI_FIREFOX_EXTENSION` tests another unpacked build, such as an
+extracted release ZIP, and `HACHIDORI_FIREFOX_PROFILE` keeps the profile.
+
+- **`firefox-lint`** runs `web-ext lint`, addons.mozilla.org's validator, on the
+  Firefox build: no errors, and the five warnings
+  [docs/firefox.md](../docs/firefox.md#packaging-and-addonsmozillaorg) explains.
+- **`firefox-manifest.test.mjs`** (in `npm --prefix test/tooling test`) pins the
+  derived manifest, the background page, the keep-alive interval and
+  `build-firefox.py`.
+- **`firefox-e2e.mjs`** uses the Chrome suite's fixed-denominator harness:
+  `E2E_PLANNED` in `test/firefox-e2e/harness.mjs` names every check. Its steps,
+  one file each in `test/firefox-e2e/` and in this order, run in one profile:
+
+  | file | what it proves |
+  | --- | --- |
+  | `install.mjs` | Firefox installs the build under its gecko ID, runs `background.js` in `background.html` with the engine in its frame, on the single-thread IDBFS engine, and opens one startup page. |
+  | `first-run.mjs` | Start setup downloads the five recommended archives (intercepted), one failing once and installed by Retry; an unreachable Anki; practice looks up its word; Finish; Remove all imported dictionaries. |
+  | `import.mjs` | Settings imports a Yomitan ZIP into IndexedDB, a batch with a malformed archive, a replacing re-import; an alias, disabling and a group. |
+  | `reader.mjs` | Shift-hover lookups, deinflection, furigana, the source highlight, frequency and pitch, structured content, its image and the dictionary's `styles.css`, Latin text, Escape, a frame, a nested lookup, kanji and Back, Alt+ArrowDown, a selection, lookup counts, click-to-reveal blur, every registered popup theme, custom CSS and the toolbar switch. |
+  | `settings.mjs` | The Note form, autosave, the Design preview, keybinds, Firefox's shortcut manager, Custom JavaScript saved before Firefox grants the optional `userScripts` permission and run once it does, reaching the popup through `host.shadowRoot` while the page sees no root, Get debug info. |
+  | `search.mjs` | The popup window opens one search page, at the size Reading → Search page sets (#656), and brings it forward on a second request; a typed word's lookup docks under the search box; the Clipboard monitor switch grants and gives back `clipboardRead`, a click on it hands focus back to the page, and Japanese copied to Firefox's clipboard is searched while it is on and not once it is off (#639); Custom JavaScript runs there from Firefox 154 and reaches the docked result (#644); a click on a word of the query shows its results with Look up words with a click on, and the Anki Template switch's choice becomes the built-in Template (#656); the search history keeps typed lines, Up and Down in the box walk them back to the draft, Right moves the searched text's cursor and looks the next word up, Up past its top row shows the earlier line between its neighbours, and `HDSearchHistory` lists the lines, edits one and looks a word up. |
+  | `anki.mjs` | URL pronunciation playback; Anki discovery, Add to Anki with a page screenshot and View in Anki against a fake AnkiConnect on the page server; word highlighting. |
+  | `backup.mjs` | Check now and Update against a local HTTPS update server; Export backup asking where to save and saving through Firefox's downloads; restoring the 0.1.1 and 0.3.0 Chrome backups in `test/data/backups/`; restoring the Firefox backup in a fresh profile. |
+  | `sharing.mjs` | Settings downloads the pinned relay, which runs from that archive; this Firefox shares through it and a second Firefox links and looks words up. |
+  | `restart.mjs` | The engine keeps its dictionaries past Firefox's 30-second idle limit with every tab closed; a restart on the same profile keeps the library, settings and counts; removal; Access local files in `about:addons` and a `file:` lookup. |
+
+  WebDriver BiDi does not report the background page's own requests and will
+  not set files or activate a tab in an extension page. So the catalogue
+  archives are intercepted (the engine's worker requests are reported), the
+  update index comes from a local HTTPS server under a test domain Firefox
+  resolves to this computer, AnkiConnect is a path on the page server, files
+  reach inputs through a `DataTransfer`, and extension pages activate their own
+  tab. Values cross into Firefox's pages as JSON text. Headless Firefox cannot
+  show a Save dialog, so the suite registers a stand-in file picker in
+  Firefox's parent process that saves to the downloads directory and records
+  each request. Firefox's mock audio backend (`media.cubeb.force_mock_context`)
+  plays pronunciation audio on hosts with no audio device.
+- **`firefox-languages.mjs`** (`node test/run.mjs firefox-languages`,
+  docs/languages.md 18) runs on `firefox-e2e`'s session and harness, with its
+  own plan of six checks, in a profile of its own. It tests a copy of the
+  Firefox build, written to `test/tmp/firefox-languages/` by the launcher with
+  `chrome-languages/builds.mjs`, whose registry holds Japanese and the English
+  and Arabic fixture packs of `test/data/languages/`, whatever packs the build
+  ships. The first run offers those packs and chooses English, Settings adds
+  Arabic, each profile imports its fixture dictionary
+  (`make-language-fixtures.mjs`), an English hover finds
+  *run* in *running*, the toolbar switches to Arabic and the badge reads `AR`,
+  and a hover on الكتاب on a right-to-left page finds كتاب in a popup that is
+  English and left to right, its deinflection trail reading the matched form
+  first. It serves its two reading pages itself and saves both lookups under
+  `test/tmp/languages/firefox/`.
+- Not covered in real Firefox: automatic backups, scheduled update runs, the
+  Theme Store, frequency sorting, compact summaries, custom buttons, browser
+  speech and local audio, firing a browser command, Google Docs, MDict import,
+  Netflix, Sharing between Firefox and Chrome, and upgrading in place from the
+  unsigned 0.1.5 and 0.1.6 MV2 builds, which used the same add-on ID. Their
+  code is the code the Chrome suites run.
+- **`firefox-large.mjs`** imports the archive `benchmark/pixiv-full.json` pins
+  from `HACHIDORI_BENCH_DATA` (SHA-256 checked) through Settings, runs the
+  benchmark's queries, hovers it, restarts Firefox and queries again, and writes
+  its timings to `test/tmp/ci/firefox-large.json`.
 
 ### The fixture
 
@@ -626,8 +840,10 @@ compiler. Nothing else needs a native compiler.
 | `HACHIDORI_WASM_VARIANT` | `threaded-idbfs` or `fallback` for `node-smoke.mjs` |
 | `HACHIDORI_SHARING_PORT`, `HACHIDORI_ANKI_ADDON`, `HACHIDORI_RELAY_SERVER` | the sharing relay's port, a local add-on archive, the relay server script to run |
 | `HACHIDORI_ANKI_URL`, `HACHIDORI_CUSTOM_BUTTONS_*` | the real-Anki custom-buttons harness |
+| `HACHIDORI_LANGUAGE`, `HACHIDORI_DICTIONARY`, `HACHIDORI_CASES`, `HACHIDORI_SCREENSHOTS` | `chrome-language-pack.mjs`: the pack's code, the dictionary .zip, the cases file and the screenshot directory (default `test/tmp/language-pack/<code>/`) |
 | `HACHIDORI_AUTOMATIC_BACKUP_BENCHMARK`, `HACHIDORI_AUTOMATIC_BACKUP_BROWSER_BENCHMARK`, `HACHIDORI_SHARING_BENCHMARK` | write benchmark evidence to that path |
 | `HACHIDORI_BACKUP_BASELINE=HEAD` | `electron-backup.cjs` against the original Settings files |
+| `HACHIDORI_BACKUP_RELEASE`, `HACHIDORI_BACKUP_RELEASE_ZIP` | `chrome-backup-release.mjs`: another release as `"<version> <12-digit commit> <SHA-256 of its Chrome ZIP>"`, and a local copy of that ZIP, with the release's `SHA256SUMS` file beside it, for an offline run |
 | `HACHIDORI_*_SCREENSHOT`, `HACHIDORI_*_SCREENSHOTS`, `HACHIDORI_*_EVIDENCE`, `HACHIDORI_*_FILMSTRIP`, `HACHIDORI_THEME_OUTPUT` | an output path (or directory): the test that renders that state saves its PNG or JSON there. `grep -rn 'process.env.HACHIDORI_' test/` lists them; the launcher sets `HACHIDORI_DEINFLECTION_SCREENSHOT`, `HACHIDORI_SETTINGS_THEME_FILMSTRIP` and `HACHIDORI_SHARING_SCREENSHOTS` under `test/tmp/ci`. |
 
 ## Notes

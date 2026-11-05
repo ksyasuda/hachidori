@@ -644,6 +644,157 @@ async function definitionBlurCase() {
   return outcomes;
 }
 
+// On click only (#598): neither hover nor time reveals. A click, or Enter or
+// Space on the definitions, which are a labelled button only while blurred, does.
+async function clickRevealCase() {
+  const outcomes = {};
+  const options = { showLookupCounts: true, definitionBlurCountEnabled: true, definitionBlurDirection: "atLeast",
+    definitionBlurThreshold: 1, definitionBlurReveal: "click", definitionBlurDelayMs: 1000, audioAutoplay: true };
+  const harness = await createHarness(null, { holdLookupStats: true, options });
+  const window = harness.popup.ownerDocument.defaultView;
+  const plays = () => harness.sent.filter(request => request.type === "hd_audio_play").length;
+  const definitions = () => harness.popup.querySelector(".gsm-hoshidicts-definitions");
+  const isButton = element => element.getAttribute("role") === "button" && element.tabIndex === 0
+    && element.getAttribute("aria-label") === "Reveal definitions";
+  const isPlain = element => !element.hasAttribute("role") && !element.hasAttribute("aria-label");
+  const blurredLookup = async (expression, count) => {
+    const operation = harness.driver.runLookup(harness.candidate);
+    harness.reply(harness.take("hd_lookup"), { dictionaryCount: 1, results: [harness.term(expression)] });
+    await operation;
+    const recorded = harness.take("hd_lookup_stats_record");
+    harness.reply(recorded, { descriptor: { generation: "statistics", revision: count },
+      statistics: { term: recorded.request.term, reading: recorded.request.reading, lookupCount: count } });
+    await harness.settle();
+    return harness.blurState() === "blurred" && isButton(definitions());
+  };
+  try {
+    const blurred = await blurredLookup("一回", 1);
+    // Hit testing is where a definition scan starts; count it.
+    let caretCalls = 0;
+    window.document.caretPositionFromPoint = () => { caretCalls += 1; return null; };
+    const unscanned = harness.driver.resolveDefinitionCandidate(1, 1) === null && caretCalls === 0;
+    harness.hoverDefinitions();
+    await new Promise(done => setTimeout(done, 1300));
+    const kept = harness.blurState() === "blurred" && plays() === 0;
+    const click = new window.MouseEvent("click", { bubbles: true, cancelable: true });
+    definitions().dispatchEvent(click);
+    outcomes["click reveal ignores hover and the delay, and a click reveals once and plays the held result"] =
+      blurred && kept && click.defaultPrevented && harness.blurState() === "revealed" && plays() === 1
+      && isPlain(definitions()) && !definitions().hasAttribute("tabindex");
+    harness.driver.resolveDefinitionCandidate(1, 1);
+    outcomes["words in definitions blurred until clicked are not scanned until the reveal"] =
+      unscanned && caretCalls === 1;
+
+    const keyboard = [];
+    for (const [index, key] of ["Enter", " "].entries()) {
+      const ready = await blurredLookup(`鍵${index}`, 2 + index);
+      const control = definitions();
+      control.focus();
+      const press = new window.KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+      control.dispatchEvent(press);
+      keyboard.push(ready && press.defaultPrevented && harness.blurState() === "revealed" && isPlain(control)
+        && control.getRootNode().activeElement === control && control.getAttribute("tabindex") === "-1");
+    }
+    outcomes["Enter and Space on the focused blurred definitions reveal them and keep focus"] =
+      keyboard.every(Boolean) && plays() === 3;
+
+    const switched = await blurredLookup("切替", 4);
+    harness.emitOptions({ ...options, definitionBlurReveal: "hover" });
+    const plain = harness.blurState() === "blurred" && isPlain(definitions());
+    harness.hoverDefinitions();
+    outcomes["switching to hover reveal removes the button and hover reveals again"] =
+      switched && plain && harness.blurState() === "revealed";
+  } finally { harness.close(); }
+
+  // A frequency match is blurred before the view renders, so only the render's
+  // own sync can make the new definitions the button.
+  const frequency = await createHarness(null, { options: { showLookupCounts: false, definitionBlurFrequencyEnabled: true,
+    definitionBlurFrequencyDictionary: "Rank", definitionBlurFrequencyOrder: "auto", definitionBlurFrequencyThreshold: 120,
+    definitionBlurReveal: "click" } });
+  try {
+    frequency.emitState({ schemaVersion: 1, revision: 2, dictionaries: [genericPackage({ favorite: true }),
+      genericPackage({ id: "rank", title: "Rank", termCount: 0, frequencyCount: 1, frequencyMode: "rank-based" })] });
+    const operation = frequency.driver.runLookup(frequency.candidate);
+    frequency.reply(frequency.take("hd_lookup"), { dictionaryCount: 2, results: [frequency.term("順位", "Generic",
+      [{ dictionary: "Rank", frequencies: [{ value: 120, displayValue: "120" }] }])] });
+    await operation;
+    const control = frequency.popup.querySelector(".gsm-hoshidicts-definitions");
+    outcomes["definitions blurred before they render are the labelled button and their content is inert"] =
+      frequency.blurState() === "blurred" && isButton(control) && control.children.length > 0
+      && [...control.children].every(child => child.hasAttribute("inert"));
+  } finally { frequency.close(); }
+  return outcomes;
+}
+
+// #620: a word that only frequency and pitch dictionaries have arrives without
+// glossaries. Lookups ask for such words only while the option is on, and a
+// first result without definitions has nothing for definition blur to hide.
+async function metadataOnlyResultsCase() {
+  const outcomes = {};
+  // The harness's own lookup options are repeated, so that only the new
+  // option changes when it is turned on.
+  const options = { frequencyDictionary: "Frequency A", frequencyOrder: "descending", maxResults: 7, scanLength: 9,
+    lookupMode: "hover", showLookupCounts: false, definitionBlurFrequencyEnabled: true, definitionBlurFrequencyDictionary: "Rank",
+    definitionBlurFrequencyOrder: "auto", definitionBlurFrequencyThreshold: 120, definitionBlurReveal: "click",
+    audioAutoplay: true };
+  const harness = await createHarness(null, { options });
+  const plays = () => harness.sent.filter(request => request.type === "hd_audio_play").length;
+  const rank = [{ dictionary: "Rank", frequencies: [{ value: 120, displayValue: "120" }] }];
+  const defined = expression => harness.term(expression, "Generic", rank);
+  const metadataOnly = expression => ({ ...defined(expression), term: { ...defined(expression).term, glossaries: [] } });
+  const rendered = expression => harness.renders.some(render => render.results?.[0]?.term.expression === expression);
+  const lookup = async (results) => {
+    const operation = harness.driver.runLookup(harness.candidate);
+    const item = harness.take("hd_lookup");
+    harness.reply(item, { dictionaryCount: 2, results });
+    await operation;
+    return item;
+  };
+  try {
+    harness.emitState({ schemaVersion: 1, revision: 2, dictionaries: [genericPackage({ favorite: true }),
+      genericPackage({ id: "rank", title: "Rank", termCount: 0, frequencyCount: 1, frequencyMode: "rank-based" })] });
+    const operation = harness.driver.runLookup(harness.candidate);
+    const pending = harness.take("hd_lookup");
+    const off = pending?.request.options.metadataOnlyTerms;
+    harness.emitOptions({ ...options, showMetadataOnlyResults: true });
+    harness.reply(pending, { dictionaryCount: 2, results: [defined("古い答え")] });
+    await operation;
+    await harness.settle();
+    const on = await lookup([metadataOnly("東京タワー"), defined("東京")]);
+    outcomes["lookups ask for words without definitions only while the option is on, and turning it on retires a lookup on its way"] =
+      off === false && !rendered("古い答え") && on.request.options.metadataOnlyTerms === true;
+    outcomes["a first result without definitions is never blurred and plays at once, whatever follows it"] =
+      rendered("東京タワー") && harness.blurState() === "revealed" && plays() === 1;
+    await lookup([defined("東京"), metadataOnly("東京タワー")]);
+    outcomes["a defined first result is still blurred when a word without definitions follows it"] =
+      harness.blurState() === "blurred" && plays() === 1;
+  } finally { harness.close(); }
+  // JL, Bee's Theme and Plain draw only definitions and Crystal hides a result
+  // without any, so with them a lookup asks for words with definitions only, as
+  // with the option off. A page opens with
+  // each theme: jsdom cannot import the bundled renderers, so its theme host
+  // warns once while opening and keeps Default, and only what the lookup asks
+  // for matters here.
+  const asked = {};
+  const warn = console.warn;
+  console.warn = () => {};
+  try {
+    for (const popupTheme of ["jl", "bee", "plain", "nazeka", "crystal"]) {
+      const themed = await createHarness(null, { options: { ...options, showMetadataOnlyResults: true, popupTheme } });
+      try {
+        const operation = themed.driver.runLookup(themed.candidate);
+        const item = themed.take("hd_lookup");
+        asked[popupTheme] = item?.request.options.metadataOnlyTerms;
+        themed.reply(item, { dictionaryCount: 1, results: [themed.term("東京")] });
+        await operation;
+      } finally { themed.close(); }
+    }
+  } finally { console.warn = warn; }
+  outcomes["with JL, Bee's Theme, Plain or Crystal a lookup asks for words with definitions only"] = JSON.stringify(asked)
+    === JSON.stringify({ jl: false, bee: false, plain: false, nazeka: true, crystal: false });
+  return outcomes;
+}
+
 describe("content script: lookup counts and blur", () => {
   test("lookup statistics", async () => {
     const noteContent = await contentNoteStage({
@@ -657,7 +808,7 @@ describe("content script: lookup counts and blur", () => {
   test("definition blur", async () => {
     const noteContent = await contentNoteStage({
       definitionBlur: async () => ({ ...await definitionBlurCase(), ...await ankiMaturityBlurCase(),
-        ...await frequencyDefinitionBlurCase() }),
+        ...await frequencyDefinitionBlurCase(), ...await clickRevealCase(), ...await metadataOnlyResultsCase() }),
     });
     for (const [name, passed] of Object.entries(noteContent?.definitionBlur ?? {})) {
       check(name, passed === true, JSON.stringify(passed));

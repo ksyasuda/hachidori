@@ -1,6 +1,6 @@
 # Hachidori privacy policy
 
-Last updated: 14 October 2026.
+Last updated: 3 November 2026.
 
 Hachidori helps you read Japanese with local dictionaries and save selected
 study material to Anki. It is maintained by Autumn (Bee). For privacy questions
@@ -13,6 +13,26 @@ Surrounding text, the page title and the page address can be used in a note you
 choose to create.
 Dictionary lookup runs inside your browser. There is no Hachidori analytics,
 advertising or remote lookup service.
+
+The search page's **Clipboard monitor** is off until you switch it on, which
+asks the browser to let Hachidori read the clipboard. While it is on and a
+search page is open, Hachidori reads the clipboard four times a second and
+searches text you copy that contains Japanese, as if you had pasted it into the
+search page. Other clipboard text is read and discarded. Switching the monitor
+off gives the permission back. A copy it searches is a search like any other:
+it adds to your lookup counts, and a browser linked to another Hachidori looks
+it up there (see **Sharing between browsers** below).
+
+While Settings → Advanced → Search history is on (it is off until you switch
+it on), the search page keeps each line it searches, typed, pasted or read by
+the Clipboard monitor, with when and how it came in, so that Up can bring it
+back ([search history](search-history.md)). With the Clipboard monitor on, that is
+every text with Japanese you copy while a search page is open. The lines stay
+in this browser profile: they are not sent anywhere, linked browsers do not
+share them, and backups do not include them. The same Settings section turns
+this off (the lines already kept stay), sets how many lines are kept (10,000
+unless you change it) and has **Clear history**, which deletes them.
+Custom JavaScript you save can read and change them on the search page.
 
 Your browser profile stores imported dictionaries and their indexes, personal
 dictionary entries, preferences, dictionary update settings, local lookup
@@ -179,7 +199,8 @@ AnkiConnect server with the note. Audio that no field maps is discarded, and
 turning the switch off frees the kept audio and keeps no more. Where no GIF can
 be made, a `{gif}` field gets the ordinary page screenshot instead. Still
 pictures are otherwise taken only by the ordinary page screenshot above. A
-browser linked to another Hachidori does not record Netflix lines.
+browser linked to another Hachidori does not record Netflix lines, and neither
+does Firefox, which lets extensions neither record a tab nor read the sound.
 
 ## Backups, retention and deletion
 
@@ -212,7 +233,7 @@ separately; uninstalling Hachidori does not remove them.
 To help with bug reports, Hachidori keeps a debug log in this browser profile:
 warnings and errors from its own pages and background contexts, requests that
 failed, network requests that failed without a response, the error messages
-Settings, the startup page and the toolbar showed you, and the actions you took
+Settings, the startup page, the search page and the toolbar showed you, and the actions you took
 on those pages, recorded by name only (for example "click #backup-export",
 "change #import-file (1 files)" or "navigate #backup"; never what you typed or
 chose). Each entry has its time, the extension version and a random session
