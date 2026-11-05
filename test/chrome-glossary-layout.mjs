@@ -32,7 +32,10 @@ export async function checkCompactGlossaries(browser) {
   const page = await browser.newPage();
   try {
     await page.setViewport({ width: 900, height: 900 });
-    await page.emulateMediaFeatures([{ name: "prefers-reduced-motion", value: "reduce" }]);
+    // Chrome follows a Linux desktop's dark preference and darkens the empty
+    // page behind the translucent popup, which moves the contrast measured below.
+    await page.emulateMediaFeatures([{ name: "prefers-reduced-motion", value: "reduce" },
+      { name: "prefers-color-scheme", value: "light" }]);
     // Standards mode, as in the Design preview and most pages: quirks mode
     // drops a line box holding only preserved white space.
     await page.setContent('<!doctype html><meta charset="utf-8"><p>食べる</p><div id="host"></div>');
